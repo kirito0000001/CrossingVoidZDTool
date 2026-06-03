@@ -1,0 +1,22 @@
+# Build output
+bin/
+obj/
+AppPackages/
+
+# Visual Studio / Rider local state
+.vs/
+.idea/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Windows and editor noise
+Thumbs.db
+Desktop.ini
+*.tmp
+*.log
+
+# Local publish artifacts
+publish/
+artifacts/

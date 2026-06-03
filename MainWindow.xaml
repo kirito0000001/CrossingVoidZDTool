@@ -1,0 +1,220 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="CrossingVoidZDTool.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:local="using:CrossingVoidZDTool"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d"
+    Title="零境 ZD 角色制作工具箱">
+
+    <Window.SystemBackdrop>
+        <MicaBackdrop />
+    </Window.SystemBackdrop>
+
+    <Grid>
+        <Grid.RowDefinitions>
+            <RowDefinition Height="48" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border
+            x:Name="AppTitleBar"
+            Grid.Row="0"
+            Padding="18,0,170,0"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="0,0,0,1"
+            Background="{ThemeResource LayerFillColorDefaultBrush}">
+            <Grid ColumnSpacing="12">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="36" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border
+                    Width="32"
+                    Height="32"
+                    VerticalAlignment="Center"
+                    Background="{ThemeResource AccentFillColorDefaultBrush}"
+                    CornerRadius="7">
+                    <FontIcon
+                        FontSize="18"
+                        Foreground="{ThemeResource AccentTextFillColorPrimaryBrush}"
+                        Glyph="&#xE7BE;" />
+                </Border>
+                <StackPanel Grid.Column="1" VerticalAlignment="Center" Spacing="0">
+                    <TextBlock
+                        FontSize="18"
+                        FontWeight="SemiBold"
+                        Text="零境 ZD 角色制作工具箱"
+                        TextTrimming="CharacterEllipsis" />
+                    <TextBlock Style="{StaticResource SubtleTextStyle}" Text="角色动作帧、线稿、素材规范与 Unreal 对接" />
+                </StackPanel>
+            </Grid>
+        </Border>
+
+        <NavigationView
+            x:Name="ShellNavigation"
+            Grid.Row="1"
+            CompactPaneLength="64"
+            IsBackButtonVisible="Collapsed"
+            IsPaneOpen="False"
+            IsSettingsVisible="False"
+            OpenPaneLength="286"
+            PaneDisplayMode="LeftCompact"
+            SelectionFollowsFocus="Disabled">
+            <NavigationView.Resources>
+                <x:Double x:Key="NavigationViewItemOnLeftMinHeight">64</x:Double>
+            </NavigationView.Resources>
+            <NavigationView.MenuItems>
+                <NavigationViewItem Content="角色工作台" IsSelected="True" Tag="CharacterWorkbench">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Contact" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="动作帧" Tag="ActionFrames">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Pictures" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="线稿处理" Tag="LineArt">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Edit" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+                <NavigationViewItem Content="虚幻同步" Tag="UnrealSync">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Sync" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.MenuItems>
+            <NavigationView.FooterMenuItems>
+                <NavigationViewItem Content="整体设置" Tag="Settings">
+                    <NavigationViewItem.Icon>
+                        <SymbolIcon Symbol="Setting" />
+                    </NavigationViewItem.Icon>
+                </NavigationViewItem>
+            </NavigationView.FooterMenuItems>
+
+            <Grid Padding="20" RowSpacing="14">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <Grid ColumnSpacing="16">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <StackPanel Spacing="6">
+                        <TextBlock Style="{StaticResource PageTitleStyle}" Text="角色工作台" />
+                        <TextBlock
+                            Style="{StaticResource SubtleTextStyle}"
+                            Text="后续功能按角色、动作、帧处理和导出流程拆页；页面只负责显示和触发，实际规则放在 ViewModel 与 Service。" />
+                    </StackPanel>
+                    <Button
+                        Grid.Column="1"
+                        Style="{StaticResource IconToolButtonStyle}"
+                        ToolTipService.ToolTip="新建角色">
+                        <SymbolIcon Symbol="Add" />
+                    </Button>
+                    <Button
+                        Grid.Column="2"
+                        Style="{StaticResource IconToolButtonStyle}"
+                        ToolTipService.ToolTip="刷新工作区">
+                        <SymbolIcon Symbol="Refresh" />
+                    </Button>
+                </Grid>
+
+                <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto">
+                    <StackPanel Spacing="14">
+                        <Border Style="{StaticResource PanelBorderStyle}">
+                            <StackPanel Padding="18" Spacing="12">
+                                <Grid ColumnSpacing="10">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+                                    <StackPanel Spacing="4">
+                                        <TextBlock Style="{StaticResource SectionTitleStyle}" Text="制作流程" />
+                                        <TextBlock
+                                            Style="{StaticResource SubtleTextStyle}"
+                                            Text="把高频操作固定成少点按、强快捷键、清晰进度、可撤回的流水线。" />
+                                    </StackPanel>
+                                    <Button
+                                        Grid.Column="1"
+                                        Style="{StaticResource HelpIconButtonStyle}"
+                                        ToolTipService.ToolTip="查看使用规范">
+                                        <FontIcon FontSize="15" Glyph="&#xE11B;" />
+                                    </Button>
+                                </Grid>
+
+                                <Grid ColumnSpacing="12" RowSpacing="12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <Border Style="{StaticResource ToolCardStyle}">
+                                        <StackPanel Spacing="8">
+                                            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="动作帧整理" />
+                                            <TextBlock Style="{StaticResource SubtleTextStyle}" Text="导入截图序列、检查帧序、裁切角色区域、标记关键帧。" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="1" Style="{StaticResource ToolCardStyle}">
+                                        <StackPanel Spacing="8">
+                                            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="线稿辅助" />
+                                            <TextBlock Style="{StaticResource SubtleTextStyle}" Text="统一跑边线提取，保留原动作，不让 AI 重新设计角色。" />
+                                        </StackPanel>
+                                    </Border>
+                                    <Border Grid.Column="2" Style="{StaticResource ToolCardStyle}">
+                                        <StackPanel Spacing="8">
+                                            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="角色数据" />
+                                            <TextBlock Style="{StaticResource SubtleTextStyle}" Text="服装、表情、武器、特效和帧文件都以稳定编号保存。" />
+                                        </StackPanel>
+                                    </Border>
+                                </Grid>
+                            </StackPanel>
+                        </Border>
+
+                        <Border Style="{StaticResource ToolbarBorderStyle}">
+                            <StackPanel Spacing="10">
+                                <TextBlock Style="{StaticResource SectionTitleStyle}" Text="页面实现约定" />
+                                <TextBlock Style="{StaticResource SubtleTextStyle}" Text="新增页面先建 ViewModel，再建 Service，最后补 XAML；不要把文件扫描、导出、索引修复等逻辑写进 MainWindow.xaml.cs。" />
+                                <Border Style="{StaticResource CodeBlockBorderStyle}">
+                                    <ScrollViewer HorizontalScrollBarVisibility="Auto">
+                                        <TextBlock
+                                            Style="{StaticResource CodeBlockTextStyle}"
+                                            Text="Views: UI factory and reusable controls&#x0a;ViewModels: state, commands, validation&#x0a;Services: filesystem, image processing, Unreal sync, import/export&#x0a;Models: serialized data contracts and immutable summaries" />
+                                    </ScrollViewer>
+                                </Border>
+                            </StackPanel>
+                        </Border>
+                    </StackPanel>
+                </ScrollViewer>
+
+                <Border Grid.Row="2" Style="{StaticResource PanelBorderStyle}">
+                    <Grid Padding="14,10" ColumnSpacing="16">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="220" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            VerticalAlignment="Center"
+                            Style="{StaticResource SubtleTextStyle}"
+                            Text="就绪：等待接入第一个角色制作模块。" />
+                        <ProgressBar
+                            Grid.Column="1"
+                            VerticalAlignment="Center"
+                            IsIndeterminate="False"
+                            Value="0" />
+                    </Grid>
+                </Border>
+            </Grid>
+        </NavigationView>
+    </Grid>
+</Window>

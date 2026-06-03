@@ -1,0 +1,10 @@
+{
+  "profiles": {
+    "CrossingVoidZDTool (Package)": {
+      "commandName": "MsixPackage"
+    },
+    "CrossingVoidZDTool (Unpackaged)": {
+      "commandName": "Project"
+    }
+  }
+}
