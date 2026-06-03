@@ -281,5 +281,119 @@
                 </ScrollViewer>
             </Grid>
         </NavigationView>
+
+        <Border
+            x:Name="GlobalProgressHost"
+            Grid.RowSpan="2"
+            MaxWidth="1540"
+            Margin="28"
+            Padding="22,18"
+            HorizontalAlignment="Stretch"
+            VerticalAlignment="Bottom"
+            Canvas.ZIndex="100"
+            Background="#E6FFFFFF"
+            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+            BorderThickness="1"
+            CornerRadius="8"
+            Opacity="0"
+            RenderTransformOrigin="0.5,1"
+            Visibility="Collapsed">
+            <Border.RenderTransform>
+                <TranslateTransform x:Name="GlobalProgressHostTransform" Y="130" />
+            </Border.RenderTransform>
+            <Grid ColumnSpacing="24">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+
+                <Grid RowSpacing="10" VerticalAlignment="Center">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <Grid ColumnSpacing="18">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="Auto" />
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock
+                            Text="当前进度:"
+                            Foreground="#202020"
+                            FontSize="24"
+                            FontWeight="SemiBold"
+                            VerticalAlignment="Center" />
+                        <TextBlock
+                            x:Name="GlobalProgressTitleText"
+                            Grid.Column="1"
+                            Foreground="#202020"
+                            FontSize="24"
+                            FontWeight="SemiBold"
+                            TextTrimming="CharacterEllipsis"
+                            VerticalAlignment="Center" />
+                        <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
+                            <TextBlock
+                                Text="用时:"
+                                Foreground="#202020"
+                                FontSize="22"
+                                FontWeight="SemiBold" />
+                            <TextBlock
+                                x:Name="GlobalProgressElapsedText"
+                                Foreground="#202020"
+                                FontSize="22"
+                                FontWeight="SemiBold" />
+                        </StackPanel>
+                    </Grid>
+
+                    <ProgressBar
+                        x:Name="GlobalProgressBar"
+                        Grid.Row="1"
+                        Height="11"
+                        Minimum="0"
+                        Maximum="100"
+                        Foreground="#008F8D"
+                        Background="#1A008F8D"
+                        IsIndeterminate="True" />
+
+                    <TextBlock
+                        x:Name="GlobalProgressDetailText"
+                        Grid.Row="2"
+                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        TextTrimming="CharacterEllipsis" />
+                </Grid>
+
+                <Grid
+                    x:Name="GlobalProgressRing"
+                    Grid.Column="1"
+                    Width="86"
+                    Height="86"
+                    Background="Transparent"
+                    Tapped="GlobalProgressRing_Tapped"
+                    ToolTipService.ToolTip="取消当前操作">
+                    <Ellipse
+                        Stroke="#22008F8D"
+                        StrokeThickness="7" />
+                    <Path
+                        x:Name="GlobalProgressRingPath"
+                        Stroke="#008F8D"
+                        StrokeThickness="7"
+                        StrokeStartLineCap="Round"
+                        StrokeEndLineCap="Round" />
+                    <TextBlock
+                        x:Name="GlobalProgressPercentText"
+                        Foreground="#008F8D"
+                        FontSize="24"
+                        FontWeight="Bold"
+                        HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        TextAlignment="Center"
+                        LineHeight="28"
+                        Text="0%" />
+                </Grid>
+            </Grid>
+        </Border>
     </Grid>
 </Window>
