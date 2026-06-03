@@ -12,7 +12,7 @@
         <MicaBackdrop />
     </Window.SystemBackdrop>
 
-    <Grid>
+    <Grid x:Name="RootGrid">
         <Grid.RowDefinitions>
             <RowDefinition Height="48" />
             <RowDefinition Height="*" />
@@ -153,7 +153,8 @@
                             <TextBlock
                                 x:Name="WorkspaceStatusText"
                                 VerticalAlignment="Center"
-                                Style="{StaticResource SubtleTextStyle}" />
+                                Style="{StaticResource SubtleTextStyle}"
+                                Text="{Binding WorkspaceStatusText, Mode=OneWay}" />
                             <ProgressBar
                                 Grid.Column="1"
                                 VerticalAlignment="Center"
@@ -234,7 +235,8 @@
                                         <TextBox
                                             x:Name="ProjectRootPathTextBox"
                                             Header="文件目录"
-                                            IsReadOnly="True" />
+                                            IsReadOnly="True"
+                                            Text="{Binding ProjectRootPath, Mode=OneWay}" />
                                         <Button
                                             Grid.Column="1"
                                             Margin="0,28,0,0"
@@ -245,8 +247,9 @@
                                     <InfoBar
                                         x:Name="ProjectRootStatusInfoBar"
                                         IsOpen="True"
-                                        Severity="Success"
-                                        Title="目录已就绪" />
+                                        Message="{Binding ProjectRootStatusMessage, Mode=OneWay}"
+                                        Severity="{Binding ProjectRootStatusSeverity, Mode=OneWay}"
+                                        Title="{Binding ProjectRootStatusTitle, Mode=OneWay}" />
                                 </StackPanel>
                             </Border>
                         </StackPanel>

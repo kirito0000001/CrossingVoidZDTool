@@ -4,6 +4,7 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using CrossingVoidZDTool.Services;
+using CrossingVoidZDTool.ViewModels;
 using CrossingVoidZDTool.Views;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
@@ -25,13 +26,10 @@ namespace CrossingVoidZDTool
     {
         private const double PageEntranceOffsetX = -96;
         private static readonly TimeSpan PageEntranceDuration = TimeSpan.FromMilliseconds(280);
-        private readonly AppSettingsService _appSettingsService = new();
-        private readonly ProjectRootMigrationService _projectRootMigrationService = new();
+        private readonly SettingsViewModel _settingsViewModel = new(new AppSettingsService(), new ProjectRootMigrationService());
         private readonly WinUiDialogService _dialogService;
         private readonly Stopwatch _globalProgressStopwatch = new();
         private readonly DispatcherQueueTimer _globalProgressElapsedTimer;
-        private AppSettings _appSettings = new();
-        private string _projectRootPath = AppSettingsService.DefaultProjectRootPath;
         private bool _isChangingShellSelectionInternally;
         private bool _isGlobalProgressVisible;
         private string _globalProgressOperationTitle = string.Empty;
@@ -41,6 +39,7 @@ namespace CrossingVoidZDTool
         public MainWindow()
         {
             InitializeComponent();
+            RootGrid.DataContext = _settingsViewModel;
             _dialogService = new WinUiDialogService(() => Content.XamlRoot);
             ApplyCustomTitleBar();
             ApplyWindowIcon();
@@ -50,9 +49,7 @@ namespace CrossingVoidZDTool
             _globalProgressElapsedTimer.Interval = TimeSpan.FromSeconds(1);
             _globalProgressElapsedTimer.Tick += GlobalProgressElapsedTimer_Tick;
 
-            _appSettings = _appSettingsService.Load();
-            _projectRootPath = _appSettingsService.ResolveProjectRootPath(_appSettings);
-            EnsureProjectRootDirectory(_projectRootPath);
+            _settingsViewModel.LoadAndEnsureProjectRoot();
             ShowCharacterDeskPage();
         }
 
@@ -80,19 +77,6 @@ namespace CrossingVoidZDTool
             {
                 presenter.Maximize();
             }
-        }
-
-        private void EnsureProjectRootDirectory(string projectRootPath)
-        {
-            _appSettingsService.EnsureProjectRootDirectory(projectRootPath);
-            ProjectRootPathTextBox.Text = projectRootPath;
-            ProjectRootStatusInfoBar.Message = $"已确认目录存在：{projectRootPath}";
-            WorkspaceStatusText.Text = $"就绪：整体项目位置 {projectRootPath}";
-        }
-
-        private void SaveAppSettings()
-        {
-            _appSettingsService.Save(_appSettings);
         }
 
         private void ShellNavigation_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
@@ -257,48 +241,43 @@ namespace CrossingVoidZDTool
                 return;
             }
 
-            var newProjectRootPath = _appSettingsService.BuildProjectRootPathFromParent(selectedFolder.Path);
-            var oldProjectRootPath = Path.GetFullPath(_projectRootPath);
+            var newProjectRootPath = _settingsViewModel.BuildProjectRootPathFromParent(selectedFolder.Path);
+            var oldProjectRootPath = Path.GetFullPath(_settingsViewModel.ProjectRootPath);
 
-            if (PathsEqual(oldProjectRootPath, newProjectRootPath))
+            if (_settingsViewModel.IsCurrentProjectRoot(newProjectRootPath))
             {
-                SetProjectRootStatus(InfoBarSeverity.Informational, "目录未变化", $"当前已经在使用：{newProjectRootPath}");
+                _settingsViewModel.SetProjectRootStatus(InfoBarSeverity.Informational, "目录未变化", $"当前已经在使用：{newProjectRootPath}");
                 return;
             }
 
-            if (IsPathInsideDirectory(newProjectRootPath, oldProjectRootPath))
+            if (_settingsViewModel.IsCandidateInsideCurrentRoot(newProjectRootPath))
             {
-                SetProjectRootStatus(InfoBarSeverity.Error, "无法迁移目录", "新位置不能放在旧项目总目录里面，否则迁移完成后删除旧目录时会连新目录一起删除。");
+                _settingsViewModel.SetProjectRootStatus(InfoBarSeverity.Error, "无法迁移目录", "新位置不能放在旧项目总目录里面，否则迁移完成后删除旧目录时会连新目录一起删除。");
                 return;
             }
 
             try
             {
-                SetProjectRootStatus(InfoBarSeverity.Informational, "正在迁移目录", $"{oldProjectRootPath} -> {newProjectRootPath}");
+                _settingsViewModel.SetProjectRootStatus(InfoBarSeverity.Informational, "正在迁移目录", $"{oldProjectRootPath} -> {newProjectRootPath}");
                 ShowGlobalProgress("迁移整体项目目录", newProjectRootPath);
                 UpdateGlobalProgress("正在复制和校验项目文件...", 5, $"{oldProjectRootPath} -> {newProjectRootPath}");
                 var progress = new Progress<ProgressUpdate>(update =>
                     UpdateGlobalProgress(update.Message, update.Percent, update.Detail, update.IsIndeterminate));
-                var result = await Task.Run(() => _projectRootMigrationService.Migrate(
-                    oldProjectRootPath,
+                var result = await _settingsViewModel.ChangeProjectRootAsync(
                     newProjectRootPath,
                     progress,
-                    GetGlobalProgressCancellationToken()));
+                    GetGlobalProgressCancellationToken());
 
-                _projectRootPath = newProjectRootPath;
-                _appSettings.ProjectRootPath = _projectRootPath;
-                SaveAppSettings();
-                EnsureProjectRootDirectory(_projectRootPath);
                 CompleteGlobalProgress("目录迁移完成", $"已迁移 {result.FileCount} 个文件、{result.DirectoryCount} 个文件夹");
                 await HideGlobalProgressAfterDelayAsync();
-                SetProjectRootStatus(InfoBarSeverity.Success, "目录迁移完成", $"已迁移并校验 {result.FileCount} 个文件、{result.DirectoryCount} 个文件夹。旧目录已删除：{oldProjectRootPath}");
+                _settingsViewModel.SetProjectRootStatus(InfoBarSeverity.Success, "目录迁移完成", $"已迁移并校验 {result.FileCount} 个文件、{result.DirectoryCount} 个文件夹。旧目录已删除：{oldProjectRootPath}");
             }
             catch (Exception ex)
             {
                 CompleteGlobalProgress(ex is OperationCanceledException ? "目录迁移已取消" : "目录迁移失败", ex.Message);
                 await HideGlobalProgressAfterDelayAsync();
-                EnsureProjectRootDirectory(_projectRootPath);
-                SetProjectRootStatus(InfoBarSeverity.Error, "目录迁移失败", $"已保留原目录和设置，未删除旧目录。错误：{ex.Message}");
+                _settingsViewModel.EnsureCurrentProjectRoot();
+                _settingsViewModel.SetProjectRootStatus(InfoBarSeverity.Error, "目录迁移失败", $"已保留原目录和设置，未删除旧目录。错误：{ex.Message}");
             }
         }
 
@@ -315,14 +294,6 @@ namespace CrossingVoidZDTool
                     dialog.MinWidth = 610;
                     dialog.MaxWidth = 610;
                 }));
-        }
-
-        private void SetProjectRootStatus(InfoBarSeverity severity, string title, string message)
-        {
-            ProjectRootStatusInfoBar.Severity = severity;
-            ProjectRootStatusInfoBar.Title = title;
-            ProjectRootStatusInfoBar.Message = message;
-            ProjectRootStatusInfoBar.IsOpen = true;
         }
 
         private void ShowGlobalProgress(string title, string detail)
@@ -547,18 +518,5 @@ namespace CrossingVoidZDTool
                 : elapsed.ToString(@"mm\:ss");
         }
 
-        private static bool PathsEqual(string firstPath, string secondPath)
-        {
-            var first = Path.GetFullPath(firstPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            var second = Path.GetFullPath(secondPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-            return string.Equals(first, second, StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static bool IsPathInsideDirectory(string path, string directoryPath)
-        {
-            var fullPath = Path.GetFullPath(path).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            var fullDirectory = Path.GetFullPath(directoryPath).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-            return fullPath.StartsWith(fullDirectory, StringComparison.OrdinalIgnoreCase);
-        }
     }
 }
