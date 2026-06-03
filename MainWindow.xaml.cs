@@ -3,9 +3,12 @@ using System.IO;
 using System.Threading;
 using System.Threading.Tasks;
 using CrossingVoidZDTool.Services;
+using CrossingVoidZDTool.Views;
 using Microsoft.UI;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Media;
+using Microsoft.UI.Xaml.Media.Animation;
 using Microsoft.UI.Xaml.Controls;
 using Windows.Graphics;
 using Windows.Storage.Pickers;
@@ -15,14 +18,19 @@ namespace CrossingVoidZDTool
 {
     public sealed partial class MainWindow : Window
     {
+        private const double PageEntranceOffsetX = -96;
+        private static readonly TimeSpan PageEntranceDuration = TimeSpan.FromMilliseconds(280);
         private readonly AppSettingsService _appSettingsService = new();
         private readonly ProjectRootMigrationService _projectRootMigrationService = new();
+        private readonly WinUiDialogService _dialogService;
         private AppSettings _appSettings = new();
         private string _projectRootPath = AppSettingsService.DefaultProjectRootPath;
+        private bool _isChangingShellSelectionInternally;
 
         public MainWindow()
         {
             InitializeComponent();
+            _dialogService = new WinUiDialogService(() => Content.XamlRoot);
             ApplyCustomTitleBar();
             ApplyWindowIcon();
             AppWindow.Resize(new SizeInt32(1500, 920));
@@ -31,7 +39,7 @@ namespace CrossingVoidZDTool
             _appSettings = _appSettingsService.Load();
             _projectRootPath = _appSettingsService.ResolveProjectRootPath(_appSettings);
             EnsureProjectRootDirectory(_projectRootPath);
-            ShowWorkbenchPage();
+            ShowCharacterDeskPage();
         }
 
         private void ApplyWindowIcon()
@@ -80,32 +88,143 @@ namespace CrossingVoidZDTool
                 return;
             }
 
+            if (_isChangingShellSelectionInternally)
+            {
+                return;
+            }
+
             if (string.Equals(tag, "Settings", StringComparison.Ordinal))
             {
                 ShowSettingsPage();
                 return;
             }
 
-            ShowWorkbenchPage();
+            if (string.Equals(tag, "ActionFrames", StringComparison.Ordinal))
+            {
+                ShowPlaceholderPage(ActionFramesPage);
+                return;
+            }
+
+            if (string.Equals(tag, "LineArt", StringComparison.Ordinal))
+            {
+                ShowPlaceholderPage(LineArtPage);
+                return;
+            }
+
+            if (string.Equals(tag, "UnrealSync", StringComparison.Ordinal))
+            {
+                ShowPlaceholderPage(UnrealSyncPage);
+                return;
+            }
+
+            ShowCharacterDeskPage();
         }
 
-        private void ShowWorkbenchPage()
+        private void ShowCharacterDeskPage()
         {
-            WorkbenchPage.Visibility = Visibility.Visible;
-            SettingsPage.Visibility = Visibility.Collapsed;
-            SelectShellNavigationItem(CharacterWorkbenchNavItem);
+            ShowOnlyPage(CharacterDeskPage);
+            SelectShellNavigationItem(CharacterDeskNavItem);
         }
 
         private void ShowSettingsPage()
         {
-            WorkbenchPage.Visibility = Visibility.Collapsed;
-            SettingsPage.Visibility = Visibility.Visible;
+            ShowOnlyPage(SettingsPage);
             SelectShellNavigationItem(GlobalSettingsNavItem);
         }
 
-        private static void SelectShellNavigationItem(NavigationViewItem item)
+        private void ShowPlaceholderPage(FrameworkElement page)
         {
-            item.IsSelected = true;
+            ShowOnlyPage(page);
+        }
+
+        private void ShowOnlyPage(FrameworkElement visiblePage)
+        {
+            FrameworkElement[] pages =
+            [
+                CharacterDeskPage,
+                ActionFramesPage,
+                LineArtPage,
+                UnrealSyncPage,
+                SettingsPage
+            ];
+
+            foreach (var page in pages)
+            {
+                page.Visibility = ReferenceEquals(page, visiblePage)
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
+            }
+
+            PlayPageEntrance(visiblePage);
+        }
+
+        private void SelectShellNavigationItem(NavigationViewItem item)
+        {
+            _isChangingShellSelectionInternally = true;
+            try
+            {
+                ShellNavigation.SelectedItem = item;
+                item.IsSelected = true;
+            }
+            finally
+            {
+                _isChangingShellSelectionInternally = false;
+            }
+        }
+
+        private static void PlayPageEntrance(FrameworkElement page)
+        {
+            if (page.Visibility != Visibility.Visible)
+            {
+                return;
+            }
+
+            page.Transitions = null;
+            page.Resources["PageEntranceStoryboard"] = null;
+
+            if (page.RenderTransform is not TranslateTransform transform)
+            {
+                transform = new TranslateTransform();
+                page.RenderTransform = transform;
+            }
+
+            transform.X = PageEntranceOffsetX;
+            transform.Y = 0;
+            page.Opacity = 0;
+
+            var easing = new CubicEase { EasingMode = EasingMode.EaseOut };
+            var slideAnimation = new DoubleAnimation
+            {
+                From = PageEntranceOffsetX,
+                To = 0,
+                Duration = PageEntranceDuration,
+                EasingFunction = easing
+            };
+            Storyboard.SetTarget(slideAnimation, transform);
+            Storyboard.SetTargetProperty(slideAnimation, nameof(TranslateTransform.X));
+
+            var fadeAnimation = new DoubleAnimation
+            {
+                From = 0.82,
+                To = 1,
+                Duration = PageEntranceDuration,
+                EasingFunction = easing
+            };
+            Storyboard.SetTarget(fadeAnimation, page);
+            Storyboard.SetTargetProperty(fadeAnimation, nameof(UIElement.Opacity));
+
+            var storyboard = new Storyboard();
+            storyboard.Children.Add(slideAnimation);
+            storyboard.Children.Add(fadeAnimation);
+            storyboard.Completed += (_, _) =>
+            {
+                transform.X = 0;
+                transform.Y = 0;
+                page.Opacity = 1;
+                page.Resources.Remove("PageEntranceStoryboard");
+            };
+            page.Resources["PageEntranceStoryboard"] = storyboard;
+            storyboard.Begin();
         }
 
         private async void ChooseProjectRootButton_Click(object sender, RoutedEventArgs e)
@@ -157,12 +276,19 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private void ShowProjectRootHelpButton_Click(object sender, RoutedEventArgs e)
+        private async void ShowProjectRootHelpButton_Click(object sender, RoutedEventArgs e)
         {
-            SetProjectRootStatus(
-                InfoBarSeverity.Informational,
+            await _dialogService.ShowContentAsync(new ContentDialogRequest(
                 "整体项目位置说明",
-                $"请选择父目录，工具箱会在其中创建 {AppSettingsService.ProjectRootFolderName} 文件夹。默认位置是 {AppSettingsService.DefaultProjectRootPath}。");
+                DialogContentFactory.CreateProjectRootHelpContent(),
+                PrimaryButtonText: "关闭",
+                CloseButtonText: string.Empty,
+                DefaultButton: ContentDialogButton.Primary,
+                ConfigureDialog: dialog =>
+                {
+                    dialog.MinWidth = 610;
+                    dialog.MaxWidth = 610;
+                }));
         }
 
         private void SetProjectRootStatus(InfoBarSeverity severity, string title, string message)
