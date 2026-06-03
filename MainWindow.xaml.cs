@@ -39,7 +39,8 @@ namespace CrossingVoidZDTool
             _applicationViewModel = new ApplicationViewModel(settingsViewModel, new GlobalProgressViewModel());
             InitializeComponent();
             RootGrid.DataContext = _applicationViewModel;
-            _dialogService = new WinUiDialogService(() => Content.XamlRoot);
+            _dialogService = new WinUiDialogService(() => RootGrid.XamlRoot);
+            RegisterSettingsShortcuts();
             ApplyCustomTitleBar();
             ApplyWindowIcon();
             AppWindow.Resize(new SizeInt32(1500, 920));

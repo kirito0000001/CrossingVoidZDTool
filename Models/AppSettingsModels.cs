@@ -4,9 +4,9 @@ internal sealed class AppSettings
 {
     public string? ProjectRootPath { get; set; }
 
-    public bool ShowWorkspacePath { get; set; } = true;
+    public bool ShowWorkspacePath { get; set; }
 
-    public bool LogEnabled { get; set; } = true;
+    public bool LogEnabled { get; set; }
 
     public bool LogUserOperations { get; set; } = true;
 

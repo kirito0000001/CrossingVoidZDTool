@@ -13,6 +13,7 @@ using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Animation;
+using Windows.System;
 using Windows.Foundation;
 using Windows.Graphics;
 using Windows.Storage.Pickers;
@@ -24,6 +25,34 @@ namespace CrossingVoidZDTool
 {
     public sealed partial class MainWindow
     {
+        private void RegisterSettingsShortcuts()
+        {
+            var undoSettingsAccelerator = new KeyboardAccelerator
+            {
+                Key = VirtualKey.Z,
+                Modifiers = VirtualKeyModifiers.Control
+            };
+            undoSettingsAccelerator.Invoked += SettingsUndoKeyboardAccelerator_Invoked;
+            RootGrid.KeyboardAccelerators.Add(undoSettingsAccelerator);
+        }
+
+        private void SettingsUndoKeyboardAccelerator_Invoked(
+            KeyboardAccelerator sender,
+            KeyboardAcceleratorInvokedEventArgs args)
+        {
+            if (SettingsPage.Visibility != Visibility.Visible ||
+                !Settings.UndoLastSettingCommand.CanExecute(null))
+            {
+                return;
+            }
+
+            Settings.UndoLastSettingCommand.Execute(null);
+            UpdateLogOptionEnabledState();
+            UpdateAuxiliaryDisplayVisibility();
+            AppendLog(LogKind.User, "已通过 Ctrl+Z 撤回上一次设置修改。");
+            args.Handled = true;
+        }
+
         private void UpdateLogOptionEnabledState()
         {
             var enabled = Settings.LogEnabled;
@@ -66,7 +95,7 @@ namespace CrossingVoidZDTool
                     {
                         CreateHelpText("辅助显示", "这里控制底部工作区路径和输出日志是否显示。设置会立即保存，后续功能也要遵守这些开关。"),
                         CreateHelpText("输出日志", "log 用于记录用户操作、提示和错误。关闭 log 功能后，底部日志面板会隐藏，并停止写入新日志。"),
-                        CreateHelpText("撤回设置", "撤回只用于最近一次设置开关修改，例如误关了日志或工作区路径。它不用于目录迁移、文件导入、删除、同步等素材操作。"),
+                        CreateHelpText("撤回设置", "在设置页按 Ctrl+Z 可撤回最近一次设置开关修改，例如误关了日志或工作区路径。它不用于目录迁移、文件导入、删除、同步等素材操作。"),
                         CreateHelpText("后续功能", "动作帧导入、线稿生成、批量导出和 Unreal 同步都要把关键步骤写入 log，并在长任务时走底部全局进度条。")
                     }
                 }

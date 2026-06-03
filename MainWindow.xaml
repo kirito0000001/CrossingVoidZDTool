@@ -346,25 +346,6 @@
                                             Checked="LogSettingControl_Changed"
                                             Unchecked="LogSettingControl_Changed" />
                                     </Grid>
-                                    <Grid MinHeight="44" ColumnSpacing="12">
-                                        <Grid.ColumnDefinitions>
-                                            <ColumnDefinition Width="*" />
-                                            <ColumnDefinition Width="Auto" />
-                                        </Grid.ColumnDefinitions>
-                                        <StackPanel>
-                                            <TextBlock Text="撤回上一次设置修改" VerticalAlignment="Center" />
-                                            <TextBlock
-                                                Style="{StaticResource SubtleTextStyle}"
-                                                Text="{Binding Settings.SettingUndoStatusText, Mode=OneWay}" />
-                                        </StackPanel>
-                                        <Button
-                                            Grid.Column="1"
-                                            MinWidth="96"
-                                            VerticalAlignment="Center"
-                                            Command="{Binding Settings.UndoLastSettingCommand}"
-                                            Content="撤回"
-                                            ToolTipService.ToolTip="撤回最近一次设置开关修改。" />
-                                    </Grid>
                                 </StackPanel>
                             </Expander>
                         </StackPanel>

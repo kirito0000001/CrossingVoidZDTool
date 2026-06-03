@@ -51,4 +51,4 @@ This file records the baseline framework for the Zero Crossing ZD toolbox. Keep 
 - Move project-root migration command into `SettingsViewModel` with a command wrapper while leaving the WinUI picker bridge in `MainWindow.Settings.cs`.
 - Introduce services for character/action/frame folder layout before implementing imports.
 - Create dedicated Views or factories for repeated cards once real character/action cards exist.
-- When adding preferences for future pages, register them in `AppSettings`, `SettingsViewModel`, `Settings.UndoLastSettingCommand`, and the settings page.
+- When adding preferences for future pages, register them in `AppSettings`, `SettingsViewModel`, the settings undo stack behind `Ctrl+Z`, and the settings page.

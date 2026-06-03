@@ -17,8 +17,8 @@ internal sealed class SettingsViewModel : ObservableObject
     private string _projectRootStatusTitle = "目录已就绪";
     private string _projectRootStatusMessage = string.Empty;
     private InfoBarSeverity _projectRootStatusSeverity = InfoBarSeverity.Success;
-    private bool _showWorkspacePath = true;
-    private bool _logEnabled = true;
+    private bool _showWorkspacePath;
+    private bool _logEnabled;
     private bool _logUserOperations = true;
     private bool _logWarnings = true;
     private bool _logErrors = true;
