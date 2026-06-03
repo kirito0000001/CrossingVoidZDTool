@@ -154,7 +154,7 @@
                                 x:Name="WorkspaceStatusText"
                                 VerticalAlignment="Center"
                                 Style="{StaticResource SubtleTextStyle}"
-                                Text="{Binding WorkspaceStatusText, Mode=OneWay}" />
+                                Text="{Binding CharacterDesk.StatusText, Mode=OneWay}" />
                             <ProgressBar
                                 Grid.Column="1"
                                 VerticalAlignment="Center"
@@ -236,7 +236,7 @@
                                             x:Name="ProjectRootPathTextBox"
                                             Header="文件目录"
                                             IsReadOnly="True"
-                                            Text="{Binding ProjectRootPath, Mode=OneWay}" />
+                                            Text="{Binding Settings.ProjectRootPath, Mode=OneWay}" />
                                         <Button
                                             Grid.Column="1"
                                             Margin="0,28,0,0"
@@ -247,9 +247,9 @@
                                     <InfoBar
                                         x:Name="ProjectRootStatusInfoBar"
                                         IsOpen="True"
-                                        Message="{Binding ProjectRootStatusMessage, Mode=OneWay}"
-                                        Severity="{Binding ProjectRootStatusSeverity, Mode=OneWay}"
-                                        Title="{Binding ProjectRootStatusTitle, Mode=OneWay}" />
+                                        Message="{Binding Settings.ProjectRootStatusMessage, Mode=OneWay}"
+                                        Severity="{Binding Settings.ProjectRootStatusSeverity, Mode=OneWay}"
+                                        Title="{Binding Settings.ProjectRootStatusTitle, Mode=OneWay}" />
                                 </StackPanel>
                             </Border>
                         </StackPanel>
@@ -335,6 +335,7 @@
                             Foreground="#202020"
                             FontSize="24"
                             FontWeight="SemiBold"
+                            Text="{Binding GlobalProgress.Title, Mode=OneWay}"
                             TextTrimming="CharacterEllipsis"
                             VerticalAlignment="Center" />
                         <StackPanel Grid.Column="2" Orientation="Horizontal" Spacing="8" VerticalAlignment="Center">
@@ -347,7 +348,8 @@
                                 x:Name="GlobalProgressElapsedText"
                                 Foreground="#202020"
                                 FontSize="22"
-                                FontWeight="SemiBold" />
+                                FontWeight="SemiBold"
+                                Text="{Binding GlobalProgress.ElapsedText, Mode=OneWay}" />
                         </StackPanel>
                     </Grid>
 
@@ -359,12 +361,14 @@
                         Maximum="100"
                         Foreground="#008F8D"
                         Background="#1A008F8D"
-                        IsIndeterminate="True" />
+                        IsIndeterminate="{Binding GlobalProgress.IsIndeterminate, Mode=OneWay}"
+                        Value="{Binding GlobalProgress.Percent, Mode=OneWay}" />
 
                     <TextBlock
                         x:Name="GlobalProgressDetailText"
                         Grid.Row="2"
                         Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                        Text="{Binding GlobalProgress.Detail, Mode=OneWay}"
                         TextTrimming="CharacterEllipsis" />
                 </Grid>
 
@@ -394,7 +398,7 @@
                         VerticalAlignment="Center"
                         TextAlignment="Center"
                         LineHeight="28"
-                        Text="0%" />
+                        Text="{Binding GlobalProgress.PercentText, Mode=OneWay}" />
                 </Grid>
             </Grid>
         </Border>

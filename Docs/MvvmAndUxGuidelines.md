@@ -29,6 +29,15 @@ Styles      共享 XAML 样式
 Docs        给 Codex 和维护者看的规则
 ```
 
+当前根框架：
+
+- `ApplicationViewModel` 聚合 `SettingsViewModel`、`GlobalProgressViewModel`、`CharacterDeskViewModel`、`ActionFramesViewModel`、`LineArtViewModel`、`UnrealSyncViewModel`。
+- `MainWindow.xaml.cs` 是组合根，只保留启动连接、标题栏、图标、窗口放置和 ViewModel 暴露属性。
+- `MainWindow.Navigation.cs` 管导航和页面动画。
+- `MainWindow.Settings.cs` 管需要窗口句柄的文件夹选择器、项目根目录帮助弹窗和迁移进度桥接。
+- `MainWindow.Progress.cs` 管底部全局进度条动画、取消、耗时和圆环几何。
+- 新增功能如果需要新的状态，先加到对应模块 ViewModel；如果需要规则，先加到 Service。
+
 `MainWindow.xaml.cs` 只做外壳和 WinUI 桥接：
 
 - 可以做导航切换
@@ -147,6 +156,8 @@ ToolTipService.ToolTip="..."
 - 可取消
 - 不用阻塞式进度对话框
 - 显示当前对象、数量/百分比、输出位置
+- 底部进度状态归 `GlobalProgressViewModel`，窗口只负责动画和圆环绘制
+- 如果已有程序实例正在运行并锁住 Release 输出目录，用独立输出目录构建验证，例如 `-o .\bin\verify\step-name`
 
 整体项目目录迁移、批量导入、批量生成、批量导出、同步 Unreal 等操作，即使当前测试文件很少，也必须接入全局进度条，不能只在页面 `InfoBar` 里显示“正在处理”。
 
@@ -259,6 +270,28 @@ dotnet build CrossingVoidZDTool.csproj `
   --configuration Release `
   --runtime win-x64 `
   -p:Platform=x64
+```
+
+构建通过后必须直接启动一次程序。用户要求“每一步做完后顺便打开程序”时，启动后保持运行，不要主动关闭。
+
+如果上一步启动的程序锁住 Release exe，下一步构建用独立输出目录：
+
+```powershell
+dotnet build CrossingVoidZDTool.csproj `
+  --configuration Release `
+  --runtime win-x64 `
+  -p:Platform=x64 `
+  -o .\bin\verify\<step-name>
+```
+
+每个有意义的阶段完成后发送邮件：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass `
+  -File C:\Users\liuyu\Documents\CodexTools\notify-step.ps1 `
+  -Project "CrossingVoidZDTool" `
+  -Title "<阶段标题>" `
+  -Summary "<阶段摘要>"
 ```
 
 只改 Markdown 时不用 build。
