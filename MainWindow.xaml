@@ -92,7 +92,12 @@
                 </NavigationViewItem>
             </NavigationView.FooterMenuItems>
 
-            <Grid Padding="20">
+            <Grid Padding="20" RowSpacing="14">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
                 <Grid
                     x:Name="CharacterDeskPage"
                     RowSpacing="14"
@@ -144,7 +149,7 @@
                         </Grid>
                     </Border>
 
-                    <Border Grid.Row="2" Style="{StaticResource PanelBorderStyle}">
+                    <Border x:Name="WorkspaceStatusBorder" Grid.Row="2" Style="{StaticResource PanelBorderStyle}">
                         <Grid Padding="14,10" ColumnSpacing="16">
                             <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="*" />
@@ -166,6 +171,7 @@
 
                 <Grid
                     x:Name="ActionFramesPage"
+                    Grid.Row="0"
                     Visibility="Collapsed">
                     <Border Style="{StaticResource PanelBorderStyle}">
                         <StackPanel Padding="24" Spacing="8">
@@ -177,6 +183,7 @@
 
                 <Grid
                     x:Name="LineArtPage"
+                    Grid.Row="0"
                     Visibility="Collapsed">
                     <Border Style="{StaticResource PanelBorderStyle}">
                         <StackPanel Padding="24" Spacing="8">
@@ -188,6 +195,7 @@
 
                 <Grid
                     x:Name="UnrealSyncPage"
+                    Grid.Row="0"
                     Visibility="Collapsed">
                     <Border Style="{StaticResource PanelBorderStyle}">
                         <StackPanel Padding="24" Spacing="8">
@@ -199,6 +207,7 @@
 
                 <ScrollViewer
                     x:Name="SettingsPage"
+                    Grid.Row="0"
                     Visibility="Collapsed"
                     VerticalScrollBarVisibility="Auto">
                     <Grid
@@ -252,6 +261,112 @@
                                         Title="{Binding Settings.ProjectRootStatusTitle, Mode=OneWay}" />
                                 </StackPanel>
                             </Border>
+
+                            <Expander>
+                                <Expander.Header>
+                                    <StackPanel Orientation="Horizontal" Spacing="8">
+                                        <TextBlock Text="辅助显示" Style="{StaticResource SectionTitleStyle}" />
+                                        <Button
+                                            Style="{StaticResource HelpIconButtonStyle}"
+                                            Click="ShowLogHelpButton_Click"
+                                            ToolTipService.ToolTip="查看辅助显示说明">
+                                            <FontIcon FontSize="15" Glyph="&#xE11B;" />
+                                        </Button>
+                                    </StackPanel>
+                                </Expander.Header>
+
+                                <StackPanel Padding="18" Spacing="0">
+                                    <Grid MinHeight="44" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="显示工作区路径" VerticalAlignment="Center" />
+                                        <CheckBox
+                                            x:Name="WorkspacePathVisibleCheckBox"
+                                            Grid.Column="1"
+                                            VerticalAlignment="Center"
+                                            IsChecked="{Binding Settings.ShowWorkspacePath, Mode=TwoWay}"
+                                            Checked="LogSettingControl_Changed"
+                                            Unchecked="LogSettingControl_Changed" />
+                                    </Grid>
+                                    <Grid MinHeight="44" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="开启 log 功能" VerticalAlignment="Center" />
+                                        <CheckBox
+                                            x:Name="LogEnabledCheckBox"
+                                            Grid.Column="1"
+                                            VerticalAlignment="Center"
+                                            IsChecked="{Binding Settings.LogEnabled, Mode=TwoWay}"
+                                            Checked="LogSettingControl_Changed"
+                                            Unchecked="LogSettingControl_Changed" />
+                                    </Grid>
+                                    <Grid MinHeight="44" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="log 输出用户操作" VerticalAlignment="Center" />
+                                        <CheckBox
+                                            x:Name="LogUserOperationsCheckBox"
+                                            Grid.Column="1"
+                                            VerticalAlignment="Center"
+                                            IsChecked="{Binding Settings.LogUserOperations, Mode=TwoWay}"
+                                            Checked="LogSettingControl_Changed"
+                                            Unchecked="LogSettingControl_Changed" />
+                                    </Grid>
+                                    <Grid MinHeight="44" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="log 输出提示" VerticalAlignment="Center" />
+                                        <CheckBox
+                                            x:Name="LogWarningCheckBox"
+                                            Grid.Column="1"
+                                            VerticalAlignment="Center"
+                                            IsChecked="{Binding Settings.LogWarnings, Mode=TwoWay}"
+                                            Checked="LogSettingControl_Changed"
+                                            Unchecked="LogSettingControl_Changed" />
+                                    </Grid>
+                                    <Grid MinHeight="44" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock Text="log 输出错误提示" VerticalAlignment="Center" />
+                                        <CheckBox
+                                            x:Name="LogErrorCheckBox"
+                                            Grid.Column="1"
+                                            VerticalAlignment="Center"
+                                            IsChecked="{Binding Settings.LogErrors, Mode=TwoWay}"
+                                            Checked="LogSettingControl_Changed"
+                                            Unchecked="LogSettingControl_Changed" />
+                                    </Grid>
+                                    <Grid MinHeight="44" ColumnSpacing="12">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <StackPanel>
+                                            <TextBlock Text="撤回上一次设置修改" VerticalAlignment="Center" />
+                                            <TextBlock
+                                                Style="{StaticResource SubtleTextStyle}"
+                                                Text="{Binding Settings.SettingUndoStatusText, Mode=OneWay}" />
+                                        </StackPanel>
+                                        <Button
+                                            Grid.Column="1"
+                                            MinWidth="96"
+                                            VerticalAlignment="Center"
+                                            Command="{Binding Settings.UndoLastSettingCommand}"
+                                            Content="撤回"
+                                            ToolTipService.ToolTip="撤回最近一次设置开关修改。" />
+                                    </Grid>
+                                </StackPanel>
+                            </Expander>
                         </StackPanel>
 
                         <Border Grid.Column="1" VerticalAlignment="Top" Style="{StaticResource PanelBorderStyle}">
@@ -282,6 +397,31 @@
                         </Border>
                     </Grid>
                 </ScrollViewer>
+
+                <Border x:Name="LogPanelBorder" Grid.Row="1" Style="{StaticResource PanelBorderStyle}">
+                    <Grid Padding="12" RowSpacing="8">
+                        <Grid.RowDefinitions>
+                            <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
+                        </Grid.RowDefinitions>
+                        <Grid ColumnSpacing="12">
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="Auto" />
+                            </Grid.ColumnDefinitions>
+                            <TextBlock Text="输出日志" Style="{StaticResource SectionTitleStyle}" />
+                            <Button Grid.Column="1" Content="清空" Click="ClearLogButton_Click" />
+                        </Grid>
+                        <ScrollViewer
+                            x:Name="LogScrollViewer"
+                            Grid.Row="1"
+                            MaxHeight="150"
+                            HorizontalScrollBarVisibility="Disabled"
+                            VerticalScrollBarVisibility="Auto">
+                            <ItemsControl x:Name="LogItemsControl" />
+                        </ScrollViewer>
+                    </Grid>
+                </Border>
             </Grid>
         </NavigationView>
 

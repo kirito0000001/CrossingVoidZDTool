@@ -47,9 +47,19 @@ namespace CrossingVoidZDTool
             _globalProgressElapsedTimer = DispatcherQueue.CreateTimer();
             _globalProgressElapsedTimer.Interval = TimeSpan.FromSeconds(1);
             _globalProgressElapsedTimer.Tick += GlobalProgressElapsedTimer_Tick;
+            Settings.AuxiliaryDisplayChanged += (_, _) => UpdateAuxiliaryDisplayVisibility();
+            Settings.LogSettingsChanged += (_, _) =>
+            {
+                UpdateLogOptionEnabledState();
+                UpdateAuxiliaryDisplayVisibility();
+                AppendLog(LogKind.User, "已更新日志输出设置。");
+            };
 
             Settings.LoadAndEnsureProjectRoot();
             _applicationViewModel.CharacterDesk.StatusText = Settings.WorkspaceStatusText;
+            UpdateLogOptionEnabledState();
+            UpdateAuxiliaryDisplayVisibility();
+            AppendLog(LogKind.Info, "程序启动，已检查整体项目目录。");
             ShowCharacterDeskPage();
         }
 

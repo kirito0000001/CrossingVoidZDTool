@@ -40,6 +40,7 @@ namespace CrossingVoidZDTool
                 return;
             }
 
+            AppendLog(LogKind.User, $"选择新的整体项目父目录：{selectedFolder.Path}");
             var newProjectRootPath = Settings.BuildProjectRootPathFromParent(selectedFolder.Path);
             var oldProjectRootPath = Path.GetFullPath(Settings.ProjectRootPath);
 
@@ -58,6 +59,7 @@ namespace CrossingVoidZDTool
             try
             {
                 Settings.SetProjectRootStatus(InfoBarSeverity.Informational, "正在迁移目录", $"{oldProjectRootPath} -> {newProjectRootPath}");
+                AppendLog(LogKind.Info, $"开始迁移整体项目目录：{oldProjectRootPath} -> {newProjectRootPath}");
                 ShowGlobalProgress("迁移整体项目目录", newProjectRootPath);
                 UpdateGlobalProgress("正在复制和校验项目文件...", 5, $"{oldProjectRootPath} -> {newProjectRootPath}");
                 var progress = new Progress<ProgressUpdate>(update =>
@@ -71,6 +73,7 @@ namespace CrossingVoidZDTool
                 await HideGlobalProgressAfterDelayAsync();
                 Settings.SetProjectRootStatus(InfoBarSeverity.Success, "目录迁移完成", $"已迁移并校验 {result.FileCount} 个文件、{result.DirectoryCount} 个文件夹。旧目录已删除：{oldProjectRootPath}");
                 _applicationViewModel.CharacterDesk.StatusText = Settings.WorkspaceStatusText;
+                AppendLog(LogKind.User, $"整体项目目录迁移完成：{newProjectRootPath}");
             }
             catch (Exception ex)
             {
@@ -79,6 +82,7 @@ namespace CrossingVoidZDTool
                 Settings.EnsureCurrentProjectRoot();
                 Settings.SetProjectRootStatus(InfoBarSeverity.Error, "目录迁移失败", $"已保留原目录和设置，未删除旧目录。错误：{ex.Message}");
                 _applicationViewModel.CharacterDesk.StatusText = Settings.WorkspaceStatusText;
+                AppendLog(LogKind.Error, "整体项目目录迁移失败。", ex);
             }
         }
 

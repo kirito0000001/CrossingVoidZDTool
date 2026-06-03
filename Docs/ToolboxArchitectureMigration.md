@@ -7,7 +7,7 @@ This file records the baseline framework for the Zero Crossing ZD toolbox. Keep 
 - `ApplicationViewModel`
   - Aggregates module definitions, selected module state, settings, global progress, and feature module ViewModels.
 - `SettingsViewModel`
-  - Owns project root state, settings persistence, project root migration orchestration, and user-facing settings status.
+  - Owns project root state, settings persistence, project root migration orchestration, auxiliary display settings, log filters, setting undo stack, and user-facing settings status.
 - `GlobalProgressViewModel`
   - Owns bottom progress visibility, title, detail, percent, elapsed text, and indeterminate state.
 - `CharacterDeskViewModel`
@@ -24,6 +24,7 @@ This file records the baseline framework for the Zero Crossing ZD toolbox. Keep 
 - `MainWindow.Navigation.cs`: `NavigationView` selection, page switching, and entrance animation.
 - `MainWindow.Settings.cs`: project root folder picker, migration progress bridge, and project-root help dialog.
 - `MainWindow.Progress.cs`: bottom progress host animation, cancellation, elapsed timer, and ring geometry.
+- `MainWindow.Logging.cs`: log output bridge, auxiliary display refresh, log help dialog, and log panel actions.
 
 ## Module Categories
 
@@ -39,6 +40,8 @@ This file records the baseline framework for the Zero Crossing ZD toolbox. Keep 
 - Start every feature by adding or extending a ViewModel and Service.
 - Keep raw `MainWindow` event handlers as small bridges.
 - Long operations must report through `GlobalProgressViewModel` and accept cancellation.
+- User-visible operations should write to the bottom log through `AppendLog(...)`; log output must respect the settings filters.
+- Setting changes that are simple preferences should be undoable through the settings undo stack.
 - Keep image decoding, file scans, numbering, naming, CSV/JSON, import/export, and Unreal rules in Services.
 - Add pages through the central page-switching path so every page gets the same entrance animation.
 - Build and start the app after each meaningful step, then send the step-completion email.
@@ -48,3 +51,4 @@ This file records the baseline framework for the Zero Crossing ZD toolbox. Keep 
 - Move project-root migration command into `SettingsViewModel` with a command wrapper while leaving the WinUI picker bridge in `MainWindow.Settings.cs`.
 - Introduce services for character/action/frame folder layout before implementing imports.
 - Create dedicated Views or factories for repeated cards once real character/action cards exist.
+- When adding preferences for future pages, register them in `AppSettings`, `SettingsViewModel`, `Settings.UndoLastSettingCommand`, and the settings page.
