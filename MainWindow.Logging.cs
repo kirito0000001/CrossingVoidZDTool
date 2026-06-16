@@ -1,6 +1,9 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using CrossingVoidZDTool.Services;
@@ -19,6 +22,7 @@ using Windows.Graphics;
 using Windows.Storage.Pickers;
 using Microsoft.UI.Dispatching;
 using WinRT.Interop;
+using Windows.UI;
 using PathFigure = Microsoft.UI.Xaml.Media.PathFigure;
 
 namespace CrossingVoidZDTool
@@ -30,16 +34,157 @@ namespace CrossingVoidZDTool
             var undoSettingsAccelerator = new KeyboardAccelerator
             {
                 Key = VirtualKey.Z,
-                Modifiers = VirtualKeyModifiers.Control
+                Modifiers = VirtualKeyModifiers.Control,
+                IsEnabled = true
             };
+            undoSettingsAccelerator.ScopeOwner = RootGrid;
             undoSettingsAccelerator.Invoked += SettingsUndoKeyboardAccelerator_Invoked;
             RootGrid.KeyboardAccelerators.Add(undoSettingsAccelerator);
+
+            var openShortcutGuideAccelerator = new KeyboardAccelerator
+            {
+                Key = VirtualKey.F1
+            };
+            openShortcutGuideAccelerator.ScopeOwner = RootGrid;
+            openShortcutGuideAccelerator.Invoked += OpenShortcutGuideKeyboardAccelerator_Invoked;
+            RootGrid.KeyboardAccelerators.Add(openShortcutGuideAccelerator);
+
+            var openDraftAccelerator = new KeyboardAccelerator
+            {
+                Key = VirtualKey.F2
+            };
+            openDraftAccelerator.ScopeOwner = RootGrid;
+            openDraftAccelerator.Invoked += OpenDraftKeyboardAccelerator_Invoked;
+            RootGrid.KeyboardAccelerators.Add(openDraftAccelerator);
+
+            var openSkillValueGuideAccelerator = new KeyboardAccelerator
+            {
+                Key = VirtualKey.F3
+            };
+            openSkillValueGuideAccelerator.ScopeOwner = RootGrid;
+            openSkillValueGuideAccelerator.Invoked += OpenSkillValueGuideKeyboardAccelerator_Invoked;
+            RootGrid.KeyboardAccelerators.Add(openSkillValueGuideAccelerator);
+
+            var openPageRulesAccelerator = new KeyboardAccelerator
+            {
+                Key = VirtualKey.F4
+            };
+            openPageRulesAccelerator.ScopeOwner = RootGrid;
+            openPageRulesAccelerator.Invoked += OpenPageRulesKeyboardAccelerator_Invoked;
+            RootGrid.KeyboardAccelerators.Add(openPageRulesAccelerator);
+
+            var closeDraftAccelerator = new KeyboardAccelerator
+            {
+                Key = VirtualKey.Escape
+            };
+            closeDraftAccelerator.ScopeOwner = RootGrid;
+            closeDraftAccelerator.Invoked += CloseDraftKeyboardAccelerator_Invoked;
+            RootGrid.KeyboardAccelerators.Add(closeDraftAccelerator);
+        }
+
+        private void CloseDraftKeyboardAccelerator_Invoked(
+            KeyboardAccelerator sender,
+            KeyboardAcceleratorInvokedEventArgs args)
+        {
+            if (ActionFramesPage.Visibility != Visibility.Visible ||
+                !CharacterDesk.IsDraftOpen)
+            {
+                return;
+            }
+
+            ExitDraftToPortraitEntry();
+            args.Handled = true;
+        }
+
+        private void OpenShortcutGuideKeyboardAccelerator_Invoked(
+            KeyboardAccelerator sender,
+            KeyboardAcceleratorInvokedEventArgs args)
+        {
+            ShowShortcutGuideOverlay();
+            AppendLog(LogKind.User, SettingsPage.Visibility == Visibility.Visible
+                ? "已通过 F1 打开设置页 Tips 合集。"
+                : "已通过 F1 打开快捷键大全。");
+            args.Handled = true;
+        }
+
+        private async void OpenDraftKeyboardAccelerator_Invoked(
+            KeyboardAccelerator sender,
+            KeyboardAcceleratorInvokedEventArgs args)
+        {
+            try
+            {
+                await ShowDraftOverlayAsync();
+                AppendLog(LogKind.User, CharacterDesk.HasCurrentCharacter
+                    ? "已通过 F2 打开当前角色草稿本。"
+                    : "已通过 F2 打开未选择角色提示。");
+            }
+            catch (Exception ex)
+            {
+                ShowFloatingTip(InfoBarSeverity.Error, "草稿参考层打开失败", ex.Message);
+                AppendLog(LogKind.Error, "草稿参考层打开失败。", ex);
+            }
+
+            args.Handled = true;
+        }
+
+        private void OpenSkillValueGuideKeyboardAccelerator_Invoked(
+            KeyboardAccelerator sender,
+            KeyboardAcceleratorInvokedEventArgs args)
+        {
+            ShowSkillValueGuideOverlay();
+            AppendLog(LogKind.User, "已通过 F3 打开技能数值倍率规范。");
+            args.Handled = true;
+        }
+
+        private void OpenPageRulesKeyboardAccelerator_Invoked(
+            KeyboardAccelerator sender,
+            KeyboardAcceleratorInvokedEventArgs args)
+        {
+            ShowCurrentPageRulesOverlay();
+            if (UnrealProjectSyncPage.Visibility == Visibility.Visible &&
+                _applicationViewModel.UnrealProjectSync.IsEngineToToolbox)
+            {
+                CopyUnrealProjectSyncNamingMapToClipboard();
+                ShowFloatingTip(InfoBarSeverity.Success, "命名对照已复制", "已复制虚幻基础素材图片类型对照表。");
+            }
+
+            AppendLog(LogKind.User, "已通过 F4 打开当前页面填写法则。");
+            args.Handled = true;
+        }
+
+        private static void CopyUnrealProjectSyncNamingMapToClipboard()
+        {
+            CopyTextToClipboard(
+                """
+                道具-ItemIcon
+                技能-SkillIcon-
+                对局头像-BattleAvatar-
+                完整立绘-FullMorphPortrait-
+                立绘-MorphPortrait-
+                背景-Background
+                护援特写-SupportCutIn-
+                头像-Icon-
+                """);
         }
 
         private void SettingsUndoKeyboardAccelerator_Invoked(
             KeyboardAccelerator sender,
             KeyboardAcceleratorInvokedEventArgs args)
         {
+            if (_applicationViewModel.UserOperations.CanUndoLastOperation)
+            {
+                _ = UndoLastUserOperationAsync();
+                args.Handled = true;
+                return;
+            }
+
+            if (SkillsPage.Visibility == Visibility.Visible &&
+                _applicationViewModel.Skills.CanUndoStageChange)
+            {
+                args.Handled = UndoLastSkillStageChange();
+                return;
+            }
+
             if (SettingsPage.Visibility != Visibility.Visible ||
                 !Settings.UndoLastSettingCommand.CanExecute(null))
             {
@@ -51,6 +196,22 @@ namespace CrossingVoidZDTool
             UpdateAuxiliaryDisplayVisibility();
             AppendLog(LogKind.User, "已通过 Ctrl+Z 撤回上一次设置修改。");
             args.Handled = true;
+        }
+
+        private async Task UndoLastUserOperationAsync()
+        {
+            try
+            {
+                if (await _applicationViewModel.UserOperations.UndoLastOperationAsync())
+                {
+                    PersistCurrentCharacterSelection();
+                }
+            }
+            catch (Exception ex)
+            {
+                ShowFloatingTip(InfoBarSeverity.Error, "撤销失败", ex.Message);
+                AppendLog(LogKind.Error, "撤销用户操作失败。", ex);
+            }
         }
 
         private void UpdateLogOptionEnabledState()
@@ -79,49 +240,39 @@ namespace CrossingVoidZDTool
 
         private void ClearLogButton_Click(object sender, RoutedEventArgs e)
         {
+            _logLines.Clear();
             LogItemsControl.Items.Clear();
             AppendLog(LogKind.User, "已清空输出日志。");
         }
 
-        private async void ShowLogHelpButton_Click(object sender, RoutedEventArgs e)
+        private void CopyAllLogButton_Click(object sender, RoutedEventArgs e)
         {
-            var content = new ScrollViewer
-            {
-                MaxHeight = 520,
-                Content = new StackPanel
-                {
-                    Spacing = 14,
-                    Children =
-                    {
-                        CreateHelpText("辅助显示", "这里控制底部工作区路径和输出日志是否显示。设置会立即保存，后续功能也要遵守这些开关。"),
-                        CreateHelpText("输出日志", "log 用于记录用户操作、提示和错误。关闭 log 功能后，底部日志面板会隐藏，并停止写入新日志。"),
-                        CreateHelpText("撤回设置", "在设置页按 Ctrl+Z 可撤回最近一次设置开关修改，例如误关了日志或工作区路径。它不用于目录迁移、文件导入、删除、同步等素材操作。"),
-                        CreateHelpText("后续功能", "动作帧导入、线稿生成、批量导出和 Unreal 同步都要把关键步骤写入 log，并在长任务时走底部全局进度条。")
-                    }
-                }
-            };
-
-            await _dialogService.ShowContentAsync(new ContentDialogRequest(
-                "辅助显示说明",
-                content,
-                PrimaryButtonText: "关闭",
-                CloseButtonText: string.Empty,
-                DefaultButton: ContentDialogButton.Primary,
-                ConfigureDialog: dialog =>
-                {
-                    dialog.MinWidth = 610;
-                    dialog.MaxWidth = 610;
-                }));
+            var text = string.Join(Environment.NewLine + Environment.NewLine, _logLines.Select(item => item.CopyText));
+            CopyTextToClipboard(text);
+            ShowFloatingTip(InfoBarSeverity.Success, "已复制全部日志", $"{_logLines.Count} 条记录");
         }
 
-        private static TextBlock CreateHelpText(string title, string message)
+        private void ScrollLogToBottomButton_Click(object sender, RoutedEventArgs e)
         {
-            return new TextBlock
+            ScrollLogToBottom();
+        }
+
+        private void LogScrollViewer_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
+        {
+            var delta = e.GetCurrentPoint(LogScrollViewer).Properties.MouseWheelDelta;
+            if (delta == 0)
             {
-                Text = $"{title}\n{message}",
-                TextWrapping = TextWrapping.Wrap,
-                IsTextSelectionEnabled = true
-            };
+                return;
+            }
+
+            const double logWheelScrollPixelsPerNotch = 150;
+            var notchCount = delta / 120d;
+            var targetOffset = Math.Clamp(
+                LogScrollViewer.VerticalOffset - notchCount * logWheelScrollPixelsPerNotch,
+                0,
+                LogScrollViewer.ScrollableHeight);
+            LogScrollViewer.ChangeView(null, targetOffset, null, disableAnimation: false);
+            e.Handled = true;
         }
 
         private bool ShouldWriteLog(LogKind kind)
@@ -136,40 +287,200 @@ namespace CrossingVoidZDTool
                 return;
             }
 
-            var text = $"[{DateTime.Now:HH:mm:ss}] [{GetLogKindLabel(kind)}] {message}";
+            var header = $"[{DateTime.Now:HH:mm:ss}] LogZDTool: {GetLogKindLabel(kind)}: {message}";
+            var displayText = header;
+            var copyText = header;
             if (exception is not null)
             {
-                text += $" 原因：{exception.Message}";
+                displayText += $"{Environment.NewLine}{FormatExceptionForLog(exception)}";
+                copyText += $"{Environment.NewLine}{FormatExceptionForLog(exception, stackTraceLineLimit: 8)}";
             }
 
-            LogItemsControl.Items.Add(new TextBlock
-            {
-                Text = text,
-                TextWrapping = TextWrapping.Wrap,
-                FontFamily = new FontFamily("Consolas"),
-                Margin = new Thickness(0, 0, 0, 4),
-                Foreground = GetLogBrush(kind)
-            });
+            _logLines.Enqueue((kind, displayText, copyText));
 
             const int maxLogCount = 300;
-            while (LogItemsControl.Items.Count > maxLogCount)
+            while (_logLines.Count > maxLogCount)
             {
-                LogItemsControl.Items.RemoveAt(0);
+                _logLines.Dequeue();
             }
 
+            RenderLogItems();
+        }
+
+        private void RenderLogItems()
+        {
+            if (LogItemsControl is null || LogScrollViewer is null)
+            {
+                return;
+            }
+
+            LogItemsControl.Items.Clear();
+            foreach (var (kind, displayText, copyText) in _logLines)
+            {
+                LogItemsControl.Items.Add(CreateLogBlock(kind, displayText, copyText));
+            }
+
+            ScrollLogToBottom();
+        }
+
+        private void ScrollLogToBottom()
+        {
             LogScrollViewer.UpdateLayout();
             LogScrollViewer.ChangeView(null, LogScrollViewer.ScrollableHeight, null);
+        }
+
+        private Border CreateLogBlock(LogKind kind, string displayText, string copyText)
+        {
+            var block = new TextBlock
+            {
+                Text = displayText,
+                TextWrapping = TextWrapping.Wrap,
+                FontFamily = new FontFamily("Consolas"),
+                Foreground = GetLogForeground(kind),
+                IsTextSelectionEnabled = false
+            };
+
+            var border = new Border
+            {
+                Margin = new Thickness(0, 0, 0, 6),
+                Padding = new Thickness(8, 6, 8, 6),
+                CornerRadius = new CornerRadius(4),
+                Background = GetLogBackground(kind),
+                BorderBrush = GetLogBorderBrush(kind),
+                BorderThickness = new Thickness(1),
+                Child = block,
+                Tag = copyText
+            };
+            border.Tapped += LogBlock_Tapped;
+            return border;
+        }
+
+        private void LogBlock_Tapped(object sender, TappedRoutedEventArgs e)
+        {
+            if (sender is Border { Tag: string text })
+            {
+                var clipboardText = TrimLogTextForClipboard(text);
+                CopyTextToClipboard(clipboardText);
+                ShowFloatingTip(InfoBarSeverity.Success, "已复制日志", "已复制这一条日志记录。");
+                e.Handled = true;
+            }
+        }
+
+        private static string TrimLogTextForClipboard(string text)
+        {
+            const int maxClipboardLogLength = 12000;
+            if (text.Length <= maxClipboardLogLength)
+            {
+                return text;
+            }
+
+            return text[..maxClipboardLogLength] +
+                $"{Environment.NewLine}... log trimmed for clipboard ({text.Length - maxClipboardLogLength} more characters in UI)";
+        }
+
+        private static void CopyTextToClipboard(string text)
+        {
+            var package = new Windows.ApplicationModel.DataTransfer.DataPackage();
+            package.SetText(text);
+            Windows.ApplicationModel.DataTransfer.Clipboard.SetContent(package);
+        }
+
+        private void ShowFloatingTip(InfoBarSeverity severity, string title, string message)
+        {
+            var tip = new InfoBar
+            {
+                Severity = severity,
+                Title = title,
+                Message = message,
+                IsOpen = true,
+                IsClosable = true,
+                RenderTransform = new TranslateTransform { Y = -18 },
+                Opacity = 0
+            };
+
+            FloatingTipsPanel.Children.Add(tip);
+            PlayFloatingTipEntrance(tip);
+
+            var timer = DispatcherQueue.CreateTimer();
+            timer.Interval = TimeSpan.FromSeconds(severity == InfoBarSeverity.Error ? 5 : 2.6);
+            timer.Tick += (_, _) =>
+            {
+                timer.Stop();
+                _floatingTipTimers.Remove(tip);
+                FloatingTipsPanel.Children.Remove(tip);
+            };
+            _floatingTipTimers[tip] = timer;
+            timer.Start();
+        }
+
+        private void PlayFloatingTipEntrance(InfoBar tip)
+        {
+            var steps = 0;
+            var timer = DispatcherQueue.CreateTimer();
+            timer.Interval = TimeSpan.FromMilliseconds(16);
+            timer.Tick += (_, _) =>
+            {
+                steps++;
+                var progress = Math.Min(1, steps / 12.0);
+                var eased = 1 - Math.Pow(1 - progress, 3);
+                tip.Opacity = eased;
+                if (tip.RenderTransform is TranslateTransform transform)
+                {
+                    transform.Y = -18 + 18 * eased;
+                }
+
+                if (progress >= 1)
+                {
+                    timer.Stop();
+                }
+            };
+            timer.Start();
         }
 
         private static string GetLogKindLabel(LogKind kind)
         {
             return kind switch
             {
-                LogKind.User => "用户",
-                LogKind.Warning => "提示",
-                LogKind.Error => "错误",
-                _ => "信息"
+                LogKind.User => "User",
+                LogKind.Warning => "Warning",
+                LogKind.Error => "Error",
+                _ => "Log"
             };
+        }
+
+        private static string FormatExceptionForLog(Exception exception, int? stackTraceLineLimit = null)
+        {
+            var lines = new List<string>();
+            for (Exception? current = exception; current is not null; current = current.InnerException)
+            {
+                var message = string.IsNullOrWhiteSpace(current.Message) ? "<empty message>" : current.Message;
+                var hResult = current.HResult == 0 ? string.Empty : $" HRESULT=0x{current.HResult:X8}";
+                lines.Add($"    Exception={current.GetType().FullName}{hResult} Message={message}");
+                if (current is COMException comException)
+                {
+                    lines.Add($"    COMErrorCode=0x{comException.ErrorCode:X8}");
+                }
+            }
+
+            if (!string.IsNullOrWhiteSpace(exception.StackTrace))
+            {
+                lines.Add("    StackTrace:");
+                var stackTraceLines = exception.StackTrace
+                    .Split(Environment.NewLine)
+                    .Where(line => !string.IsNullOrWhiteSpace(line))
+                    .Select(line => $"        {line.Trim()}")
+                    .ToList();
+                var emittedStackTraceLines = stackTraceLineLimit is null
+                    ? stackTraceLines
+                    : stackTraceLines.Take(stackTraceLineLimit.Value).ToList();
+                lines.AddRange(emittedStackTraceLines);
+                if (stackTraceLineLimit is not null && stackTraceLines.Count > stackTraceLineLimit.Value)
+                {
+                    lines.Add($"        ... stack trace trimmed for clipboard ({stackTraceLines.Count - stackTraceLineLimit.Value} more lines in UI)");
+                }
+            }
+
+            return string.Join(Environment.NewLine, lines);
         }
 
         private static Brush? GetLogBrush(LogKind kind)
@@ -182,5 +493,36 @@ namespace CrossingVoidZDTool
                 _ => null
             };
         }
+
+        private static Brush GetLogForeground(LogKind kind)
+        {
+            return new SolidColorBrush(kind switch
+            {
+                LogKind.Warning => Colors.Gold,
+                LogKind.Error => Colors.OrangeRed,
+                _ => Color.FromArgb(255, 225, 225, 225)
+            });
+        }
+
+        private static Brush GetLogBackground(LogKind kind)
+        {
+            return new SolidColorBrush(kind switch
+            {
+                LogKind.Warning => Color.FromArgb(42, 160, 110, 0),
+                LogKind.Error => Color.FromArgb(52, 130, 24, 24),
+                _ => Color.FromArgb(26, 255, 255, 255)
+            });
+        }
+
+        private static Brush GetLogBorderBrush(LogKind kind)
+        {
+            return new SolidColorBrush(kind switch
+            {
+                LogKind.Warning => Color.FromArgb(120, 220, 170, 40),
+                LogKind.Error => Color.FromArgb(150, 230, 80, 70),
+                _ => Color.FromArgb(65, 255, 255, 255)
+            });
+        }
+
     }
 }

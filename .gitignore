@@ -16,6 +16,9 @@ Thumbs.db
 Desktop.ini
 *.tmp
 *.log
+*.bak
+__pycache__/
+*.pyc
 
 # Local publish artifacts
 publish/

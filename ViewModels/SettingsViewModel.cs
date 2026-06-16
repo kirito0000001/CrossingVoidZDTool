@@ -18,6 +18,7 @@ internal sealed class SettingsViewModel : ObservableObject
     private string _projectRootStatusMessage = string.Empty;
     private InfoBarSeverity _projectRootStatusSeverity = InfoBarSeverity.Success;
     private bool _showWorkspacePath;
+    private bool _nightModeEnabled;
     private bool _logEnabled;
     private bool _logUserOperations = true;
     private bool _logWarnings = true;
@@ -38,6 +39,8 @@ internal sealed class SettingsViewModel : ObservableObject
 
     public event EventHandler? AuxiliaryDisplayChanged;
 
+    public event EventHandler? ThemeSettingsChanged;
+
     public event EventHandler? LogSettingsChanged;
 
     public RelayCommand UndoLastSettingCommand { get; }
@@ -55,6 +58,16 @@ internal sealed class SettingsViewModel : ObservableObject
     }
 
     public string WorkspaceStatusText => $"就绪：整体项目位置 {ProjectRootPath}";
+
+    public string? CurrentCharacterCode => _settings.CurrentCharacterCode;
+
+    public string? LastEditedCharacterCode => _settings.LastEditedCharacterCode;
+
+    public string? LastEditedModuleTag => _settings.LastEditedModuleTag;
+
+    public string UnrealEnginePath => _settings.UnrealEnginePath ?? string.Empty;
+
+    public string UnrealProjectPath => _settings.UnrealProjectPath ?? string.Empty;
 
     public string ProjectRootStatusTitle
     {
@@ -84,6 +97,18 @@ internal sealed class SettingsViewModel : ObservableObject
             "显示工作区路径",
             () => _settings.ShowWorkspacePath = value,
             () => AuxiliaryDisplayChanged?.Invoke(this, EventArgs.Empty));
+    }
+
+    public bool NightModeEnabled
+    {
+        get => _nightModeEnabled;
+        set => SetSettingProperty(
+            ref _nightModeEnabled,
+            value,
+            nameof(NightModeEnabled),
+            "夜晚模式",
+            () => _settings.NightModeEnabled = value,
+            () => ThemeSettingsChanged?.Invoke(this, EventArgs.Empty));
     }
 
     public bool LogEnabled
@@ -215,6 +240,31 @@ internal sealed class SettingsViewModel : ObservableObject
         };
     }
 
+    public void SetCurrentCharacter(string? currentCharacterCode, string? lastEditedCharacterCode)
+    {
+        _settings.CurrentCharacterCode = currentCharacterCode;
+        _settings.LastEditedCharacterCode = lastEditedCharacterCode;
+        Save();
+        OnPropertyChanged(nameof(CurrentCharacterCode));
+        OnPropertyChanged(nameof(LastEditedCharacterCode));
+    }
+
+    public void SetLastEditedModule(string moduleTag)
+    {
+        _settings.LastEditedModuleTag = moduleTag;
+        Save();
+        OnPropertyChanged(nameof(LastEditedModuleTag));
+    }
+
+    public void SetUnrealProjectSyncPaths(string? enginePath, string? projectPath)
+    {
+        _settings.UnrealEnginePath = enginePath;
+        _settings.UnrealProjectPath = projectPath;
+        Save();
+        OnPropertyChanged(nameof(UnrealEnginePath));
+        OnPropertyChanged(nameof(UnrealProjectPath));
+    }
+
     private bool SetSettingProperty(
         ref bool field,
         bool value,
@@ -277,6 +327,10 @@ internal sealed class SettingsViewModel : ObservableObject
                 ShowWorkspacePath = entry.OldValue;
                 AuxiliaryDisplayChanged?.Invoke(this, EventArgs.Empty);
                 break;
+            case nameof(NightModeEnabled):
+                NightModeEnabled = entry.OldValue;
+                ThemeSettingsChanged?.Invoke(this, EventArgs.Empty);
+                break;
             case nameof(LogEnabled):
                 LogEnabled = entry.OldValue;
                 LogSettingsChanged?.Invoke(this, EventArgs.Empty);
@@ -315,6 +369,7 @@ internal sealed class SettingsViewModel : ObservableObject
         try
         {
             ShowWorkspacePath = settings.ShowWorkspacePath;
+            NightModeEnabled = settings.NightModeEnabled;
             LogEnabled = settings.LogEnabled;
             LogUserOperations = settings.LogUserOperations;
             LogWarnings = settings.LogWarnings;

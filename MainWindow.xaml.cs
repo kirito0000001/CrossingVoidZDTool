@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
@@ -28,19 +29,70 @@ namespace CrossingVoidZDTool
         private static readonly TimeSpan PageEntranceDuration = TimeSpan.FromMilliseconds(280);
         private readonly ApplicationViewModel _applicationViewModel;
         private readonly WinUiDialogService _dialogService;
+        private readonly BaseMaterialService _baseMaterialService = new();
+        private readonly ProductionStatusService _productionStatusService = new();
         private readonly Stopwatch _globalProgressStopwatch = new();
         private readonly DispatcherQueueTimer _globalProgressElapsedTimer;
+        private readonly DispatcherQueueTimer _draftSaveTimer;
+        private readonly DispatcherQueueTimer _characterInfoSaveTimer;
+        private readonly DispatcherQueueTimer _skillsSaveTimer;
+        private readonly DispatcherQueueTimer _buffsSaveTimer;
+        private readonly DispatcherQueueTimer _sequencePreviewTimer;
+        private readonly DispatcherQueueTimer _draftFieldHintTimer;
+        private readonly DispatcherQueueTimer _baseMaterialRefreshTimer;
+        private readonly Dictionary<InfoBar, DispatcherQueueTimer> _floatingTipTimers = new();
+        private readonly Queue<(LogKind Kind, string DisplayText, string CopyText)> _logLines = new();
+        private FileSystemWatcher? _baseMaterialWatcher;
+        private string? _watchedBaseMaterialRoot;
+        private string? _clipboardTextValue;
+        private int? _clipboardNumberValue;
+        private CharacterReferenceImage? _viewingReferenceImage;
+        private SequenceFrameItem? _viewingSequenceFrame;
+        private IReadOnlyList<SequenceFrameItem> _viewingSequenceFrames = [];
+        private IReadOnlyList<SequenceFrameCollectionItem> _pendingDuplicateFrameItems = [];
+        private SequenceFrameCollectionItem? _selectedDuplicateFrameItem;
+        private bool _isResolvingDuplicateFrames;
+        private readonly SequencePreviewBitmapCache _sequencePreviewBitmapCache = new();
+        private TaskCompletionSource<System.Drawing.Rectangle?>? _baseMaterialCropCompletion;
+        private string? _baseMaterialCropSourcePath;
+        private CharacterSkillEntry? _pendingSkillIconEntry;
+        private BuffEntry? _pendingBuffIconEntry;
+        private BaseMaterialItem? _selectedSkillIconItem;
+        private int _baseMaterialCropSourceWidth;
+        private int _baseMaterialCropSourceHeight;
+        private BaseMaterialSpec? _baseMaterialCropSpec;
+        private double _baseMaterialCropScale = 1;
+        private double _baseMaterialCropOffsetX;
+        private double _baseMaterialCropOffsetY;
+        private bool _isPanningBaseMaterialCrop;
+        private Point _lastBaseMaterialCropPointerPosition;
+        private double _referenceImageViewerScale = 1;
+        private bool _isPanningReferenceImage;
+        private Point _lastReferenceImagePointerPosition;
+        private double _sequencePreviewScale = 1;
+        private bool _isPanningSequencePreview;
+        private bool _isReorderingSequenceFrames;
+        private Point _lastSequencePreviewPointerPosition;
         private bool _isChangingShellSelectionInternally;
+        private int _baseMaterialInternalWriteDepth;
         private CancellationTokenSource? _globalProgressCancellation;
+        private TaskCompletionSource<string?>? _characterCreateDialogCompletion;
+        private int _draftFieldHintAnimationToken;
+        private Point _lastDraftFieldHintPosition;
+        private bool _isDraftFieldHovering;
+        private string _pendingDraftFieldHintText = string.Empty;
+        private bool _isOpeningDraftCharacterCard;
 
         public MainWindow()
         {
+            SynchronizationContext.SetSynchronizationContext(new DispatcherQueueSynchronizationContext(DispatcherQueue));
             var settingsViewModel = new SettingsViewModel(new AppSettingsService(), new ProjectRootMigrationService());
-            _applicationViewModel = new ApplicationViewModel(settingsViewModel, new GlobalProgressViewModel());
+            _applicationViewModel = new ApplicationViewModel(settingsViewModel, new GlobalProgressViewModel(), _baseMaterialService);
             InitializeComponent();
             RootGrid.DataContext = _applicationViewModel;
             _dialogService = new WinUiDialogService(() => RootGrid.XamlRoot);
             RegisterSettingsShortcuts();
+            RegisterSkillIconPickerWheelHandler();
             ApplyCustomTitleBar();
             ApplyWindowIcon();
             AppWindow.Resize(new SizeInt32(1500, 920));
@@ -48,7 +100,40 @@ namespace CrossingVoidZDTool
             _globalProgressElapsedTimer = DispatcherQueue.CreateTimer();
             _globalProgressElapsedTimer.Interval = TimeSpan.FromSeconds(1);
             _globalProgressElapsedTimer.Tick += GlobalProgressElapsedTimer_Tick;
+            _draftSaveTimer = DispatcherQueue.CreateTimer();
+            _draftSaveTimer.Interval = TimeSpan.FromMilliseconds(900);
+            _draftSaveTimer.Tick += DraftSaveTimer_Tick;
+            _characterInfoSaveTimer = DispatcherQueue.CreateTimer();
+            _characterInfoSaveTimer.Interval = TimeSpan.FromMilliseconds(900);
+            _characterInfoSaveTimer.Tick += CharacterInfoSaveTimer_Tick;
+            _skillsSaveTimer = DispatcherQueue.CreateTimer();
+            _skillsSaveTimer.Interval = TimeSpan.FromMilliseconds(900);
+            _skillsSaveTimer.Tick += SkillsSaveTimer_Tick;
+            _buffsSaveTimer = DispatcherQueue.CreateTimer();
+            _buffsSaveTimer.Interval = TimeSpan.FromMilliseconds(900);
+            _buffsSaveTimer.Tick += BuffsSaveTimer_Tick;
+            _sequencePreviewTimer = DispatcherQueue.CreateTimer();
+            _sequencePreviewTimer.Interval = TimeSpan.FromMilliseconds(1000d / 12d);
+            _sequencePreviewTimer.Tick += SequencePreviewTimer_Tick;
+            _draftFieldHintTimer = DispatcherQueue.CreateTimer();
+            _draftFieldHintTimer.Interval = TimeSpan.FromSeconds(2);
+            _draftFieldHintTimer.Tick += DraftFieldHintTimer_Tick;
+            _baseMaterialRefreshTimer = DispatcherQueue.CreateTimer();
+            _baseMaterialRefreshTimer.Interval = TimeSpan.FromMilliseconds(450);
+            _baseMaterialRefreshTimer.Tick += BaseMaterialRefreshTimer_Tick;
+            Activated += MainWindow_Activated;
+            Closed += MainWindow_Closed;
+            _applicationViewModel.CharacterDesk.DraftTextEdited += (_, _) => ScheduleDraftSave();
+            _applicationViewModel.UnrealSync.CharacterInfoEdited += (_, _) => ScheduleCharacterInfoSave();
+            _applicationViewModel.Skills.SkillsEdited += (_, _) => ScheduleSkillsSave();
+            _applicationViewModel.SequenceFrames.SequenceFramesSaved += (_, _) =>
+            {
+                MarkLastEditedModule(ToolboxModuleKey.SequenceFrames);
+                PersistCurrentCharacterSelection();
+            };
+            _applicationViewModel.Buffs.BuffsEdited += (_, _) => ScheduleBuffsSave();
             Settings.AuxiliaryDisplayChanged += (_, _) => UpdateAuxiliaryDisplayVisibility();
+            Settings.ThemeSettingsChanged += (_, _) => ApplyThemeSettings();
             Settings.LogSettingsChanged += (_, _) =>
             {
                 UpdateLogOptionEnabledState();
@@ -57,16 +142,42 @@ namespace CrossingVoidZDTool
             };
 
             Settings.LoadAndEnsureProjectRoot();
+            _applicationViewModel.UnrealProjectSync.Load(Settings.UnrealEnginePath, Settings.UnrealProjectPath);
             _applicationViewModel.CharacterDesk.StatusText = Settings.WorkspaceStatusText;
+            ApplyThemeSettings();
             UpdateLogOptionEnabledState();
             UpdateAuxiliaryDisplayVisibility();
             AppendLog(LogKind.Info, "程序启动，已检查整体项目目录。");
+            _ = LoadCharacterCardsAsync();
             ShowCharacterDeskPage();
+        }
+
+        private void MainWindow_Closed(object sender, WindowEventArgs args)
+        {
+            FlushPendingCharacterInfoSave();
+            FlushPendingSkillsSave();
+            FlushPendingBuffsSave();
         }
 
         private SettingsViewModel Settings => _applicationViewModel.Settings;
 
         private GlobalProgressViewModel GlobalProgress => _applicationViewModel.GlobalProgress;
+
+        private CharacterDeskViewModel CharacterDesk => _applicationViewModel.CharacterDesk;
+
+        private void RunOnUiThread(Action action)
+        {
+            if (DispatcherQueue.HasThreadAccess)
+            {
+                action();
+                return;
+            }
+
+            if (!DispatcherQueue.TryEnqueue(() => action()))
+            {
+                // The window is closing; callers are scheduling UI work that can be safely dropped.
+            }
+        }
 
         private void ApplyWindowIcon()
         {

@@ -73,6 +73,7 @@ namespace CrossingVoidZDTool
                 await HideGlobalProgressAfterDelayAsync();
                 Settings.SetProjectRootStatus(InfoBarSeverity.Success, "目录迁移完成", $"已迁移并校验 {result.FileCount} 个文件、{result.DirectoryCount} 个文件夹。旧目录已删除：{oldProjectRootPath}");
                 _applicationViewModel.CharacterDesk.StatusText = Settings.WorkspaceStatusText;
+                await LoadCharacterCardsAsync();
                 AppendLog(LogKind.User, $"整体项目目录迁移完成：{newProjectRootPath}");
             }
             catch (Exception ex)
@@ -82,23 +83,16 @@ namespace CrossingVoidZDTool
                 Settings.EnsureCurrentProjectRoot();
                 Settings.SetProjectRootStatus(InfoBarSeverity.Error, "目录迁移失败", $"已保留原目录和设置，未删除旧目录。错误：{ex.Message}");
                 _applicationViewModel.CharacterDesk.StatusText = Settings.WorkspaceStatusText;
+                await LoadCharacterCardsAsync();
                 AppendLog(LogKind.Error, "整体项目目录迁移失败。", ex);
             }
         }
 
-        private async void ShowProjectRootHelpButton_Click(object sender, RoutedEventArgs e)
+        private void ApplyThemeSettings()
         {
-            await _dialogService.ShowContentAsync(new ContentDialogRequest(
-                "整体项目位置说明",
-                DialogContentFactory.CreateProjectRootHelpContent(),
-                PrimaryButtonText: "关闭",
-                CloseButtonText: string.Empty,
-                DefaultButton: ContentDialogButton.Primary,
-                ConfigureDialog: dialog =>
-                {
-                    dialog.MinWidth = 610;
-                    dialog.MaxWidth = 610;
-                }));
+            RootGrid.RequestedTheme = Settings.NightModeEnabled
+                ? ElementTheme.Dark
+                : ElementTheme.Light;
         }
 
     }

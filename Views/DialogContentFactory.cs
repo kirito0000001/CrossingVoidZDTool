@@ -1,4 +1,5 @@
 using CrossingVoidZDTool.Services;
+using System.Collections.Generic;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -7,6 +8,106 @@ namespace CrossingVoidZDTool.Views;
 
 internal static class DialogContentFactory
 {
+    public static CharacterNameInput CreateCharacterNameInput()
+    {
+        var nameTextBox = new TextBox
+        {
+            Header = "角色名字",
+            PlaceholderText = "例如：Kirito",
+            MaxLength = 60
+        };
+        var errorInfoBar = new InfoBar
+        {
+            IsOpen = false,
+            Severity = InfoBarSeverity.Warning,
+            Title = "无法创建"
+        };
+        var panel = new StackPanel
+        {
+            Spacing = 12,
+            Width = 420,
+            Children =
+            {
+                new TextBlock
+                {
+                    Text = "这里只填写角色名字。工具箱会自动生成角色英文代号和基础文件夹，后续可继续细化角色信息。",
+                    TextWrapping = TextWrapping.Wrap,
+                    Foreground = Application.Current.Resources["TextFillColorSecondaryBrush"] as Brush
+                },
+                nameTextBox,
+                errorInfoBar
+            }
+        };
+
+        return new CharacterNameInput(panel, nameTextBox, errorInfoBar);
+    }
+
+    public static ComboCharacterSelection CreateComboCharacterSelection(IReadOnlyList<CharacterCard> characters)
+    {
+        var listView = new ListView
+        {
+            SelectionMode = ListViewSelectionMode.Single,
+            MaxHeight = 340,
+            HorizontalAlignment = HorizontalAlignment.Stretch
+        };
+
+        foreach (var character in characters)
+        {
+            listView.Items.Add(new ListViewItem
+            {
+                Tag = character,
+                Content = new StackPanel
+                {
+                    Spacing = 4,
+                    Children =
+                    {
+                        new TextBlock
+                        {
+                            Text = character.EffectiveDisplayName,
+                            FontSize = 16,
+                            FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
+                        },
+                        new TextBlock
+                        {
+                            Text = $"{character.Code} / {(character.IsCompleted ? "已完成" : "草稿")}",
+                            Foreground = Application.Current.Resources["TextFillColorSecondaryBrush"] as Brush
+                        }
+                    }
+                }
+            });
+        }
+
+        if (listView.Items.Count > 0)
+        {
+            listView.SelectedIndex = 0;
+        }
+
+        var errorInfoBar = new InfoBar
+        {
+            IsOpen = false,
+            Severity = InfoBarSeverity.Warning,
+            Title = "请选择角色"
+        };
+        var panel = new StackPanel
+        {
+            Spacing = 12,
+            Width = 460,
+            Children =
+            {
+                new TextBlock
+                {
+                    Text = "连携技需要先绑定一个已有角色。这里会显示当前工程里已完成和草稿中的角色。",
+                    TextWrapping = TextWrapping.Wrap,
+                    Foreground = Application.Current.Resources["TextFillColorSecondaryBrush"] as Brush
+                },
+                listView,
+                errorInfoBar
+            }
+        };
+
+        return new ComboCharacterSelection(panel, listView, errorInfoBar);
+    }
+
     public static ScrollViewer CreateProjectRootHelpContent()
     {
         var panel = CreateHelpPanel();
@@ -91,3 +192,7 @@ internal static class DialogContentFactory
         };
     }
 }
+
+internal sealed record CharacterNameInput(StackPanel Content, TextBox NameTextBox, InfoBar ErrorInfoBar);
+
+internal sealed record ComboCharacterSelection(StackPanel Content, ListView CharacterListView, InfoBar ErrorInfoBar);

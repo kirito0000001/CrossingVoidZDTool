@@ -4,8 +4,8 @@
     <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
     <TargetPlatformMinVersion>10.0.17763.0</TargetPlatformMinVersion>
     <RootNamespace>CrossingVoidZDTool</RootNamespace>
-    <AssemblyName>零境 ZD 角色制作工具箱</AssemblyName>
-    <Product>零境 ZD 角色制作工具箱</Product>
+    <AssemblyName>零境交错：ZD工具箱</AssemblyName>
+    <Product>零境交错：ZD工具箱</Product>
     <Version>1.0.0</Version>
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
     <FileVersion>1.0.0.0</FileVersion>
@@ -34,6 +34,15 @@
     <Content Include="Assets\Wide310x150Logo.scale-200.png" />
     <Content Include="Assets\AppIcon.ico" />
     <Content Include="Assets\AppIcon.png" />
+    <Content Include="Assets\DefaultPortrait.png" />
+    <Content Include="Tools\**\*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
+    </Content>
+    <Content Remove="Tools\**\__pycache__\**\*" />
+    <Content Remove="Tools\**\*.pyc" />
+    <None Remove="Tools\**\__pycache__\**\*" />
+    <None Remove="Tools\**\*.pyc" />
   </ItemGroup>
 
   <ItemGroup>
@@ -59,6 +68,7 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.28000.1839" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="2.0.1" />
+    <PackageReference Include="System.Drawing.Common" Version="8.0.16" />
   </ItemGroup>
 
   <!--

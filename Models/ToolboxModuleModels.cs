@@ -6,6 +6,10 @@ internal enum ToolboxModuleKey
     ActionFrames,
     LineArt,
     UnrealSync,
+    Skills,
+    SequenceFrames,
+    Buffs,
+    UnrealProjectSync,
     Settings
 }
 
