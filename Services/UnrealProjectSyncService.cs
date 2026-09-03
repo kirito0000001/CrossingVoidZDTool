@@ -1,4 +1,5 @@
 using System;
+using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
@@ -16,7 +17,14 @@ namespace CrossingVoidZDTool.Services;
 
 internal sealed class UnrealProjectSyncService
 {
+    private const int CurrentExportSchemaVersion = 2;
+    private static readonly UnicodeEncoding StrictUnicodeEncoding = new(
+        bigEndian: false,
+        byteOrderMark: false,
+        throwOnInvalidBytes: true);
+
     public const string TargetBaseMaterialContentPath = "/Game/AssetMaterial/ImageS/CharaterS";
+    public const string TargetSharedBuffIconContentPath = "/Game/AssetMaterial/ImageS/BUFF";
     public const string TargetZdContentPath = "/Game/GameActor2D";
     public const string TargetCharacterItemContentPath = "/Game/ITems/CharItemS";
     public const string LinkSkillLibraryObjectPath = "/Game/BaseC/ExCordLibrary/LB_Fucs.LB_Fucs";
@@ -27,6 +35,7 @@ internal sealed class UnrealProjectSyncService
     private static readonly string[] ExportTargetContentPaths =
     [
         TargetBaseMaterialContentPath,
+        TargetSharedBuffIconContentPath,
         TargetZdContentPath
     ];
 
@@ -179,6 +188,186 @@ internal sealed class UnrealProjectSyncService
             items);
     }
 
+    public void ValidatePublishCharacterFolders(string projectPath, string characterCode, bool requireAssetTypes = false)
+    {
+        var invalid = CheckPublishCharacterFolders(projectPath, characterCode, requireAssetTypes)
+            .Where(item => !item.IsCompliant)
+            .ToArray();
+        if (invalid.Length == 0)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            "底层检测未通过，请先在 Unreal 内容浏览器中整理以下目录或资产：\n" +
+            string.Join("\n", invalid.Select(item =>
+                $"- {item.DisplayName}：应为 {item.ExpectedPath}" +
+                (string.IsNullOrWhiteSpace(item.ExpectedType) ? string.Empty : $"；类型应为 {item.ExpectedType}") +
+                (string.IsNullOrWhiteSpace(item.ActualPath) ? string.Empty : $"；当前为 {item.ActualPath}") +
+                (string.IsNullOrWhiteSpace(item.ActualType) ? string.Empty : $"；当前类型 {item.ActualType}"))));
+    }
+
+    public IReadOnlyList<UnrealPublishFoundationCheckItem> CheckPublishCharacterFolders(
+        string projectPath,
+        string characterCode,
+        bool requireAssetTypes = false)
+    {
+        if (string.IsNullOrWhiteSpace(projectPath) || string.IsNullOrWhiteSpace(characterCode))
+        {
+            throw new InvalidOperationException("检测角色目录前必须选择 Unreal 项目和已完成角色。");
+        }
+
+        var contentPath = Path.Combine(Path.GetDirectoryName(Path.GetFullPath(projectPath))!, "Content");
+        var baseFolder = CheckExactCharacterFolder(contentPath, TargetBaseMaterialContentPath, characterCode, "角色图片素材");
+        var actorFolder = CheckExactCharacterFolder(contentPath, TargetZdContentPath, characterCode, "角色战斗素材");
+        var actorRootPath = CombineContentPath(contentPath, $"{TargetZdContentPath}/{characterCode}");
+        var actorObjectPath = $"{TargetZdContentPath}/{characterCode}";
+        var soundRootPath = Path.Combine(actorRootPath, "Sound");
+        var soundObjectPath = $"{actorObjectPath}/Sound";
+        var itemObjectPath = $"{TargetCharacterItemContentPath}/Item_{characterCode}.Item_{characterCode}";
+        var manifest = requireAssetTypes
+            ? LoadExportManifest(Path.Combine(GetExportDirectoryPath(projectPath), ExportManifestFileName))
+            : null;
+        return new List<UnrealPublishFoundationCheckItem>
+        {
+            CheckExactAsset(contentPath, CombineContentPath(contentPath, TargetCharacterItemContentPath), TargetCharacterItemContentPath,
+                $"Item_{characterCode}", "角色 Item", "Blueprint", manifest, requireAssetTypes),
+            baseFolder,
+            actorFolder,
+            CheckExactAsset(contentPath, actorRootPath, actorObjectPath, characterCode, "角色蓝图", "Blueprint", manifest, requireAssetTypes, name =>
+                !name.EndsWith("_AnimBP", StringComparison.OrdinalIgnoreCase) &&
+                !name.EndsWith("_AnimMaps", StringComparison.OrdinalIgnoreCase)),
+            CheckExactAsset(contentPath, actorRootPath, actorObjectPath, $"{characterCode}_AnimBP", "动画蓝图", "PaperZDAnimBP", manifest, requireAssetTypes,
+                name => name.EndsWith("_AnimBP", StringComparison.OrdinalIgnoreCase)),
+            CheckExactAsset(contentPath, actorRootPath, actorObjectPath, $"{characterCode}_AnimMaps", "动画库", "PaperZDAnimationSource_Flipbook", manifest, requireAssetTypes,
+                name => name.EndsWith("_AnimMaps", StringComparison.OrdinalIgnoreCase)),
+            CheckChildFolder(actorRootPath, actorObjectPath, "BUFF", "个人 BUFF 素材"),
+            CheckChildFolder(actorRootPath, actorObjectPath, "Material", "序列帧素材"),
+            CheckChildFolder(actorRootPath, actorObjectPath, "Sound", "角色声音"),
+            CheckExactAsset(contentPath, soundRootPath, soundObjectPath, $"{characterCode}_OnDM", "Meta 受击音", "MetaSoundSource", manifest, requireAssetTypes,
+                name => name.EndsWith("_OnDM", StringComparison.OrdinalIgnoreCase)),
+            CheckExactAsset(contentPath, soundRootPath, soundObjectPath, $"{characterCode}_Con_Talk", "语音并发", "SoundConcurrency", manifest, requireAssetTypes,
+                name => name.EndsWith("_Con_Talk", StringComparison.OrdinalIgnoreCase)),
+            CheckExactAsset(contentPath, soundRootPath, soundObjectPath, $"{characterCode}_Con_Ondm", "受击并发", "SoundConcurrency", manifest, requireAssetTypes,
+                name => name.EndsWith("_Con_Ondm", StringComparison.OrdinalIgnoreCase)),
+            CheckChildFolder(actorRootPath, actorObjectPath, "AnimSequences", "动画序列"),
+            CheckChildFolder(actorRootPath, actorObjectPath, "ExAsset", "其他素材")
+        };
+    }
+
+    private static UnrealPublishFoundationCheckItem CheckExactCharacterFolder(
+        string contentPath,
+        string contentRoot,
+        string characterCode,
+        string displayName)
+    {
+        var rootPath = CombineContentPath(contentPath, contentRoot);
+        var exactFolder = Directory.Exists(rootPath)
+            ? Directory.EnumerateDirectories(rootPath)
+                .FirstOrDefault(path => string.Equals(Path.GetFileName(path), characterCode, StringComparison.Ordinal))
+            : null;
+        if (exactFolder is not null)
+        {
+            return new(displayName, $"{contentRoot}/{characterCode}", $"{contentRoot}/{characterCode}", true);
+        }
+
+        var legacyFolder = Directory.Exists(rootPath)
+            ? Directory.EnumerateDirectories(rootPath)
+                .FirstOrDefault(path =>
+                    string.Equals(Path.GetFileName(path), characterCode, StringComparison.OrdinalIgnoreCase) ||
+                    Path.GetFileName(path).EndsWith($"_{characterCode}", StringComparison.OrdinalIgnoreCase))
+            : null;
+        return new(
+            displayName,
+            $"{contentRoot}/{characterCode}",
+            legacyFolder is null ? string.Empty : ToGameContentPath(contentPath, legacyFolder),
+            false);
+    }
+
+    private static UnrealPublishFoundationCheckItem CheckChildFolder(
+        string actorRootPath,
+        string actorObjectPath,
+        string folderName,
+        string displayName)
+    {
+        var expectedObjectPath = $"{actorObjectPath}/{folderName}";
+        var exists = Directory.Exists(Path.Combine(actorRootPath, folderName));
+        return new(displayName, expectedObjectPath, exists ? expectedObjectPath : string.Empty, exists);
+    }
+
+    private static UnrealPublishFoundationCheckItem CheckExactAsset(
+        string contentPath,
+        string diskFolder,
+        string objectFolder,
+        string expectedAssetName,
+        string displayName,
+        string expectedType,
+        UnrealProjectExportManifest? manifest,
+        bool requireAssetType,
+        Func<string, bool>? legacyPredicate = null)
+    {
+        var expectedFile = Path.Combine(diskFolder, $"{expectedAssetName}.uasset");
+        var expectedObjectPath = $"{objectFolder}/{expectedAssetName}.{expectedAssetName}";
+        if (!File.Exists(expectedFile))
+        {
+            var legacyFile = Directory.Exists(diskFolder) && legacyPredicate is not null
+            ? Directory.EnumerateFiles(diskFolder, "*.uasset", SearchOption.TopDirectoryOnly)
+                .FirstOrDefault(path => legacyPredicate(Path.GetFileNameWithoutExtension(path)))
+            : null;
+            return new(
+                displayName,
+                expectedObjectPath,
+                legacyFile is null ? string.Empty : ToGameObjectPath(contentPath, legacyFile),
+                false,
+                legacyFile is null ? "缺失" : "命名不规范",
+                expectedType);
+        }
+
+        if (!requireAssetType)
+        {
+            return new(displayName, expectedObjectPath, expectedObjectPath, true, ExpectedType: expectedType, ActualType: "等待 Unreal 类型复检");
+        }
+
+        var rawAssetClass = manifest?.Assets.FirstOrDefault(item =>
+                string.Equals(item.ObjectPath, expectedObjectPath, StringComparison.OrdinalIgnoreCase))?.AssetClass ??
+            manifest?.CharacterItems.FirstOrDefault(item =>
+                string.Equals(item.ObjectPath, expectedObjectPath, StringComparison.OrdinalIgnoreCase))?.AssetClass;
+        var actualType = GetAssetClassName(rawAssetClass);
+        var typeMatches = !string.IsNullOrWhiteSpace(actualType) && string.Equals(actualType, expectedType, StringComparison.OrdinalIgnoreCase);
+        return new(
+            displayName,
+            expectedObjectPath,
+            expectedObjectPath,
+            typeMatches,
+            typeMatches ? string.Empty : string.IsNullOrWhiteSpace(actualType) ? "未读取类型" : "类型错误",
+            expectedType,
+            actualType);
+    }
+
+    private static string GetAssetClassName(string? assetClass)
+    {
+        if (string.IsNullOrWhiteSpace(assetClass)) return string.Empty;
+        const string marker = "asset_name: \"";
+        var start = assetClass.LastIndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (start < 0) return assetClass.Trim();
+        start += marker.Length;
+        var end = assetClass.IndexOf('"', start);
+        return end > start ? assetClass[start..end] : assetClass.Trim();
+    }
+
+    private static string ToGameContentPath(string contentPath, string diskPath)
+    {
+        var relative = Path.GetRelativePath(contentPath, diskPath).Replace('\\', '/');
+        return $"/Game/{relative}";
+    }
+
+    private static string ToGameObjectPath(string contentPath, string diskPath)
+    {
+        var packagePath = ToGameContentPath(contentPath, Path.ChangeExtension(diskPath, null));
+        var assetName = Path.GetFileNameWithoutExtension(diskPath);
+        return $"{packagePath}.{assetName}";
+    }
+
     public string GetExportScriptPath()
     {
         return Path.Combine(AppContext.BaseDirectory, ExportScriptRelativePath);
@@ -201,6 +390,8 @@ internal sealed class UnrealProjectSyncService
         {
             throw new InvalidOperationException("请先选择有效的 Unreal .uproject 文件。");
         }
+
+        ValidateProjectModuleBuildIds(normalizedEnginePath, normalizedProjectPath);
 
         var scriptPath = GetExportScriptPath();
         if (!File.Exists(scriptPath))
@@ -229,9 +420,115 @@ internal sealed class UnrealProjectSyncService
             startInfo.Environment["ZD_TOOLBOX_SELECTED_CHARACTERS"] =
                 $"[{string.Join(", ", selectedCharacterCodes.Select(ToJsonStringLiteral))}]";
         }
-
         return startInfo;
     }
+
+    private static void ValidateProjectModuleBuildIds(string editorPath, string projectPath)
+    {
+        var editorDirectory = Path.GetDirectoryName(editorPath);
+        var projectDirectory = Path.GetDirectoryName(projectPath);
+        if (string.IsNullOrWhiteSpace(editorDirectory) || string.IsNullOrWhiteSpace(projectDirectory))
+        {
+            return;
+        }
+
+        var engineManifest = TryReadModuleManifest(Path.Combine(editorDirectory, "UnrealEditor.modules"));
+        if (engineManifest is null || string.IsNullOrWhiteSpace(engineManifest.BuildId))
+        {
+            return;
+        }
+
+        var manifestPaths = new List<string>();
+        var projectManifestPath = Path.Combine(projectDirectory, "Binaries", "Win64", "UnrealEditor.modules");
+        if (File.Exists(projectManifestPath))
+        {
+            manifestPaths.Add(projectManifestPath);
+        }
+
+        var pluginsPath = Path.Combine(projectDirectory, "Plugins");
+        if (Directory.Exists(pluginsPath))
+        {
+            manifestPaths.AddRange(Directory.EnumerateFiles(
+                pluginsPath,
+                "UnrealEditor.modules",
+                SearchOption.AllDirectories));
+        }
+
+        var mismatches = manifestPaths
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(path => (Path: path, Manifest: TryReadModuleManifest(path)))
+            .Where(item =>
+                item.Manifest is not null &&
+                !string.IsNullOrWhiteSpace(item.Manifest.BuildId) &&
+                !string.Equals(item.Manifest.BuildId, engineManifest.BuildId, StringComparison.OrdinalIgnoreCase))
+            .ToArray();
+        if (mismatches.Length == 0)
+        {
+            return;
+        }
+
+        var moduleNames = mismatches
+            .SelectMany(item => item.Manifest!.Modules)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(name => name, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var projectBuildIds = mismatches
+            .Select(item => item.Manifest!.BuildId)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(buildId => buildId, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var engineDirectory = Path.GetFullPath(Path.Combine(editorDirectory, "..", ".."));
+        var buildScriptPath = Path.Combine(engineDirectory, "Build", "BatchFiles", "Build.bat");
+        var targetName = $"{Path.GetFileNameWithoutExtension(projectPath)}Editor";
+        var buildCommand = $"{Quote(buildScriptPath)} {targetName} Win64 Development -Project={Quote(projectPath)} -WaitMutex -FromMSBuild";
+
+        throw new InvalidOperationException(
+            "当前 Unreal 引擎与项目现有 C++/插件二进制版本不一致，完整导入尚未执行。\n" +
+            $"当前引擎 BuildId：{engineManifest.BuildId}\n" +
+            $"项目二进制 BuildId：{string.Join("、", projectBuildIds)}\n" +
+            $"需要重新编译的模块：{string.Join("、", moduleNames)}\n" +
+            "请先关闭 Unreal Editor，并使用当前引擎重新编译项目：\n" +
+            buildCommand);
+    }
+
+    private static UnrealModuleManifest? TryReadModuleManifest(string path)
+    {
+        if (!File.Exists(path))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path, Encoding.UTF8));
+            var root = document.RootElement;
+            if (!root.TryGetProperty("BuildId", out var buildIdElement))
+            {
+                return null;
+            }
+
+            var buildId = buildIdElement.GetString() ?? string.Empty;
+            var modules = root.TryGetProperty("Modules", out var modulesElement) &&
+                modulesElement.ValueKind == JsonValueKind.Object
+                ? modulesElement.EnumerateObject().Select(property => property.Name).ToArray()
+                : [];
+            return new UnrealModuleManifest(buildId, modules);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+        catch (IOException)
+        {
+            return null;
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    private sealed record UnrealModuleManifest(string BuildId, IReadOnlyList<string> Modules);
 
     public async Task<UnrealProjectSyncExportRunResult> ExportProjectCharactersAsync(
         string? enginePath,
@@ -305,7 +602,26 @@ internal sealed class UnrealProjectSyncService
         cancellationToken.ThrowIfCancellationRequested();
         progress?.Report(new ProgressUpdate("正在读取 Unreal 导出结果...", 94, manifestPath));
         var output = await outputTask + await errorTask;
+        if (process.ExitCode != 0)
+        {
+            var detail = string.IsNullOrWhiteSpace(output)
+                ? "Unreal 未返回标准输出；请查看项目 Saved/Logs 下的最新日志。"
+                : output.Trim();
+            if (detail.Length > 4000)
+            {
+                detail = detail[^4000..];
+            }
+
+            throw new InvalidOperationException(
+                $"Unreal 角色数据导出失败，退出码 {process.ExitCode}。\n{detail}");
+        }
+
         var manifest = LoadExportManifest(manifestPath);
+        if (manifest is null)
+        {
+            throw new InvalidOperationException($"Unreal 导出进程已结束，但没有生成有效清单：{manifestPath}");
+        }
+
         var assetCount = manifest?.Assets.Count ?? 0;
         var characterItemCount = manifest?.CharacterItems.Count ?? 0;
         var characterSequenceCount = manifest?.CharacterSequences.Count ?? 0;
@@ -473,6 +789,17 @@ internal sealed class UnrealProjectSyncService
         var manifestGeneratedAt = ParseGeneratedAt(manifest?.GeneratedAt);
         var detailedCandidates = BuildManifestCharacterCandidates(manifest)
             .ToDictionary(candidate => candidate.Code, StringComparer.OrdinalIgnoreCase);
+        var summaryNames = (manifest?.CharacterSummaries ?? [])
+            .Where(summary => !string.IsNullOrWhiteSpace(summary.Code) && !string.IsNullOrWhiteSpace(summary.DisplayName))
+            .GroupBy(summary => summary.Code.Trim(), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(
+                group => group.Key,
+                group => group.First().DisplayName.Trim(),
+                StringComparer.OrdinalIgnoreCase);
+        foreach (var item in ReadCharacterItemDisplayNames(contentPath))
+        {
+            summaryNames[item.Key] = item.Value;
+        }
         var scannedCandidates = BuildScannedCharacterCandidates(contentPath)
             .ToDictionary(candidate => candidate.Code, StringComparer.OrdinalIgnoreCase);
 
@@ -483,20 +810,36 @@ internal sealed class UnrealProjectSyncService
                 .ToArray();
         }
 
-        return scannedCandidates.Values
-            .Select(candidate =>
+        var candidateCodes = scannedCandidates.Keys
+            .Union(detailedCandidates.Keys, StringComparer.OrdinalIgnoreCase)
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+        return candidateCodes
+            .Select(code =>
             {
-                if (!detailedCandidates.TryGetValue(candidate.Code, out var detailed))
+                if (!scannedCandidates.TryGetValue(code, out var candidate))
                 {
-                    return candidate;
+                    return detailedCandidates[code];
                 }
 
-                if (manifestGeneratedAt is null || HasCharacterFolderChangedAfterExport(contentPath, candidate.Code, manifestGeneratedAt.Value))
+                if (!detailedCandidates.TryGetValue(code, out var detailed))
                 {
-                    return CloneCharacterCandidateWithLatestData(detailed, false);
+                    return summaryNames.TryGetValue(code, out var scannedDisplayName)
+                        ? CloneCharacterCandidateWithLatestData(candidate, false, scannedDisplayName)
+                        : candidate;
                 }
 
-                return detailed;
+                var displayName = summaryNames.TryGetValue(code, out var summaryDisplayName)
+                    ? summaryDisplayName
+                    : detailed.DisplayName;
+
+                if (manifestGeneratedAt is null || HasCharacterFolderChangedAfterExport(contentPath, code, manifestGeneratedAt.Value))
+                {
+                    return CloneCharacterCandidateWithLatestData(detailed, false, displayName);
+                }
+
+                return string.Equals(displayName, detailed.DisplayName, StringComparison.Ordinal)
+                    ? detailed
+                    : CloneCharacterCandidateWithLatestData(detailed, true, displayName);
             })
             .OrderBy(candidate => candidate.Code, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -511,27 +854,35 @@ internal sealed class UnrealProjectSyncService
 
         var baseMaterialDiskPath = CombineContentPath(contentPath, TargetBaseMaterialContentPath);
         var zdDiskPath = CombineContentPath(contentPath, TargetZdContentPath);
-        if (!Directory.Exists(baseMaterialDiskPath) || !Directory.Exists(zdDiskPath))
+        if (!Directory.Exists(baseMaterialDiskPath) && !Directory.Exists(zdDiskPath))
         {
             return [];
         }
 
-        var baseFolders = Directory.EnumerateDirectories(baseMaterialDiskPath)
-            .Select(path => (Code: Path.GetFileName(path), Path: path))
-            .Where(item => !string.IsNullOrWhiteSpace(item.Code))
-            .ToDictionary(item => item.Code, item => item.Path, StringComparer.OrdinalIgnoreCase);
-        var zdFolders = Directory.EnumerateDirectories(zdDiskPath)
-            .Select(path => (Code: Path.GetFileName(path), Path: path))
-            .Where(item => !string.IsNullOrWhiteSpace(item.Code))
-            .ToDictionary(item => item.Code, item => item.Path, StringComparer.OrdinalIgnoreCase);
+        var baseFolders = Directory.Exists(baseMaterialDiskPath)
+            ? Directory.EnumerateDirectories(baseMaterialDiskPath)
+                .Select(path => (Code: Path.GetFileName(path), Path: path))
+                .Where(item => !string.IsNullOrWhiteSpace(item.Code))
+                .ToDictionary(item => item.Code, item => item.Path, StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var zdFolders = Directory.Exists(zdDiskPath)
+            ? Directory.EnumerateDirectories(zdDiskPath)
+                .Select(path => (Code: Path.GetFileName(path), Path: path))
+                .Where(item => !string.IsNullOrWhiteSpace(item.Code))
+                .ToDictionary(item => item.Code, item => item.Path, StringComparer.OrdinalIgnoreCase)
+            : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
         return baseFolders.Keys
-            .Intersect(zdFolders.Keys, StringComparer.OrdinalIgnoreCase)
+            .Union(zdFolders.Keys, StringComparer.OrdinalIgnoreCase)
             .OrderBy(code => code, StringComparer.OrdinalIgnoreCase)
             .Select(code =>
             {
-                var baseAssetCount = CountUassetFiles(baseFolders[code]);
-                var zdAssetCount = CountUassetFiles(Path.Combine(zdFolders[code], "Material"));
+                var baseAssetCount = baseFolders.TryGetValue(code, out var baseFolder)
+                    ? CountUassetFiles(baseFolder)
+                    : 0;
+                var zdAssetCount = zdFolders.TryGetValue(code, out var zdFolder)
+                    ? CountUassetFiles(Path.Combine(zdFolder, "Material"))
+                    : 0;
                 return new UnrealProjectSyncCharacterCandidate(
                     code,
                     code,
@@ -549,13 +900,105 @@ internal sealed class UnrealProjectSyncService
             .ToArray();
     }
 
+    private static IReadOnlyDictionary<string, string> ReadCharacterItemDisplayNames(string contentPath)
+    {
+        if (string.IsNullOrWhiteSpace(contentPath) || !Directory.Exists(contentPath))
+        {
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var itemFolderPath = CombineContentPath(contentPath, TargetCharacterItemContentPath);
+        if (!Directory.Exists(itemFolderPath))
+        {
+            return new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        var names = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var filePath in Directory.EnumerateFiles(itemFolderPath, "Item_*.uasset", SearchOption.TopDirectoryOnly))
+        {
+            var assetName = Path.GetFileNameWithoutExtension(filePath);
+            if (assetName.Length <= "Item_".Length)
+            {
+                continue;
+            }
+
+            try
+            {
+                var displayName = ReadFirstLocalizedText(File.ReadAllBytes(filePath));
+                if (!string.IsNullOrWhiteSpace(displayName))
+                {
+                    names[assetName["Item_".Length..]] = displayName;
+                }
+            }
+            catch (IOException)
+            {
+            }
+            catch (UnauthorizedAccessException)
+            {
+            }
+        }
+
+        return names;
+    }
+
+    private static string ReadFirstLocalizedText(ReadOnlySpan<byte> bytes)
+    {
+        for (var offset = 0; offset <= bytes.Length - 8; offset++)
+        {
+            var serializedLength = BinaryPrimitives.ReadInt32LittleEndian(bytes.Slice(offset, sizeof(int)));
+            if (serializedLength is > -2 or < -128)
+            {
+                continue;
+            }
+
+            var characterCount = -serializedLength;
+            var byteCount = characterCount * sizeof(char);
+            var valueOffset = offset + sizeof(int);
+            if (valueOffset + byteCount > bytes.Length ||
+                bytes[valueOffset + byteCount - 2] != 0 ||
+                bytes[valueOffset + byteCount - 1] != 0)
+            {
+                continue;
+            }
+
+            try
+            {
+                var value = StrictUnicodeEncoding.GetString(bytes.Slice(valueOffset, byteCount - sizeof(char))).Trim();
+                if (IsUsableCharacterDisplayName(value))
+                {
+                    return value;
+                }
+            }
+            catch (DecoderFallbackException)
+            {
+            }
+        }
+
+        return string.Empty;
+    }
+
+    private static bool IsUsableCharacterDisplayName(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || value.Length > 64 || value.Any(char.IsControl))
+        {
+            return false;
+        }
+
+        return value.Any(character =>
+            character is >= '\u3400' and <= '\u4DBF' or
+            >= '\u4E00' and <= '\u9FFF' or
+            >= '\uF900' and <= '\uFAFF' or
+            >= '\u3040' and <= '\u30FF');
+    }
+
     private static UnrealProjectSyncCharacterCandidate CloneCharacterCandidateWithLatestData(
         UnrealProjectSyncCharacterCandidate candidate,
-        bool hasLatestData)
+        bool hasLatestData,
+        string? displayName = null)
     {
         return new UnrealProjectSyncCharacterCandidate(
             candidate.Code,
-            candidate.DisplayName,
+            string.IsNullOrWhiteSpace(displayName) ? candidate.DisplayName : displayName,
             candidate.BaseMaterialPath,
             candidate.ZdPath,
             candidate.BaseMaterialAssetCount,
@@ -565,7 +1008,8 @@ internal sealed class UnrealProjectSyncService
             candidate.SequenceFramesPreview,
             candidate.BuffsPreview,
             candidate.MaterialBuckets,
-            hasLatestData);
+            hasLatestData,
+            candidate.VoiceBuckets);
     }
 
     private static bool HasCharacterFolderChangedAfterExport(string contentPath, string code, DateTime exportGeneratedAt)
@@ -633,18 +1077,23 @@ internal sealed class UnrealProjectSyncService
         var buffMap = manifest.CharacterBuffs
             .GroupBy(buffSet => buffSet.Code, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
-        return baseGroups.Keys
-            .Intersect(zdGroups.Keys, StringComparer.OrdinalIgnoreCase)
+        var candidateCodes = baseGroups.Keys
+            .Union(zdGroups.Keys, StringComparer.OrdinalIgnoreCase)
+            .Union(manifest.CharacterItems.Select(item => item.Code), StringComparer.OrdinalIgnoreCase)
+            .Where(code => !string.IsNullOrWhiteSpace(code))
+            .Distinct(StringComparer.OrdinalIgnoreCase);
+        return candidateCodes
             .OrderBy(code => code, StringComparer.OrdinalIgnoreCase)
             .Select(code =>
             {
-                var baseAssets = baseGroups[code];
-                var zdAssets = zdGroups[code];
+                var baseAssets = baseGroups.TryGetValue(code, out var matchedBaseAssets) ? matchedBaseAssets : [];
+                var zdAssets = zdGroups.TryGetValue(code, out var matchedZdAssets) ? matchedZdAssets : [];
                 var zdMaterialTextureCount = CountZdMaterialTextures(zdAssets, code);
                 var characterItem = ResolveCharacterItem(code, baseAssets, zdAssets, manifest.CharacterItems);
                 actorMap.TryGetValue(code, out var characterActor);
                 sequenceMap.TryGetValue(code, out var characterSequence);
                 buffMap.TryGetValue(code, out var characterBuffs);
+                var sequencePreview = BuildSequenceFramesPreview(characterSequence);
                 return new UnrealProjectSyncCharacterCandidate(
                     code,
                     ResolveDisplayName(code, characterItem),
@@ -654,10 +1103,12 @@ internal sealed class UnrealProjectSyncService
                     zdMaterialTextureCount,
                     BuildCharacterInfoPreview(characterItem, characterActor),
                     BuildSkillsPreview(characterActor, characterItem, manifest.LinkSkillLibrary, manifest.SupportSkillLibrary, assetLookup),
-                    BuildSequenceFramesPreview(characterSequence),
+                    sequencePreview,
                     BuildBuffsPreview(characterBuffs),
                     BuildMaterialBuckets(baseAssets),
-                    hasLatestData: HasDetailedCharacterData(characterItem, characterActor, characterSequence, characterBuffs));
+                    hasLatestData: manifest.SchemaVersion >= CurrentExportSchemaVersion &&
+                        HasDetailedCharacterData(characterItem, characterActor, characterSequence, characterBuffs),
+                    voiceBuckets: BuildVoiceBuckets(zdAssets, sequencePreview));
             })
             .ToArray();
     }
@@ -880,7 +1331,8 @@ internal sealed class UnrealProjectSyncService
             charData.MagDefense,
             charData.Critical,
             charData.CriticalC,
-            charData.Synchronize);
+            charData.Synchronize,
+            charData.Anti);
     }
 
     private static int ResolveFormLimitFromSkillSlots(UnrealProjectExportCharacterActor? actor)
@@ -1305,6 +1757,11 @@ internal sealed class UnrealProjectSyncService
 
     private static UnrealProjectExportSequenceAction CloneSequenceActionForForm(UnrealProjectExportSequenceAction action, int formIndex)
     {
+        var animSequences = FilterSequenceAssetsByForm(action.AnimSequences, action.ActionCode, formIndex).ToList();
+        var sequencePaths = animSequences
+            .Select(asset => NormalizeObjectPath(asset.ObjectPath))
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
         return new UnrealProjectExportSequenceAction
         {
             ActionCode = action.ActionCode,
@@ -1315,13 +1772,18 @@ internal sealed class UnrealProjectSyncService
             HasData = action.HasData,
             FormIndexes = [formIndex],
             ReferencedSequences = action.ReferencedSequences,
-            AnimSequences = FilterSequenceAssetsByForm(action.AnimSequences, action.ActionCode, formIndex).ToList(),
+            AnimSequences = animSequences,
             TextureCount = action.TextureCount,
             SpriteCount = action.SpriteCount,
             FlipbookCount = action.FlipbookCount,
             FramesPerSecond = action.FramesPerSecond,
             OrderedFrames = FilterSequenceAssetsByForm(action.OrderedFrames, action.ActionCode, formIndex, fallbackToAllWhenSingleForm: true).ToList(),
-            PreviewFrames = FilterSequenceAssetsByForm(action.PreviewFrames, action.ActionCode, formIndex, fallbackToAllWhenSingleForm: true).ToList()
+            PreviewFrames = FilterSequenceAssetsByForm(action.PreviewFrames, action.ActionCode, formIndex, fallbackToAllWhenSingleForm: true).ToList(),
+            SoundNotifies = sequencePaths.Count == 0
+                ? action.SoundNotifies
+                : action.SoundNotifies
+                    .Where(notify => sequencePaths.Contains(NormalizeObjectPath(notify.SequenceObjectPath)))
+                    .ToList()
         };
     }
 
@@ -1419,7 +1881,17 @@ internal sealed class UnrealProjectSyncService
             action.FlipbookCount,
             action.FramesPerSecond,
             orderedFrames,
-            previewFrames);
+            previewFrames,
+            action.SoundNotifies.Select(notify => new UnrealProjectSyncSequenceSoundNotifyPreview(
+                notify.FrameIndex,
+                notify.TimeSeconds,
+                notify.TrackIndex,
+                notify.SoundObjectPath,
+                notify.SoundAssetName,
+                notify.SoundAssetClass,
+                notify.ExportedFilePath,
+                notify.IsCharacterVoice,
+                notify.SequenceObjectPath)).ToArray());
     }
 
     private static UnrealProjectSyncExportAssetView BuildExportAssetView(UnrealProjectExportSequenceAsset asset)
@@ -1677,11 +2149,14 @@ internal sealed class UnrealProjectSyncService
         }
 
         var info = candidate.CharacterInfo;
+        var characterInfoService = new CharacterInfoService();
+        var existingData = characterInfoService.Load(character);
         var data = new CharacterInfoData
         {
             Code = character.Code,
             Name = string.IsNullOrWhiteSpace(info.Name) ? candidate.Code : info.Name.Trim(),
             Description = info.Description,
+            KeywordTagGroups = existingData.KeywordTagGroups,
             FormLimit = Math.Max(1, info.FormLimit),
             Speed = Math.Max(0, info.Speed),
             Health = Math.Max(0, info.Health),
@@ -1691,6 +2166,7 @@ internal sealed class UnrealProjectSyncService
             CriticalRate = Math.Max(0, info.CriticalRate),
             CriticalDamage = Math.Max(0, info.CriticalDamage),
             Synchronize = Math.Max(0, info.Synchronize),
+            Anti = info.Anti,
             UpdatedAt = DateTime.Now
         };
 
@@ -1709,7 +2185,7 @@ internal sealed class UnrealProjectSyncService
             data.PassiveSkills.Add(passive);
         }
 
-        new CharacterInfoService().Save(character, data);
+        characterInfoService.Save(character, data);
     }
 
     public int SyncAllSkillsToToolbox(CharacterCard character, UnrealProjectSyncCharacterCandidate candidate)
@@ -1742,6 +2218,47 @@ internal sealed class UnrealProjectSyncService
         var count = ApplySkillSlot(data, slot, candidate);
         new CharacterSkillsService().Save(character, data);
         return count;
+    }
+
+    public int SyncSkillStageToToolbox(
+        CharacterCard character,
+        UnrealProjectSyncCharacterCandidate candidate,
+        UnrealProjectSyncSkillSlotPreview slot,
+        int stageIndex)
+    {
+        if (stageIndex < 0 || stageIndex >= slot.Stages.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(stageIndex));
+        }
+
+        using var entryNotifications = CharacterSkillEntry.SuppressEditNotifications();
+        using var multiplierNotifications = SkillMultiplierLevel.SuppressEditNotifications();
+        var data = new CharacterSkillsService().Load(character);
+        var target = ResolveTargetSkillCollection(data, slot.SlotKey);
+        var entry = ToCharacterSkillEntry(slot.Stages[stageIndex], candidate, linkSkill: null);
+        if (target is null || entry is null)
+        {
+            return 0;
+        }
+
+        while (target.Count < stageIndex)
+        {
+            target.Add(CharacterSkillsService.CreateEntry());
+        }
+
+        entry.SyncId = UnrealBridgeSemanticSnapshotService.CreateOriginIdentity(
+            $"{candidate.Code}|skill|{slot.SlotKey}||{stageIndex}");
+        if (target.Count == stageIndex)
+        {
+            target.Add(entry);
+        }
+        else
+        {
+            target[stageIndex] = entry;
+        }
+
+        new CharacterSkillsService().Save(character, data);
+        return 1;
     }
 
     public int SyncLinkSkillToToolbox(
@@ -2016,10 +2533,10 @@ internal sealed class UnrealProjectSyncService
         entry.DamageType = buff.DamageType;
         entry.GainType = buff.GainType;
         entry.TaskPriority = buff.TaskPriority;
-        entry.Stacks = Math.Max(0, buff.Count).ToString();
-        entry.CompleteStacks = Math.Max(1, buff.CompleteCount).ToString();
-        entry.Strength = Math.Max(0, buff.Power).ToString();
-        entry.CompleteStrength = Math.Max(1, buff.CompletePower).ToString();
+        entry.Stacks = Math.Max(0, buff.Count);
+        entry.CompleteStacks = Math.Max(1, buff.CompleteCount);
+        entry.Strength = Math.Max(0, buff.Power);
+        entry.CompleteStrength = Math.Max(1, buff.CompletePower);
         entry.TriggerTiming = buff.TriggerTiming;
         entry.ConditionSummary = buff.ConditionSummary;
         entry.SourceAssetPath = buff.ObjectPath;
@@ -2184,6 +2701,58 @@ internal sealed class UnrealProjectSyncService
                         asset.ExportedFilePath))
                     .ToArray();
                 return new UnrealProjectSyncMaterialBucket(kind.DisplayName, kind.Key, views.Length, views);
+            })
+            .ToArray();
+    }
+
+    private static IReadOnlyList<UnrealProjectSyncVoiceBucket> BuildVoiceBuckets(
+        IReadOnlyList<UnrealProjectExportAsset> assets,
+        UnrealProjectSyncSequenceFramesPreview sequencePreview)
+    {
+        var sequenceKinds = new Dictionary<string, VoiceMaterialKind>(StringComparer.OrdinalIgnoreCase);
+        foreach (var action in sequencePreview.Actions)
+        {
+            var kind = UnrealBridgeVoiceClassification.ClassifySequenceAction(action);
+            foreach (var notify in action.SequenceSounds.Where(notify => notify.IsCharacterVoice))
+            {
+                var objectPath = NormalizeObjectPath(notify.SoundObjectPath);
+                if (!string.IsNullOrWhiteSpace(objectPath) &&
+                    (!sequenceKinds.TryGetValue(objectPath, out var existing) || existing == VoiceMaterialKind.Other))
+                {
+                    sequenceKinds[objectPath] = kind;
+                }
+            }
+        }
+
+        return assets
+            .Where(asset => asset.AssetClass.Contains("SoundWave", StringComparison.OrdinalIgnoreCase))
+            .Where(asset => !string.IsNullOrWhiteSpace(asset.ExportedFilePath) && File.Exists(asset.ExportedFilePath))
+            .Select(asset => (
+                Kind: sequenceKinds.TryGetValue(NormalizeObjectPath(asset.ObjectPath), out var sequenceKind)
+                    ? sequenceKind
+                    : UnrealBridgeVoiceClassification.Classify(asset.PackagePath, asset.AssetName),
+                Asset: asset))
+            .GroupBy(item => item.Kind)
+            .OrderBy(group => group.Key)
+            .Select(group =>
+            {
+                var spec = VoiceMaterialService.GetSpec(group.Key);
+                var views = group
+                    .Select(item => item.Asset)
+                    .OrderBy(asset => asset.AssetName, StringComparer.OrdinalIgnoreCase)
+                    .Select(asset => new UnrealProjectSyncExportAssetView(
+                        asset.AssetName,
+                        asset.AssetClass,
+                        asset.PackagePath,
+                        asset.ObjectPath,
+                        asset.SourceRoot,
+                        asset.ExportedFilePath))
+                    .ToArray();
+                return new UnrealProjectSyncVoiceBucket(
+                    spec.DisplayName,
+                    group.Key.ToString(),
+                    views.Length,
+                    views);
             })
             .ToArray();
     }

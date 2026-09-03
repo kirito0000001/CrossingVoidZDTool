@@ -141,8 +141,20 @@ namespace CrossingVoidZDTool
 
         private void AddKeywordTagButton_Click(object sender, RoutedEventArgs e)
         {
-            _applicationViewModel.UnrealSync.AddKeywordTag();
-            MarkLastEditedModule("UnrealSync");
+            if ((sender as FrameworkElement)?.DataContext is CharacterKeywordTagCategory category)
+            {
+                _applicationViewModel.UnrealSync.AddKeywordTag(category);
+                MarkLastEditedModule("UnrealSync");
+            }
+        }
+
+        private void RemoveKeywordTagButton_Click(object sender, RoutedEventArgs e)
+        {
+            if ((sender as FrameworkElement)?.DataContext is CharacterKeywordTagEntry entry)
+            {
+                _applicationViewModel.UnrealSync.RemoveKeywordTag(entry);
+                MarkLastEditedModule("UnrealSync");
+            }
         }
 
         private void CharacterInfoTextEntry_TextChanged(object sender, TextChangedEventArgs e)

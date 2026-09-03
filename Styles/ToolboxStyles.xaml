@@ -9,12 +9,36 @@
             <SolidColorBrush x:Key="GlobalProgressHostBorderBrush" Color="#33000000" />
             <SolidColorBrush x:Key="GlobalProgressPrimaryTextBrush" Color="#202020" />
             <SolidColorBrush x:Key="GlobalProgressSecondaryTextBrush" Color="#99000000" />
+            <SolidColorBrush x:Key="LogDefaultForegroundBrush" Color="#FF1F1F1F" />
+            <SolidColorBrush x:Key="LogDefaultBackgroundBrush" Color="#FFF2F2F2" />
+            <SolidColorBrush x:Key="LogDefaultBorderBrush" Color="#FF7A7A7A" />
+            <SolidColorBrush x:Key="LogUserForegroundBrush" Color="#FF176B3A" />
+            <SolidColorBrush x:Key="LogUserBackgroundBrush" Color="#FFE6F4EA" />
+            <SolidColorBrush x:Key="LogUserBorderBrush" Color="#FF4D9A68" />
+            <SolidColorBrush x:Key="LogWarningForegroundBrush" Color="#FF8A5200" />
+            <SolidColorBrush x:Key="LogWarningBackgroundBrush" Color="#FFFFF3CD" />
+            <SolidColorBrush x:Key="LogWarningBorderBrush" Color="#FFB77900" />
+            <SolidColorBrush x:Key="LogErrorForegroundBrush" Color="#FFA61B1B" />
+            <SolidColorBrush x:Key="LogErrorBackgroundBrush" Color="#FFFDE2E2" />
+            <SolidColorBrush x:Key="LogErrorBorderBrush" Color="#FFB42318" />
         </ResourceDictionary>
         <ResourceDictionary x:Key="Dark">
             <SolidColorBrush x:Key="GlobalProgressHostBackgroundBrush" Color="#F0000000" />
             <SolidColorBrush x:Key="GlobalProgressHostBorderBrush" Color="#4DFFFFFF" />
             <SolidColorBrush x:Key="GlobalProgressPrimaryTextBrush" Color="#F2FFFFFF" />
             <SolidColorBrush x:Key="GlobalProgressSecondaryTextBrush" Color="#B3FFFFFF" />
+            <SolidColorBrush x:Key="LogDefaultForegroundBrush" Color="#FFE1E1E1" />
+            <SolidColorBrush x:Key="LogDefaultBackgroundBrush" Color="#1AFFFFFF" />
+            <SolidColorBrush x:Key="LogDefaultBorderBrush" Color="#41FFFFFF" />
+            <SolidColorBrush x:Key="LogUserForegroundBrush" Color="#FFE1E1E1" />
+            <SolidColorBrush x:Key="LogUserBackgroundBrush" Color="#1AFFFFFF" />
+            <SolidColorBrush x:Key="LogUserBorderBrush" Color="#41FFFFFF" />
+            <SolidColorBrush x:Key="LogWarningForegroundBrush" Color="#FFFFD700" />
+            <SolidColorBrush x:Key="LogWarningBackgroundBrush" Color="#2AA06E00" />
+            <SolidColorBrush x:Key="LogWarningBorderBrush" Color="#78DCAA28" />
+            <SolidColorBrush x:Key="LogErrorForegroundBrush" Color="#FFFF4500" />
+            <SolidColorBrush x:Key="LogErrorBackgroundBrush" Color="#34821818" />
+            <SolidColorBrush x:Key="LogErrorBorderBrush" Color="#96E65046" />
         </ResourceDictionary>
     </ResourceDictionary.ThemeDictionaries>
 
@@ -57,6 +81,42 @@
         <Setter Property="FontSize" Value="12" />
         <Setter Property="IsTextSelectionEnabled" Value="True" />
         <Setter Property="TextWrapping" Value="NoWrap" />
+    </Style>
+
+    <Style x:Key="LogDefaultTextStyle" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{ThemeResource LogDefaultForegroundBrush}" />
+    </Style>
+
+    <Style x:Key="LogUserTextStyle" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{ThemeResource LogUserForegroundBrush}" />
+    </Style>
+
+    <Style x:Key="LogWarningTextStyle" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{ThemeResource LogWarningForegroundBrush}" />
+    </Style>
+
+    <Style x:Key="LogErrorTextStyle" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{ThemeResource LogErrorForegroundBrush}" />
+    </Style>
+
+    <Style x:Key="LogDefaultBlockStyle" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource LogDefaultBackgroundBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource LogDefaultBorderBrush}" />
+    </Style>
+
+    <Style x:Key="LogUserBlockStyle" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource LogUserBackgroundBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource LogUserBorderBrush}" />
+    </Style>
+
+    <Style x:Key="LogWarningBlockStyle" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource LogWarningBackgroundBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource LogWarningBorderBrush}" />
+    </Style>
+
+    <Style x:Key="LogErrorBlockStyle" TargetType="Border">
+        <Setter Property="Background" Value="{ThemeResource LogErrorBackgroundBrush}" />
+        <Setter Property="BorderBrush" Value="{ThemeResource LogErrorBorderBrush}" />
     </Style>
 
     <Style x:Key="AssetGridViewStyle" TargetType="GridView">

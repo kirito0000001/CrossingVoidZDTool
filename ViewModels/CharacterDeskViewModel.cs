@@ -35,8 +35,6 @@ internal sealed class CharacterDeskViewModel : ObservableObject
 
     public ObservableCollection<CharacterReferenceImage> ReferenceImages { get; } = [];
 
-    public ObservableCollection<CharacterPortraitEntry> CurrentPortraitEntries { get; } = [];
-
     public event EventHandler? DraftTextEdited;
 
     public CharacterCard? CurrentCharacter
@@ -52,7 +50,6 @@ internal sealed class CharacterDeskViewModel : ObservableObject
                 OnPropertyChanged(nameof(HasCurrentCharacter));
                 OnPropertyChanged(nameof(CanOpenCurrentDraft));
                 OnPropertyChanged(nameof(IsCurrentCharacterCompleted));
-                RefreshCurrentPortraitEntries();
             }
         }
     }
@@ -164,7 +161,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
             {
                 CurrentCharacter = null;
                 IsDraftOpen = false;
-                DraftText = string.Empty;
+                SetDraftTextSilently(string.Empty);
                 ReferenceImages.Clear();
                 StatusText = Characters.Count == 0
                     ? "就绪：还没有角色卡。"
@@ -227,7 +224,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         CurrentCharacter = ensuredCharacter;
         LastEditedCharacter = ensuredCharacter;
         IsDraftOpen = false;
-        DraftText = string.Empty;
+        SetDraftTextSilently(string.Empty);
         ReferenceImages.Clear();
         DraftSaveStatusText = "已选择角色，进入 St1 后点击立绘卡打开草稿。";
         StatusText = CurrentCharacterStatusText;
@@ -391,6 +388,28 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         return Task.Run(() => _characterWorkspaceService.BackupCharacter(character, note, progress, cancellationToken), cancellationToken);
     }
 
+    public string GetDefaultExportRootPath(string projectRootPath)
+    {
+        return _characterWorkspaceService.GetDefaultExportRootPath(projectRootPath);
+    }
+
+    public Task<string> ExportCharacterFolderAsync(
+        CharacterCard character,
+        string exportRootPath,
+        bool overwrite,
+        IProgress<CharacterBackupProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        return Task.Run(
+            () => _characterWorkspaceService.ExportCharacterFolder(
+                character,
+                exportRootPath,
+                overwrite,
+                progress,
+                cancellationToken),
+            cancellationToken);
+    }
+
     public Task<IReadOnlyList<CharacterBackupEntry>> LoadCharacterBackupsAsync(
         CharacterCard character,
         CancellationToken cancellationToken = default)
@@ -421,7 +440,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         {
             CurrentCharacter = null;
             IsDraftOpen = false;
-            DraftText = string.Empty;
+            SetDraftTextSilently(string.Empty);
             ReferenceImages.Clear();
             DraftSaveStatusText = "草稿未打开。";
         }
@@ -435,6 +454,22 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         StatusText = Characters.Count == 0
             ? "就绪：还没有角色卡。"
             : $"就绪：已加载 {Characters.Count} 张角色卡。";
+    }
+
+    public async Task<CharacterCard> ReopenCompletedCharacterAsync(
+        CharacterCard character,
+        CancellationToken cancellationToken = default)
+    {
+        if (!character.IsCompleted)
+        {
+            return character;
+        }
+
+        var reopened = await Task.Run(
+            () => _characterWorkspaceService.SetCompleted(character, isCompleted: false),
+            cancellationToken);
+        ReplaceCharacter(reopened, character.Code);
+        return reopened;
     }
 
     private void ReplaceReferenceImages(IReadOnlyList<CharacterReferenceImage> images)
@@ -489,21 +524,6 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         }
     }
 
-    private void RefreshCurrentPortraitEntries()
-    {
-        CurrentPortraitEntries.Clear();
-        if (CurrentCharacter is not null)
-        {
-            if (!CurrentCharacter.IsCompleted)
-            {
-                CurrentPortraitEntries.Add(new CharacterPortraitEntry(
-                    CurrentCharacter.EffectiveDisplayName,
-                    CurrentCharacter.Code,
-                    CurrentCharacter.EffectiveCoverUri));
-            }
-        }
-    }
-
     public void ReplaceCharacter(CharacterCard character)
     {
         ReplaceCharacter(character, character.Code);
@@ -511,6 +531,8 @@ internal sealed class CharacterDeskViewModel : ObservableObject
 
     public void ReplaceCharacter(CharacterCard character, string previousCode)
     {
+        var isReplacingCurrentCharacter = CurrentCharacter is not null &&
+            string.Equals(CurrentCharacter.Code, previousCode, StringComparison.OrdinalIgnoreCase);
         var old = Characters.FirstOrDefault(card => string.Equals(card.Code, previousCode, StringComparison.OrdinalIgnoreCase));
         var index = old is null ? -1 : Characters.IndexOf(old);
         if (index >= 0)
@@ -521,11 +543,32 @@ internal sealed class CharacterDeskViewModel : ObservableObject
 
         CurrentCharacter = character;
         LastEditedCharacter = character;
-        IsDraftOpen = false;
-        DraftText = string.Empty;
-        DraftSaveStatusText = character.IsCompleted
-            ? "角色已完成。后续请从对应步骤页面继续编辑。"
-            : "已选择角色，进入 St1 后点击立绘卡打开草稿。";
+        if (character.IsCompleted)
+        {
+            IsDraftOpen = false;
+            DraftSaveStatusText = "角色已完成。后续请从对应步骤页面继续编辑。";
+        }
+        else if (!isReplacingCurrentCharacter)
+        {
+            IsDraftOpen = false;
+            SetDraftTextSilently(string.Empty);
+            DraftSaveStatusText = "已选择角色，进入 St1 后点击立绘卡打开草稿。";
+        }
+
         StatusText = CurrentCharacterStatusText;
+    }
+
+    private void SetDraftTextSilently(string text)
+    {
+        var wasLoadingDraft = _isLoadingDraft;
+        _isLoadingDraft = true;
+        try
+        {
+            DraftText = text;
+        }
+        finally
+        {
+            _isLoadingDraft = wasLoadingDraft;
+        }
     }
 }

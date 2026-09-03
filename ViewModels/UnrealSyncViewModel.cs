@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,6 +26,7 @@ internal sealed class UnrealSyncViewModel : ObservableObject
     private string _description = string.Empty;
     private string _saveStatusText = "未打开角色信息。";
     private CharacterInfoStat _formLimitStat = new(CharacterInfoStatKind.FormLimit, "形态上限", 1);
+    private bool _isAnti;
 
     public UnrealSyncViewModel(CharacterInfoService characterInfoService)
     {
@@ -35,7 +37,7 @@ internal sealed class UnrealSyncViewModel : ObservableObject
 
     public ObservableCollection<BaseMaterialSection> MaterialSections { get; } = [];
 
-    public ObservableCollection<CharacterInfoTextEntry> KeywordTags { get; } = [];
+    public ObservableCollection<CharacterKeywordTagCategory> KeywordTagCategories { get; } = [];
 
     public ObservableCollection<CharacterInfoTextEntry> PassiveSkills { get; } = [];
 
@@ -47,6 +49,18 @@ internal sealed class UnrealSyncViewModel : ObservableObject
         private set => SetProperty(ref _formLimitStat, value);
     }
 
+    public bool IsAnti
+    {
+        get => _isAnti;
+        set
+        {
+            if (SetProperty(ref _isAnti, value) && !_isLoading)
+            {
+                MarkEdited();
+            }
+        }
+    }
+
     public string Code
     {
         get => _code;
@@ -54,6 +68,8 @@ internal sealed class UnrealSyncViewModel : ObservableObject
         {
             if (SetProperty(ref _code, value) && !_isLoading)
             {
+                RefreshCharacterNameTagCategory();
+                UpdateNotice();
                 MarkEdited();
             }
         }
@@ -66,6 +82,8 @@ internal sealed class UnrealSyncViewModel : ObservableObject
         {
             if (SetProperty(ref _characterName, value) && !_isLoading)
             {
+                RefreshCharacterNameTagCategory();
+                UpdateNotice();
                 MarkEdited();
             }
         }
@@ -125,7 +143,12 @@ internal sealed class UnrealSyncViewModel : ObservableObject
         try
         {
             MaterialSections.Clear();
-            KeywordTags.Clear();
+            KeywordTagCategories.Clear();
+            foreach (var passive in PassiveSkills)
+            {
+                passive.PropertyChanged -= PassiveSkillEntry_PropertyChanged;
+            }
+
             PassiveSkills.Clear();
             Stats.Clear();
 
@@ -135,6 +158,8 @@ internal sealed class UnrealSyncViewModel : ObservableObject
                 Code = string.Empty;
                 CharacterName = string.Empty;
                 Description = string.Empty;
+                IsAnti = false;
+                BuildKeywordTagCategories(new CharacterInfoData());
                 FormLimitStat = new CharacterInfoStat(CharacterInfoStatKind.FormLimit, "形态上限", 1);
                 SetNotice(InfoBarSeverity.Informational, "未选择角色", "请先在零境角色台选择当前制作角色。");
                 StatusText = "就绪：等待选择角色。";
@@ -156,15 +181,15 @@ internal sealed class UnrealSyncViewModel : ObservableObject
             Code = _data.Code;
             CharacterName = _data.Name;
             Description = _data.Description;
+            IsAnti = _data.Anti;
             FormLimitStat = new CharacterInfoStat(CharacterInfoStatKind.FormLimit, "形态上限", Math.Max(1, _data.FormLimit));
-            foreach (var tag in _data.KeywordTags.DefaultIfEmpty(string.Empty))
-            {
-                KeywordTags.Add(new CharacterInfoTextEntry(tag));
-            }
+            BuildKeywordTagCategories(_data);
 
             foreach (var passive in _data.PassiveSkills.DefaultIfEmpty(string.Empty))
             {
-                PassiveSkills.Add(new CharacterInfoTextEntry(passive));
+                var entry = new CharacterInfoTextEntry(passive);
+                entry.PropertyChanged += PassiveSkillEntry_PropertyChanged;
+                PassiveSkills.Add(entry);
             }
 
             foreach (var stat in CreateStats(_data))
@@ -222,14 +247,30 @@ internal sealed class UnrealSyncViewModel : ObservableObject
 
     public void AddPassiveSkill()
     {
-        PassiveSkills.Add(new CharacterInfoTextEntry(string.Empty));
+        var entry = new CharacterInfoTextEntry(string.Empty);
+        entry.PropertyChanged += PassiveSkillEntry_PropertyChanged;
+        PassiveSkills.Add(entry);
         MarkEdited();
     }
 
-    public void AddKeywordTag()
+    public void AddKeywordTag(CharacterKeywordTagCategory category)
     {
-        KeywordTags.Add(new CharacterInfoTextEntry(string.Empty));
-        MarkEdited();
+        if (category.TryAddEntry())
+        {
+            category.Entries[^1].PropertyChanged += KeywordTagEntry_PropertyChanged;
+            MarkEdited();
+        }
+    }
+
+    public void RemoveKeywordTag(CharacterKeywordTagEntry entry)
+    {
+        var category = FindKeywordTagCategory(entry.CategoryKind);
+        if (category?.TryRemoveEntry(entry) == true)
+        {
+            entry.PropertyChanged -= KeywordTagEntry_PropertyChanged;
+            UpdateNotice();
+            MarkEdited();
+        }
     }
 
     public void ChangeStat(CharacterInfoStat stat, int delta)
@@ -256,13 +297,12 @@ internal sealed class UnrealSyncViewModel : ObservableObject
             Code = Code.Trim(),
             Name = CharacterName.Trim(),
             Description = Description,
+            Anti = IsAnti,
+            KeywordTagGroups = BuildKeywordTagGroupsSnapshot(),
             UpdatedAt = DateTime.Now
         };
 
-        foreach (var tag in KeywordTags
-                     .Select(tag => tag.Value.Trim())
-                     .Where(tag => !string.IsNullOrWhiteSpace(tag))
-                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        foreach (var tag in CharacterKeywordTagRules.Flatten(data.Code, data.Name, data.KeywordTagGroups))
         {
             data.KeywordTags.Add(tag);
         }
@@ -301,6 +341,19 @@ internal sealed class UnrealSyncViewModel : ObservableObject
 
     private void UpdateNotice()
     {
+        var missingTagCategories = CharacterKeywordTagRules.GetMissingCategoryNames(
+            Code,
+            CharacterName,
+            BuildKeywordTagGroupsSnapshot());
+        if (missingTagCategories.Count > 0)
+        {
+            SetNotice(
+                InfoBarSeverity.Warning,
+                "关键词 Tag 尚未填全",
+                $"还需要填写：{string.Join("、", missingTagCategories)}。每类至少填写一个 Tag。");
+            return;
+        }
+
         var zeroStats = Stats
             .Where(stat => stat.Kind != CharacterInfoStatKind.Synchronize && stat.Value == 0)
             .Select(stat => stat.DisplayName)
@@ -319,7 +372,7 @@ internal sealed class UnrealSyncViewModel : ObservableObject
             .ToArray();
         var missingSections = requiredSections
             .Select(section => new
-                MaterialMissingNotice(section.Spec.DisplayName, Math.Max(0, section.Spec.MinimumCount - section.Items.Count)))
+                MaterialMissingNotice(section.Spec.DisplayName, section.MissingCount))
             .Where(section => section.MissingCount > 0)
             .ToArray();
         var invalidItems = requiredSections
@@ -415,6 +468,111 @@ internal sealed class UnrealSyncViewModel : ObservableObject
         if (!_isLoading)
         {
             MarkEdited();
+        }
+    }
+
+    public void NotifyKeywordTagEdited()
+    {
+        if (_isLoading)
+        {
+            return;
+        }
+
+        UpdateNotice();
+        MarkEdited();
+    }
+
+    private void BuildKeywordTagCategories(CharacterInfoData data)
+    {
+        KeywordTagCategories.Clear();
+        var groups = data.KeywordTagGroups ?? new CharacterKeywordTagGroups();
+        KeywordTagCategories.Add(CharacterKeywordTagCategory.CreateCharacterNames(data.Code, data.Name));
+        KeywordTagCategories.Add(CharacterKeywordTagCategory.CreateEditable(
+            CharacterKeywordTagCategoryKind.Work,
+            "所属作品",
+            groups.Works));
+        KeywordTagCategories.Add(CharacterKeywordTagCategory.CreateEditable(
+            CharacterKeywordTagCategoryKind.Period,
+            "角色时期",
+            groups.Periods));
+        KeywordTagCategories.Add(CharacterKeywordTagCategory.CreateEditable(
+            CharacterKeywordTagCategoryKind.AbilityType,
+            "能力类型",
+            groups.AbilityTypes));
+        KeywordTagCategories.Add(CharacterKeywordTagCategory.CreateEditable(
+            CharacterKeywordTagCategoryKind.Affiliation,
+            "阵营/组织归属",
+            groups.Affiliations));
+        KeywordTagCategories.Add(CharacterKeywordTagCategory.CreateEditable(
+            CharacterKeywordTagCategoryKind.Alias,
+            "外号",
+            groups.Aliases));
+
+        foreach (var entry in KeywordTagCategories.SelectMany(category => category.Entries))
+        {
+            entry.PropertyChanged += KeywordTagEntry_PropertyChanged;
+        }
+    }
+
+    private void RefreshCharacterNameTagCategory()
+    {
+        var current = KeywordTagCategories.FirstOrDefault(
+            category => category.Kind == CharacterKeywordTagCategoryKind.CharacterName);
+        if (current is null)
+        {
+            return;
+        }
+
+        var index = KeywordTagCategories.IndexOf(current);
+        KeywordTagCategories[index] = CharacterKeywordTagCategory.CreateCharacterNames(Code, CharacterName);
+    }
+
+    private CharacterKeywordTagGroups BuildKeywordTagGroupsSnapshot()
+    {
+        var groups = new CharacterKeywordTagGroups();
+        CopyKeywordTagValues(CharacterKeywordTagCategoryKind.Work, groups.Works);
+        CopyKeywordTagValues(CharacterKeywordTagCategoryKind.Period, groups.Periods);
+        CopyKeywordTagValues(CharacterKeywordTagCategoryKind.AbilityType, groups.AbilityTypes);
+        CopyKeywordTagValues(CharacterKeywordTagCategoryKind.Affiliation, groups.Affiliations);
+        CopyKeywordTagValues(CharacterKeywordTagCategoryKind.Alias, groups.Aliases);
+        return groups;
+    }
+
+    private void CopyKeywordTagValues(CharacterKeywordTagCategoryKind kind, Collection<string> destination)
+    {
+        var category = FindKeywordTagCategory(kind);
+        if (category is null)
+        {
+            return;
+        }
+
+        foreach (var value in category.GetValues()
+                     .Select(value => (value ?? string.Empty).Trim())
+                     .Where(value => !string.IsNullOrWhiteSpace(value))
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            destination.Add(value);
+        }
+    }
+
+    private CharacterKeywordTagCategory? FindKeywordTagCategory(CharacterKeywordTagCategoryKind kind)
+    {
+        return KeywordTagCategories.FirstOrDefault(category => category.Kind == kind);
+    }
+
+    private void KeywordTagEntry_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(CharacterKeywordTagEntry.Value))
+        {
+            NotifyKeywordTagEdited();
+        }
+    }
+
+    private void PassiveSkillEntry_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (e.PropertyName == nameof(CharacterInfoTextEntry.Value))
+        {
+            NotifyTextEntryEdited();
         }
     }
 }

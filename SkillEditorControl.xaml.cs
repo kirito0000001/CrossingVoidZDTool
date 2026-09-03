@@ -117,6 +117,50 @@ public sealed partial class SkillEditorControl : UserControl
 
     private void SkillEditorInput_KeyDown(object sender, KeyRoutedEventArgs e)
     {
+        if (sender is TextBox
+            {
+                DataContext: SkillMultiplierLevel level,
+                Tag: string fieldName
+            } &&
+            TryGetMultiplierMoveDirection(e.Key, out var direction) &&
+            TryGetMultiplierColumn(fieldName, out var column))
+        {
+            e.Handled = true;
+
+            var target = SkillMultiplierNavigation.GetTarget(
+                new SkillMultiplierCell(level.Level, column),
+                direction,
+                minimumLevel: 1,
+                maximumLevel: 5);
+            if (target is not { } targetCell)
+            {
+                return;
+            }
+
+            var targetFieldName = targetCell.Column == SkillMultiplierColumn.Physical
+                ? nameof(SkillMultiplierLevel.PhysicalMultiplier)
+                : nameof(SkillMultiplierLevel.EnergyMultiplier);
+
+            foreach (var descendant in EnumerateDescendants(this))
+            {
+                if (descendant is not TextBox
+                    {
+                        DataContext: SkillMultiplierLevel targetLevel,
+                        Tag: string targetTag
+                    } targetTextBox ||
+                    targetLevel.Level != targetCell.Level ||
+                    !string.Equals(targetTag, targetFieldName, StringComparison.Ordinal))
+                {
+                    continue;
+                }
+
+                QueueMultiplierFocus(targetTextBox);
+                return;
+            }
+
+            return;
+        }
+
         if (e.Key != VirtualKey.Enter)
         {
             return;
@@ -124,6 +168,50 @@ public sealed partial class SkillEditorControl : UserControl
 
         FocusReleaseRequested?.Invoke(this, EventArgs.Empty);
         e.Handled = true;
+    }
+
+    private void QueueMultiplierFocus(TextBox targetTextBox)
+    {
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (targetTextBox.XamlRoot is not null &&
+                targetTextBox.Focus(FocusState.Programmatic))
+            {
+                targetTextBox.SelectAll();
+            }
+        });
+    }
+
+    private static bool TryGetMultiplierMoveDirection(
+        VirtualKey key,
+        out SkillMultiplierMoveDirection direction)
+    {
+        direction = key switch
+        {
+            VirtualKey.Up => SkillMultiplierMoveDirection.Up,
+            VirtualKey.Down => SkillMultiplierMoveDirection.Down,
+            VirtualKey.Left => SkillMultiplierMoveDirection.Left,
+            VirtualKey.Right => SkillMultiplierMoveDirection.Right,
+            _ => default
+        };
+
+        return key is VirtualKey.Up or VirtualKey.Down or VirtualKey.Left or VirtualKey.Right;
+    }
+
+    private static bool TryGetMultiplierColumn(string fieldName, out SkillMultiplierColumn column)
+    {
+        switch (fieldName)
+        {
+            case nameof(SkillMultiplierLevel.PhysicalMultiplier):
+                column = SkillMultiplierColumn.Physical;
+                return true;
+            case nameof(SkillMultiplierLevel.EnergyMultiplier):
+                column = SkillMultiplierColumn.Energy;
+                return true;
+            default:
+                column = default;
+                return false;
+        }
     }
 
     private void SkillEditorField_TextChanged(object sender, TextChangedEventArgs e)

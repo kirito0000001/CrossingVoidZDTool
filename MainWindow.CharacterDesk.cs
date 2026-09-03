@@ -25,6 +25,8 @@ namespace CrossingVoidZDTool
 {
     public sealed partial class MainWindow
     {
+        private CharacterCard? _characterDetailCharacter;
+
         private async Task LoadCharacterCardsAsync()
         {
             try
@@ -208,197 +210,6 @@ namespace CrossingVoidZDTool
             e.Handled = true;
         }
 
-        private void DraftTextBox_PointerEntered(object sender, PointerRoutedEventArgs e)
-        {
-            ScheduleHoverHint(e, "记录当前角色的灵感、设计理念和临时草稿");
-        }
-
-        private void DraftTextBox_PointerMoved(object sender, PointerRoutedEventArgs e)
-        {
-            MoveHoverHint(e);
-        }
-
-        private void DraftTextBox_PointerExited(object sender, PointerRoutedEventArgs e)
-        {
-            HideHoverHint();
-        }
-
-        private void ReferenceImportButton_PointerEntered(object sender, PointerRoutedEventArgs e)
-        {
-            ScheduleHoverHint(e, "选择参考图导入，也可以把图片拖到展开区域");
-        }
-
-        private void ReferenceFolderButton_PointerEntered(object sender, PointerRoutedEventArgs e)
-        {
-            ScheduleHoverHint(e, "打开参考图文件夹");
-        }
-
-        private void ReferenceDropArea_PointerEntered(object sender, PointerRoutedEventArgs e)
-        {
-            ScheduleHoverHint(e, "拖入图片即可导入参考图");
-        }
-
-        private void HoverHint_PointerMoved(object sender, PointerRoutedEventArgs e)
-        {
-            MoveHoverHint(e);
-        }
-
-        private void HoverHint_PointerExited(object sender, PointerRoutedEventArgs e)
-        {
-            HideHoverHint();
-        }
-
-        private void RootGrid_PointerMoved(object sender, PointerRoutedEventArgs e)
-        {
-            if (DraftFieldHint.Visibility == Visibility.Visible)
-            {
-                HideDraftFieldHint();
-            }
-        }
-
-        private void RootGrid_PointerExited(object sender, PointerRoutedEventArgs e)
-        {
-            CancelHoverHint(immediate: true);
-        }
-
-        private void MainWindow_Activated(object sender, WindowActivatedEventArgs args)
-        {
-            if (args.WindowActivationState == WindowActivationState.Deactivated)
-            {
-                CancelHoverHint(immediate: true);
-            }
-        }
-
-        private void ScheduleHoverHint(PointerRoutedEventArgs e, string text)
-        {
-            _isDraftFieldHovering = true;
-            _pendingDraftFieldHintText = text;
-            _lastDraftFieldHintPosition = e.GetCurrentPoint(RootGrid).Position;
-            _draftFieldHintTimer.Stop();
-            _draftFieldHintTimer.Start();
-        }
-
-        private void MoveHoverHint(PointerRoutedEventArgs e)
-        {
-            if (!_isDraftFieldHovering)
-            {
-                return;
-            }
-
-            var position = e.GetCurrentPoint(RootGrid).Position;
-            if (GetDistance(_lastDraftFieldHintPosition, position) < 4)
-            {
-                return;
-            }
-
-            _lastDraftFieldHintPosition = position;
-            _draftFieldHintTimer.Stop();
-            _draftFieldHintTimer.Start();
-            HideDraftFieldHint();
-        }
-
-        private void HideHoverHint()
-        {
-            CancelHoverHint();
-        }
-
-        private void CancelHoverHint(bool immediate = false)
-        {
-            _isDraftFieldHovering = false;
-            _draftFieldHintTimer.Stop();
-            _pendingDraftFieldHintText = string.Empty;
-            HideDraftFieldHint(immediate);
-        }
-
-        private void DraftFieldHintTimer_Tick(DispatcherQueueTimer sender, object args)
-        {
-            sender.Stop();
-            if (_isDraftFieldHovering)
-            {
-                ShowDraftFieldHint();
-            }
-        }
-
-        private void ShowDraftFieldHint()
-        {
-            if (!_isDraftFieldHovering || string.IsNullOrWhiteSpace(_pendingDraftFieldHintText))
-            {
-                return;
-            }
-
-            _draftFieldHintAnimationToken++;
-            DraftFieldHintText.Text = _pendingDraftFieldHintText;
-            DraftFieldHint.Visibility = Visibility.Visible;
-            DraftFieldHint.Opacity = 0;
-            MoveDraftFieldHint(_lastDraftFieldHintPosition);
-            AnimateDraftFieldHintOpacity(0, 1, TimeSpan.FromMilliseconds(110), _draftFieldHintAnimationToken, collapseWhenDone: false);
-        }
-
-        private void HideDraftFieldHint(bool immediate = false)
-        {
-            if (DraftFieldHint.Visibility != Visibility.Visible)
-            {
-                return;
-            }
-
-            _draftFieldHintAnimationToken++;
-            if (immediate)
-            {
-                DraftFieldHint.Opacity = 0;
-                DraftFieldHint.Visibility = Visibility.Collapsed;
-                return;
-            }
-
-            AnimateDraftFieldHintOpacity(DraftFieldHint.Opacity, 0, TimeSpan.FromMilliseconds(120), _draftFieldHintAnimationToken, collapseWhenDone: true);
-        }
-
-        private void MoveDraftFieldHint(Point position)
-        {
-            DraftFieldHint.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-            var width = Math.Max(1, DraftFieldHint.DesiredSize.Width);
-            var height = Math.Max(1, DraftFieldHint.DesiredSize.Height);
-            var maxX = Math.Max(0, RootGrid.ActualWidth - width - 12);
-            var maxY = Math.Max(0, RootGrid.ActualHeight - height - 12);
-            DraftFieldHintTransform.X = Math.Clamp(position.X + 12, 12, maxX);
-            DraftFieldHintTransform.Y = Math.Clamp(position.Y + 16, 12, maxY);
-        }
-
-        private static double GetDistance(Point first, Point second)
-        {
-            var deltaX = first.X - second.X;
-            var deltaY = first.Y - second.Y;
-            return Math.Sqrt((deltaX * deltaX) + (deltaY * deltaY));
-        }
-
-        private void AnimateDraftFieldHintOpacity(double from, double to, TimeSpan duration, int token, bool collapseWhenDone)
-        {
-            var storyboard = new Storyboard();
-            var animation = new DoubleAnimation
-            {
-                From = from,
-                To = to,
-                Duration = duration,
-                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-            };
-            Storyboard.SetTarget(animation, DraftFieldHint);
-            Storyboard.SetTargetProperty(animation, nameof(UIElement.Opacity));
-            storyboard.Children.Add(animation);
-            storyboard.Completed += (_, _) =>
-            {
-                if (token != _draftFieldHintAnimationToken)
-                {
-                    return;
-                }
-
-                DraftFieldHint.Opacity = to;
-                if (collapseWhenDone)
-                {
-                    DraftFieldHint.Visibility = Visibility.Collapsed;
-                }
-            };
-            storyboard.Begin();
-        }
-
         private async void RefreshCharactersButton_Click(object sender, RoutedEventArgs e)
         {
             await LoadCharacterCardsAsync();
@@ -416,7 +227,17 @@ namespace CrossingVoidZDTool
                 }
 
                 PersistCurrentCharacterSelection();
-                ShowLastEditedPage();
+                var lastEditedModuleTag = GetLastEditedModuleTag();
+                ShowLastEditedPage(lastEditedModuleTag);
+                if (string.Equals(lastEditedModuleTag, ToolboxModuleKey.ActionFrames.ToString(), StringComparison.Ordinal)
+                    && CharacterDesk.CanOpenCurrentDraft)
+                {
+                    await CharacterDesk.OpenCurrentCharacterDraftAsync();
+                    TryPlayPageEntrance(ActionFramesPage);
+                    PersistCurrentCharacterSelection();
+                    AppendLog(LogKind.User, $"ContinueLastCharacter opened St1 draft. Character={CharacterDesk.CurrentCharacter?.Code ?? "<null>"}");
+                }
+
                 AppendLog(LogKind.User, $"ContinueLastCharacter navigated. Current={CharacterDesk.CurrentCharacter?.Code ?? "<null>"} Module={Settings.LastEditedModuleTag ?? "<null>"}");
             }
             catch (Exception ex)
@@ -426,7 +247,7 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private async void CharacterCardButton_Click(object sender, RoutedEventArgs e)
+        private void CharacterCardButton_Click(object sender, RoutedEventArgs e)
         {
             var character = ResolveCharacterFromEvent(sender, e.OriginalSource);
             if (character is null)
@@ -434,10 +255,279 @@ namespace CrossingVoidZDTool
                 return;
             }
 
-            await CharacterDesk.SetCurrentCharacterAsync(character);
-            PersistCurrentCharacterSelection();
-            ShowFloatingTip(InfoBarSeverity.Success, "已选择角色", $"{character.Name} / {character.Code}");
-            AppendLog(LogKind.User, $"切换当前制作角色：{character.Name} / {character.Code}");
+            ShowCharacterDetail(character);
+            AppendLog(LogKind.User, $"打开角色详情：{character.Name} / {character.Code}");
+        }
+
+        private void ShowCharacterDetail(CharacterCard character)
+        {
+            _characterDetailCharacter = character;
+            CharacterDetailCard.DataContext = character;
+            CharacterDetailHost.Visibility = Visibility.Visible;
+            CharacterDetailScrollViewer.ChangeView(null, 0, null, disableAnimation: true);
+            CharacterDetailHost.Focus(FocusState.Programmatic);
+        }
+
+        private void HideCharacterDetail()
+        {
+            CharacterDetailHost.Visibility = Visibility.Collapsed;
+            CharacterDetailCard.DataContext = null;
+            _characterDetailCharacter = null;
+        }
+
+        private void CharacterDetailCloseButton_Click(object sender, RoutedEventArgs e)
+        {
+            HideCharacterDetail();
+        }
+
+        private void CharacterDetailHost_Tapped(object sender, TappedRoutedEventArgs e)
+        {
+            HideCharacterDetail();
+            e.Handled = true;
+        }
+
+        private void CharacterDetailHost_RightTapped(object sender, RightTappedRoutedEventArgs e)
+        {
+            HideCharacterDetail();
+            e.Handled = true;
+        }
+
+        private void CharacterDetailHost_KeyDown(object sender, KeyRoutedEventArgs e)
+        {
+            if (e.Key == Windows.System.VirtualKey.Escape)
+            {
+                HideCharacterDetail();
+                e.Handled = true;
+            }
+        }
+
+        private void CharacterDetailCard_Tapped(object sender, TappedRoutedEventArgs e)
+        {
+            e.Handled = true;
+        }
+
+        private void CharacterDetailCard_RightTapped(object sender, RightTappedRoutedEventArgs e)
+        {
+            e.Handled = true;
+        }
+
+        private async void CharacterDetailContinueButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_characterDetailCharacter is not { } character)
+            {
+                return;
+            }
+
+            if (character.IsCompleted)
+            {
+                try
+                {
+                    character = await CharacterDesk.ReopenCompletedCharacterAsync(character);
+                    _characterDetailCharacter = character;
+                    PersistCurrentCharacterSelection();
+                    AppendLog(LogKind.User, $"恢复角色草稿：{character.Name} / {character.Code} -> {character.FolderPath}");
+                }
+                catch (Exception ex)
+                {
+                    ShowFloatingTip(InfoBarSeverity.Error, "恢复草稿失败", ex.Message);
+                    AppendLog(LogKind.Error, "恢复已完成角色为草稿失败。", ex);
+                    return;
+                }
+            }
+            else
+            {
+                try
+                {
+                    await CharacterDesk.SetCurrentCharacterAsync(character);
+                    PersistCurrentCharacterSelection();
+                    AppendLog(LogKind.User, $"继续编辑角色：{character.Name} / {character.Code}");
+                }
+                catch (Exception ex)
+                {
+                    ShowFloatingTip(InfoBarSeverity.Error, "选择角色失败", ex.Message);
+                    AppendLog(LogKind.Error, "继续编辑时选择角色失败。", ex);
+                    return;
+                }
+            }
+
+            HideCharacterDetail();
+            var lastEditedModuleTag = GetLastEditedModuleTag();
+            if (string.Equals(lastEditedModuleTag, ToolboxModuleKey.CharacterDesk.ToString(), StringComparison.Ordinal) ||
+                string.Equals(lastEditedModuleTag, ToolboxModuleKey.Settings.ToString(), StringComparison.Ordinal))
+            {
+                ShowSt2MaterialPage();
+                return;
+            }
+
+            ShowLastEditedPage(lastEditedModuleTag);
+        }
+
+        private async void CharacterDetailExportButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_characterDetailCharacter is not { } character)
+            {
+                return;
+            }
+
+            var defaultExportRoot = CharacterDesk.GetDefaultExportRootPath(Settings.ProjectRootPath);
+            var exportRoot = await ShowCharacterExportLocationDialogAsync(character, defaultExportRoot);
+            if (string.IsNullOrWhiteSpace(exportRoot))
+            {
+                return;
+            }
+
+            var targetPath = Path.Combine(exportRoot, character.Code);
+            var overwrite = Directory.Exists(targetPath);
+            if (overwrite && !await ConfirmCharacterExportOverwriteAsync(character, targetPath))
+            {
+                return;
+            }
+
+            try
+            {
+                var exportedPath = await ShowCharacterExportProgressAsync(character, exportRoot, overwrite);
+                ShowFloatingTip(InfoBarSeverity.Success, "角色已导出", exportedPath);
+                AppendLog(LogKind.User, $"导出完整角色文件夹：{character.Name} / {character.Code} -> {exportedPath}");
+            }
+            catch (OperationCanceledException)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "导出已取消", character.Name);
+            }
+            catch (Exception ex)
+            {
+                ShowFloatingTip(InfoBarSeverity.Error, "导出角色失败", ex.Message);
+                AppendLog(LogKind.Error, "导出完整角色文件夹失败。", ex);
+            }
+        }
+
+        private async Task<string?> ShowCharacterExportLocationDialogAsync(CharacterCard character, string defaultExportRoot)
+        {
+            var pathTextBox = new TextBox
+            {
+                Text = defaultExportRoot,
+                PlaceholderText = "选择或输入导出位置",
+                HorizontalAlignment = HorizontalAlignment.Stretch
+            };
+            var browseButton = new Button
+            {
+                Content = "浏览...",
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+            browseButton.Click += async (_, _) =>
+            {
+                var picker = new FolderPicker
+                {
+                    SuggestedStartLocation = PickerLocationId.ComputerFolder
+                };
+                picker.FileTypeFilter.Add("*");
+                InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+                var folder = await picker.PickSingleFolderAsync();
+                if (folder is not null)
+                {
+                    pathTextBox.Text = folder.Path;
+                }
+            };
+
+            var content = new StackPanel
+            {
+                Width = 520,
+                Spacing = 10
+            };
+            content.Children.Add(new TextBlock
+            {
+                Text = $"将完整角色文件夹导出为“{character.Code}”。",
+                TextWrapping = TextWrapping.Wrap
+            });
+            content.Children.Add(pathTextBox);
+            content.Children.Add(browseButton);
+
+            var result = await _dialogService.ShowContentAsync(new ContentDialogRequest(
+                "选择导出位置",
+                content,
+                PrimaryButtonText: "导出",
+                CloseButtonText: string.Empty,
+                SecondaryButtonText: "取消",
+                DefaultButton: ContentDialogButton.Primary,
+                PrimaryButtonStyle: (Style)Application.Current.Resources["DialogAccentButtonStyle"]));
+            if (result != DialogResultKind.Primary || string.IsNullOrWhiteSpace(pathTextBox.Text))
+            {
+                return null;
+            }
+
+            try
+            {
+                return Path.GetFullPath(pathTextBox.Text.Trim());
+            }
+            catch (Exception ex) when (ex is ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                ShowFloatingTip(InfoBarSeverity.Error, "导出位置无效", ex.Message);
+                return null;
+            }
+        }
+
+        private async Task<bool> ConfirmCharacterExportOverwriteAsync(CharacterCard character, string targetPath)
+        {
+            var result = await _dialogService.ShowContentAsync(new ContentDialogRequest(
+                "覆盖已有导出",
+                new TextBlock
+                {
+                    Text = $"导出位置中已存在 {character.Code}。继续会用当前角色的完整文件夹替换它。\n\n{targetPath}",
+                    TextWrapping = TextWrapping.Wrap,
+                    Width = 500
+                },
+                PrimaryButtonText: "覆盖导出",
+                CloseButtonText: string.Empty,
+                SecondaryButtonText: "取消",
+                DefaultButton: ContentDialogButton.Primary,
+                PrimaryButtonStyle: (Style)Application.Current.Resources["DialogAccentButtonStyle"]));
+            return result == DialogResultKind.Primary;
+        }
+
+        private void CharacterDetailOpenFolderButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_characterDetailCharacter is not { } character)
+            {
+                return;
+            }
+
+            try
+            {
+                Directory.CreateDirectory(character.FolderPath);
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = character.FolderPath,
+                    UseShellExecute = true
+                });
+                AppendLog(LogKind.User, $"打开角色目录：{character.FolderPath}");
+            }
+            catch (Exception ex)
+            {
+                ShowFloatingTip(InfoBarSeverity.Error, "角色目录打开失败", ex.Message);
+                AppendLog(LogKind.Error, "角色目录打开失败。", ex);
+            }
+        }
+
+        private async void CharacterDetailUnrealSyncButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_characterDetailCharacter is not { } character)
+            {
+                return;
+            }
+
+            try
+            {
+                await CharacterDesk.SetCurrentCharacterAsync(character);
+                PersistCurrentCharacterSelection();
+            }
+            catch (Exception ex)
+            {
+                ShowFloatingTip(InfoBarSeverity.Error, "选择角色失败", ex.Message);
+                AppendLog(LogKind.Error, "前往虚幻同步台时选择角色失败。", ex);
+                return;
+            }
+
+            HideCharacterDetail();
+            ShowUnrealProjectSyncPage();
         }
 
         private void CharacterCardButton_RightTapped(object sender, RightTappedRoutedEventArgs e)
@@ -453,11 +543,6 @@ namespace CrossingVoidZDTool
                 ShowCharacterCardMenu(element, character, e);
                 e.Handled = true;
             }
-        }
-
-        private async void PortraitEntryButton_Click(object sender, RoutedEventArgs e)
-        {
-            await OpenDraftCharacterCardAsync(ResolveCharacterFromEvent(sender, e.OriginalSource));
         }
 
         private async void PortraitEntryCard_Tapped(object sender, TappedRoutedEventArgs e)
@@ -681,6 +766,11 @@ namespace CrossingVoidZDTool
                 return;
             }
 
+            await BackupCharacterAsync(character);
+        }
+
+        private async Task BackupCharacterAsync(CharacterCard character)
+        {
             var note = await ShowCharacterBackupNoteDialogAsync(character);
             if (note is null)
             {
@@ -930,6 +1020,53 @@ namespace CrossingVoidZDTool
             catch
             {
                 CompleteGlobalProgress("备份失败", "角色卡备份没有完成。");
+                throw;
+            }
+            finally
+            {
+                await HideGlobalProgressAfterDelayAsync();
+            }
+        }
+
+        private async Task<string> ShowCharacterExportProgressAsync(
+            CharacterCard character,
+            string exportRootPath,
+            bool overwrite)
+        {
+            ShowGlobalProgress("导出角色", $"{character.Name} / {character.Code}");
+            var progress = new Progress<CharacterBackupProgress>(update =>
+            {
+                var byteText = update.TotalBytes > 0
+                    ? $"{FormatCharacterBackupSize(update.CompletedBytes)} / {FormatCharacterBackupSize(update.TotalBytes)}"
+                    : "统计大小中";
+                var fileText = update.TotalFiles > 0
+                    ? $"{Math.Min(update.CompletedFiles, update.TotalFiles)} / {update.TotalFiles} 个文件"
+                    : "扫描文件中";
+                var detail = update.CurrentRelativePath is null
+                    ? $"{fileText}，{byteText}\n{exportRootPath}"
+                    : $"{fileText}，{byteText}\n{update.CurrentRelativePath}";
+                UpdateGlobalProgress(update.Message, update.Percent, detail, update.Percent <= 0);
+            });
+
+            try
+            {
+                var result = await CharacterDesk.ExportCharacterFolderAsync(
+                    character,
+                    exportRootPath,
+                    overwrite,
+                    progress,
+                    GetGlobalProgressCancellationToken());
+                CompleteGlobalProgress("导出完成", result);
+                return result;
+            }
+            catch (OperationCanceledException)
+            {
+                CompleteGlobalProgress("已取消", "当前导出操作已停止，原角色文件夹未改变。");
+                throw;
+            }
+            catch
+            {
+                CompleteGlobalProgress("导出失败", "角色文件夹未完整导出，原角色文件夹未改变。");
                 throw;
             }
             finally

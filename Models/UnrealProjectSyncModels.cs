@@ -16,6 +16,36 @@ internal sealed record UnrealProjectSyncCheckItem(
     public string StatusText => Exists ? "通过" : "缺失";
 }
 
+internal sealed record UnrealPublishFoundationCheckItem(
+    string DisplayName,
+    string ExpectedPath,
+    string ActualPath,
+    bool IsCompliant,
+    string Problem = "",
+    string ExpectedType = "",
+    string ActualType = "")
+{
+    public string StatusText => IsCompliant ? "合规" : string.IsNullOrWhiteSpace(Problem) ? "不合规" : Problem;
+    public string CorrectName
+    {
+        get
+        {
+            var leaf = ExpectedPath.TrimEnd('/').Split('/').LastOrDefault() ?? string.Empty;
+            var dotIndex = leaf.IndexOf('.', StringComparison.Ordinal);
+            return dotIndex > 0 ? leaf[..dotIndex] : leaf;
+        }
+    }
+    public string ExpectedSummaryText => string.IsNullOrWhiteSpace(ExpectedType)
+        ? ExpectedPath
+        : $"{ExpectedPath} · 类型 {ExpectedType}";
+    public string DetailText => IsCompliant
+        ? string.IsNullOrWhiteSpace(ExpectedType) ? "目录已经存在。" : $"资产类型：{ActualType}"
+        : string.IsNullOrWhiteSpace(ActualPath)
+            ? "未找到对应目录或资产。"
+            : $"当前位于：{ActualPath}" +
+              (string.IsNullOrWhiteSpace(ActualType) ? string.Empty : $"；类型：{ActualType}");
+}
+
 internal sealed record UnrealProjectSyncCheckResult(
     InfoBarSeverity Severity,
     string Title,
@@ -90,7 +120,8 @@ internal sealed class UnrealProjectSyncCharacterCandidate : CrossingVoidZDTool.V
         UnrealProjectSyncSequenceFramesPreview sequenceFramesPreview,
         UnrealProjectSyncBuffsPreview buffsPreview,
         IReadOnlyList<UnrealProjectSyncMaterialBucket> materialBuckets,
-        bool hasLatestData = false)
+        bool hasLatestData = false,
+        IReadOnlyList<UnrealProjectSyncVoiceBucket>? voiceBuckets = null)
     {
         Code = code;
         DisplayName = displayName;
@@ -103,6 +134,7 @@ internal sealed class UnrealProjectSyncCharacterCandidate : CrossingVoidZDTool.V
         SequenceFramesPreview = sequenceFramesPreview;
         BuffsPreview = buffsPreview;
         MaterialBuckets = materialBuckets;
+        VoiceBuckets = voiceBuckets ?? [];
         HasLatestData = hasLatestData;
     }
 
@@ -127,6 +159,8 @@ internal sealed class UnrealProjectSyncCharacterCandidate : CrossingVoidZDTool.V
     public UnrealProjectSyncBuffsPreview BuffsPreview { get; }
 
     public IReadOnlyList<UnrealProjectSyncMaterialBucket> MaterialBuckets { get; }
+
+    public IReadOnlyList<UnrealProjectSyncVoiceBucket> VoiceBuckets { get; }
 
     public bool HasLatestData { get; }
 
@@ -436,7 +470,8 @@ internal sealed record UnrealProjectSyncSequenceActionPreview(
     int FlipbookCount,
     double FramesPerSecond,
     IReadOnlyList<UnrealProjectSyncExportAssetView> OrderedFrames,
-    IReadOnlyList<UnrealProjectSyncExportAssetView> PreviewFrames)
+    IReadOnlyList<UnrealProjectSyncExportAssetView> PreviewFrames,
+    IReadOnlyList<UnrealProjectSyncSequenceSoundNotifyPreview>? SoundNotifies = null)
 {
     public int FormIndex => FormIndexes.Count == 0 ? 1 : FormIndexes[0];
 
@@ -473,7 +508,20 @@ internal sealed record UnrealProjectSyncSequenceActionPreview(
     private string FormattedFps => FramesPerSecond > 0
         ? FramesPerSecond.ToString("0.##")
         : "12";
+
+    public IReadOnlyList<UnrealProjectSyncSequenceSoundNotifyPreview> SequenceSounds => SoundNotifies ?? [];
 }
+
+internal sealed record UnrealProjectSyncSequenceSoundNotifyPreview(
+    int FrameIndex,
+    double TimeSeconds,
+    int TrackIndex,
+    string SoundObjectPath,
+    string SoundAssetName,
+    string SoundAssetClass,
+    string ExportedFilePath,
+    bool IsCharacterVoice,
+    string SequenceObjectPath = "");
 
 internal sealed record UnrealProjectSyncCharacterInfoPreview(
     string AssetName,
@@ -493,7 +541,8 @@ internal sealed record UnrealProjectSyncCharacterInfoPreview(
     int EnergyDefense,
     int CriticalRate,
     int CriticalDamage,
-    int Synchronize)
+    int Synchronize,
+    bool Anti = false)
 {
     public bool HasData => !string.IsNullOrWhiteSpace(ObjectPath);
 
@@ -514,7 +563,7 @@ internal sealed record UnrealProjectSyncCharacterInfoPreview(
     public string ShapeSkillText => $"形态上限 {FormLimit} / 技能详情 {SkillCount} / 被动介绍 {PassiveSkillsText}";
 
     public string StatsText =>
-        $"速度 {Speed} / 生命 {Health} / 攻击 {Attack} / 物防 {PhysicalDefense} / 异防 {EnergyDefense} / 暴击 {CriticalRate} / 暴伤 {CriticalDamage} / 同步率 {Synchronize}";
+        $"抗性 {(Anti ? "异能" : "物理")} / 速度 {Speed} / 生命 {Health} / 攻击 {Attack} / 物防 {PhysicalDefense} / 异防 {EnergyDefense} / 暴击 {CriticalRate} / 暴伤 {CriticalDamage} / 同步率 {Synchronize}";
 }
 
 internal sealed record UnrealProjectSyncMaterialBucket(
@@ -525,6 +574,12 @@ internal sealed record UnrealProjectSyncMaterialBucket(
 {
     public string CountText => $"{Count} 个";
 }
+
+internal sealed record UnrealProjectSyncVoiceBucket(
+    string DisplayName,
+    string Kind,
+    int Count,
+    IReadOnlyList<UnrealProjectSyncExportAssetView> Assets);
 
 internal sealed record UnrealProjectSyncExportRunResult(
     int ExitCode,
@@ -553,7 +608,7 @@ internal sealed class UnrealExportProgressState
 internal sealed class UnrealProjectExportManifest
 {
     [JsonPropertyName("schemaVersion")]
-    public int SchemaVersion { get; set; } = 1;
+    public int SchemaVersion { get; set; } = 2;
 
     [JsonPropertyName("generatedAt")]
     public string GeneratedAt { get; set; } = string.Empty;
@@ -570,6 +625,12 @@ internal sealed class UnrealProjectExportManifest
     [JsonPropertyName("characterItems")]
     public List<UnrealProjectExportCharacterItem> CharacterItems { get; set; } = [];
 
+    [JsonPropertyName("characterSummaries")]
+    public List<UnrealProjectExportCharacterSummary> CharacterSummaries { get; set; } = [];
+
+    [JsonPropertyName("summaryGeneratedAt")]
+    public string SummaryGeneratedAt { get; set; } = string.Empty;
+
     [JsonPropertyName("characterActors")]
     public List<UnrealProjectExportCharacterActor> CharacterActors { get; set; } = [];
 
@@ -584,6 +645,15 @@ internal sealed class UnrealProjectExportManifest
 
     [JsonPropertyName("supportSkillLibrary")]
     public UnrealProjectExportSupportSkillLibrary SupportSkillLibrary { get; set; } = new();
+}
+
+internal sealed class UnrealProjectExportCharacterSummary
+{
+    [JsonPropertyName("code")]
+    public string Code { get; set; } = string.Empty;
+
+    [JsonPropertyName("displayName")]
+    public string DisplayName { get; set; } = string.Empty;
 }
 
 internal sealed class UnrealProjectExportAsset
@@ -623,6 +693,9 @@ internal sealed class UnrealProjectExportCharacterItem
 
     [JsonPropertyName("objectPath")]
     public string ObjectPath { get; set; } = string.Empty;
+
+    [JsonPropertyName("assetClass")]
+    public string AssetClass { get; set; } = string.Empty;
 
     [JsonPropertyName("hasItemData")]
     public bool HasItemData { get; set; }
@@ -698,6 +771,9 @@ internal sealed class UnrealProjectExportCharData
 
     [JsonPropertyName("synchronize")]
     public int Synchronize { get; set; }
+
+    [JsonPropertyName("anti")]
+    public bool Anti { get; set; }
 }
 
 internal sealed class UnrealProjectExportCharacterActor
@@ -848,6 +924,39 @@ internal sealed class UnrealProjectExportSequenceAction
 
     [JsonPropertyName("previewFrames")]
     public List<UnrealProjectExportSequenceAsset> PreviewFrames { get; set; } = [];
+
+    [JsonPropertyName("soundNotifies")]
+    public List<UnrealProjectExportSequenceSoundNotify> SoundNotifies { get; set; } = [];
+}
+
+internal sealed class UnrealProjectExportSequenceSoundNotify
+{
+    [JsonPropertyName("frameIndex")]
+    public int FrameIndex { get; set; }
+
+    [JsonPropertyName("timeSeconds")]
+    public double TimeSeconds { get; set; }
+
+    [JsonPropertyName("trackIndex")]
+    public int TrackIndex { get; set; }
+
+    [JsonPropertyName("soundObjectPath")]
+    public string SoundObjectPath { get; set; } = string.Empty;
+
+    [JsonPropertyName("soundAssetName")]
+    public string SoundAssetName { get; set; } = string.Empty;
+
+    [JsonPropertyName("soundAssetClass")]
+    public string SoundAssetClass { get; set; } = string.Empty;
+
+    [JsonPropertyName("exportedFilePath")]
+    public string ExportedFilePath { get; set; } = string.Empty;
+
+    [JsonPropertyName("isCharacterVoice")]
+    public bool IsCharacterVoice { get; set; }
+
+    [JsonPropertyName("sequenceObjectPath")]
+    public string SequenceObjectPath { get; set; } = string.Empty;
 }
 
 internal sealed class UnrealProjectExportSequenceAsset

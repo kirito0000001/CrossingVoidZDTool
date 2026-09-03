@@ -8,6 +8,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
+using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace CrossingVoidZDTool.Services;
@@ -17,10 +18,12 @@ internal sealed class SequenceFrameService
     public const int RequiredWidth = 928;
     public const int RequiredHeight = 640;
     public const int DefaultFps = 12;
+    public const int MaxFrameDuration = 600;
 
     private const string ZdMaterialFolderName = "ZDMaterial";
     private const string FramesFolderName = "Frames";
     private const string ManifestFileName = "sequence.json";
+    private const string SnapshotManifestFileName = "sequence.snapshot.json";
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true
@@ -71,6 +74,34 @@ internal sealed class SequenceFrameService
         });
     }
 
+    public IReadOnlyDictionary<string, IReadOnlyList<SequenceFrameVoiceUsage>> GetVoiceUsages(CharacterCard character)
+    {
+        var result = new Dictionary<string, List<SequenceFrameVoiceUsage>>(StringComparer.OrdinalIgnoreCase);
+        var skills = new CharacterSkillsService().Load(character);
+        foreach (var section in LoadSections(character, skills))
+        {
+            foreach (var frame in section.Frames.Where(frame => frame.HasVoice))
+            {
+                var path = Path.GetFullPath(frame.VoiceFilePath);
+                if (!result.TryGetValue(path, out var usages))
+                {
+                    usages = [];
+                    result[path] = usages;
+                }
+
+                usages.Add(new SequenceFrameVoiceUsage(
+                    section.Action.Code,
+                    section.Action.DisplayName,
+                    frame.Index));
+            }
+        }
+
+        return result.ToDictionary(
+            pair => pair.Key,
+            pair => (IReadOnlyList<SequenceFrameVoiceUsage>)pair.Value,
+            StringComparer.OrdinalIgnoreCase);
+    }
+
     public IReadOnlyList<SequenceFrameSection> LoadSections(CharacterCard character, CharacterSkillsData skillsData, CancellationToken cancellationToken = default)
     {
         var actions = BuildActions(skillsData, _formService.GetFormLimit(character));
@@ -79,9 +110,9 @@ internal sealed class SequenceFrameService
 
     public IReadOnlyList<SequenceFrameItem> ImportFrames(CharacterCard character, SequenceFrameAction action, IReadOnlyList<string> sourceFilePaths)
     {
-        var supported = sourceFilePaths
+        var supported = OrderImportSourcePaths(sourceFilePaths
             .Where(path => File.Exists(path) && IsSupportedImage(path))
-            .ToList();
+            .ToList());
         if (supported.Count == 0)
         {
             return [];
@@ -104,6 +135,44 @@ internal sealed class SequenceFrameService
 
         SaveManifest(character, action, manifest);
         return LoadSection(character, action, CancellationToken.None).Frames;
+    }
+
+    internal static IReadOnlyList<string> OrderImportSourcePaths(IReadOnlyList<string> sourceFilePaths)
+    {
+        if (sourceFilePaths.Count < 2)
+        {
+            return sourceFilePaths.ToList();
+        }
+
+        var numberedPaths = new List<(string Path, long Number, int OriginalIndex)>(sourceFilePaths.Count);
+        string? sharedPrefix = null;
+        var numbers = new HashSet<long>();
+        for (var index = 0; index < sourceFilePaths.Count; index++)
+        {
+            var name = Path.GetFileNameWithoutExtension(sourceFilePaths[index]);
+            var match = Regex.Match(name, "^(?<prefix>.*?)(?<number>\\d+)$", RegexOptions.CultureInvariant);
+            if (!match.Success ||
+                !long.TryParse(match.Groups["number"].Value, out var number) ||
+                !numbers.Add(number))
+            {
+                return sourceFilePaths.ToList();
+            }
+
+            var prefix = match.Groups["prefix"].Value;
+            sharedPrefix ??= prefix;
+            if (!string.Equals(sharedPrefix, prefix, StringComparison.OrdinalIgnoreCase))
+            {
+                return sourceFilePaths.ToList();
+            }
+
+            numberedPaths.Add((sourceFilePaths[index], number, index));
+        }
+
+        return numberedPaths
+            .OrderBy(item => item.Number)
+            .ThenBy(item => item.OriginalIndex)
+            .Select(item => item.Path)
+            .ToList();
     }
 
     public IReadOnlyList<SequenceFrameItem> ImportExternalFrames(
@@ -155,28 +224,67 @@ internal sealed class SequenceFrameService
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
+    public IReadOnlyList<SequenceFrameItem> DeleteFrames(
+        CharacterCard character,
+        SequenceFrameAction action,
+        IReadOnlyList<SequenceFrameItem> frames)
+    {
+        var manifest = LoadOrCreateManifest(character, action);
+        var indexes = frames
+            .Select(frame => ResolveManifestIndex(manifest, frame))
+            .Where(index => index >= 0)
+            .Distinct()
+            .OrderByDescending(index => index)
+            .ToList();
+        foreach (var index in indexes)
+        {
+            manifest.Frames.RemoveAt(index);
+        }
+
+        SaveManifest(character, action, manifest);
+        PruneUnreferencedFrameFiles(character, action, manifest);
+        return LoadSection(character, action, CancellationToken.None).Frames;
+    }
+
     public void RestoreActionFrames(CharacterCard character, SequenceFrameAction action, IReadOnlyList<string> snapshotFilePaths)
     {
+        var snapshotManifestPath = snapshotFilePaths.FirstOrDefault(path =>
+            string.Equals(Path.GetFileName(path), SnapshotManifestFileName, StringComparison.OrdinalIgnoreCase));
+        if (string.IsNullOrWhiteSpace(snapshotManifestPath) || !File.Exists(snapshotManifestPath))
+        {
+            throw new InvalidDataException("序列帧快照清单不存在，无法恢复。");
+        }
+
+        var snapshotManifest = JsonSerializer.Deserialize(
+            File.ReadAllText(snapshotManifestPath, Encoding.UTF8),
+            AppJsonSerializerContext.Default.SequenceFrameManifest)
+            ?? throw new InvalidDataException("序列帧快照清单内容无效。");
         var folderPath = GetActionFolderPath(character, action);
         Directory.CreateDirectory(folderPath);
         ClearActionFolder(folderPath);
         var manifest = CreateManifest(action);
-        foreach (var path in snapshotFilePaths.Where(File.Exists))
+        manifest.Fps = snapshotManifest.Fps;
+        var snapshotFolderPath = Path.GetDirectoryName(snapshotManifestPath)!;
+        foreach (var entry in snapshotManifest.Frames)
         {
-            if (string.Equals(Path.GetExtension(path), ".blank", StringComparison.OrdinalIgnoreCase))
+            if (entry.IsBlank)
             {
-                manifest.Frames.Add(new SequenceFrameManifestEntry { IsBlank = true });
+                manifest.Frames.Add(CloneEntry(entry));
                 continue;
             }
 
-            if (!IsSupportedImage(path))
+            var sourcePath = Path.Combine(snapshotFolderPath, NormalizeRelativePath(entry.RelativePath));
+            if (!File.Exists(sourcePath) || !IsSupportedImage(sourcePath))
             {
-                continue;
+                throw new FileNotFoundException("序列帧快照中的图片不存在。", sourcePath);
             }
 
             manifest.Frames.Add(new SequenceFrameManifestEntry
             {
-                RelativePath = ImportSourceIntoPool(character, action, path)
+                SyncId = entry.SyncId,
+                RelativePath = ImportSourceIntoPool(character, action, sourcePath),
+                DurationFrames = entry.DurationFrames,
+                VoiceRelativePath = entry.VoiceRelativePath
             });
         }
 
@@ -193,14 +301,24 @@ internal sealed class SequenceFrameService
             $"{action.Code}-{DateTime.Now:yyyyMMddHHmmssfff}-{Guid.NewGuid():N}");
         Directory.CreateDirectory(snapshotFolderPath);
         var snapshotPaths = new List<string>();
+        var snapshotIndexWidth = MaterialSequenceNaming.GetWidth(manifest.Frames.Count);
+        var snapshotManifest = new SequenceFrameManifest
+        {
+            SchemaVersion = 3,
+            ActionCode = action.Code,
+            Fps = manifest.Fps
+        };
         for (var index = 0; index < manifest.Frames.Count; index++)
         {
             var entry = manifest.Frames[index];
             if (entry.IsBlank)
             {
-                var blankPath = Path.Combine(snapshotFolderPath, $"{(index + 1).ToString().PadLeft(3, '0')}.blank");
+                var blankPath = Path.Combine(
+                    snapshotFolderPath,
+                    $"{(index + 1).ToString().PadLeft(snapshotIndexWidth, '0')}.blank");
                 File.WriteAllText(blankPath, "blank", Encoding.UTF8);
                 snapshotPaths.Add(blankPath);
+                snapshotManifest.Frames.Add(CloneEntry(entry));
                 continue;
             }
 
@@ -211,10 +329,26 @@ internal sealed class SequenceFrameService
             }
 
             var extension = Path.GetExtension(sourcePath);
-            var targetPath = Path.Combine(snapshotFolderPath, $"{(index + 1).ToString().PadLeft(3, '0')}{extension}");
+            var targetPath = Path.Combine(
+                snapshotFolderPath,
+                $"{(index + 1).ToString().PadLeft(snapshotIndexWidth, '0')}{extension}");
             File.Copy(sourcePath, targetPath, overwrite: true);
             snapshotPaths.Add(targetPath);
+            snapshotManifest.Frames.Add(new SequenceFrameManifestEntry
+            {
+                SyncId = entry.SyncId,
+                RelativePath = Path.GetFileName(targetPath),
+                DurationFrames = entry.DurationFrames,
+                VoiceRelativePath = entry.VoiceRelativePath
+            });
         }
+
+        var snapshotManifestPath = Path.Combine(snapshotFolderPath, SnapshotManifestFileName);
+        File.WriteAllText(
+            snapshotManifestPath,
+            JsonSerializer.Serialize(snapshotManifest, ManifestJsonTypeInfo),
+            Encoding.UTF8);
+        snapshotPaths.Add(snapshotManifestPath);
 
         return snapshotPaths;
     }
@@ -233,23 +367,75 @@ internal sealed class SequenceFrameService
             index = manifest.Frames.Count - 1;
         }
 
-        manifest.Frames.Insert(index + 1, frame.IsBlank
-            ? new SequenceFrameManifestEntry { IsBlank = true }
-            : new SequenceFrameManifestEntry { RelativePath = ToManifestRelativePath(character, action, frame.FilePath) });
+        var sourceEntry = index >= 0 && index < manifest.Frames.Count
+            ? manifest.Frames[index]
+            : null;
+        manifest.Frames.Insert(index + 1, sourceEntry is null
+            ? new SequenceFrameManifestEntry
+            {
+                IsBlank = frame.IsBlank,
+                RelativePath = frame.IsBlank ? string.Empty : ToManifestRelativePath(character, action, frame.FilePath),
+                DurationFrames = Math.Clamp(frame.DurationFrames, 1, MaxFrameDuration),
+                VoiceRelativePath = ToCharacterRelativePath(character, frame.VoiceFilePath)
+            }
+            : CloneEntry(sourceEntry, preserveSyncId: false));
         SaveManifest(character, action, manifest);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
-    public IReadOnlyList<SequenceFrameItem> InsertBlankFrame(CharacterCard character, SequenceFrameAction action, SequenceFrameItem? afterFrame)
+    public IReadOnlyList<SequenceFrameItem> DuplicateFrames(
+        CharacterCard character,
+        SequenceFrameAction action,
+        IReadOnlyList<SequenceFrameItem> frames,
+        SequenceFrameItem afterFrame)
     {
         var manifest = LoadOrCreateManifest(character, action);
-        var index = afterFrame is null ? manifest.Frames.Count - 1 : ResolveManifestIndex(manifest, afterFrame);
+        var indexes = frames
+            .Select(frame => ResolveManifestIndex(manifest, frame))
+            .Where(index => index >= 0)
+            .Distinct()
+            .OrderBy(index => index)
+            .ToList();
+        if (indexes.Count == 0)
+        {
+            return LoadSection(character, action, CancellationToken.None).Frames;
+        }
+
+        var targetIndex = ResolveManifestIndex(manifest, afterFrame);
+        if (targetIndex < 0)
+        {
+            throw new InvalidOperationException("没有找到批量复制的插入位置。");
+        }
+
+        var entries = indexes
+            .Select(index => CloneEntry(manifest.Frames[index], preserveSyncId: false))
+            .ToList();
+        for (var index = 0; index < entries.Count; index++)
+        {
+            manifest.Frames.Insert(targetIndex + 1 + index, entries[index]);
+        }
+
+        SaveManifest(character, action, manifest);
+        return LoadSection(character, action, CancellationToken.None).Frames;
+    }
+
+    public IReadOnlyList<SequenceFrameItem> InsertBlankFrame(
+        CharacterCard character,
+        SequenceFrameAction action,
+        SequenceFrameItem? anchorFrame,
+        SequenceFrameInsertPosition position = SequenceFrameInsertPosition.After)
+    {
+        var manifest = LoadOrCreateManifest(character, action);
+        var index = anchorFrame is null ? manifest.Frames.Count - 1 : ResolveManifestIndex(manifest, anchorFrame);
         if (index < -1)
         {
             index = manifest.Frames.Count - 1;
         }
 
-        manifest.Frames.Insert(index + 1, new SequenceFrameManifestEntry { IsBlank = true });
+        var insertIndex = position == SequenceFrameInsertPosition.Before && anchorFrame is not null
+            ? Math.Max(0, index)
+            : index + 1;
+        manifest.Frames.Insert(insertIndex, new SequenceFrameManifestEntry { IsBlank = true });
         SaveManifest(character, action, manifest);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
@@ -269,24 +455,151 @@ internal sealed class SequenceFrameService
         manifest.Frames.Clear();
         foreach (var frame in existing)
         {
-            if (frame.IsBlank)
-            {
-                manifest.Frames.Add(new SequenceFrameManifestEntry { IsBlank = true });
-                continue;
-            }
-
             var existingEntry = sourceEntries.ElementAtOrDefault(frame.Index - 1);
-            manifest.Frames.Add(new SequenceFrameManifestEntry
+            manifest.Frames.Add(existingEntry is not null
+                ? CloneEntry(existingEntry)
+                : new SequenceFrameManifestEntry
+                {
+                    IsBlank = frame.IsBlank,
+                    RelativePath = frame.IsBlank ? string.Empty : ToManifestRelativePath(character, action, frame.FilePath),
+                    DurationFrames = Math.Clamp(frame.DurationFrames, 1, MaxFrameDuration),
+                    VoiceRelativePath = ToCharacterRelativePath(character, frame.VoiceFilePath)
+                });
+        }
+
+        SaveManifest(character, action, manifest);
+        PruneUnreferencedFrameFiles(character, action, manifest);
+        return LoadSection(character, action, CancellationToken.None).Frames;
+    }
+
+    public IReadOnlyList<SequenceFrameItem> ReplaceFrame(
+        CharacterCard character,
+        SequenceFrameAction action,
+        SequenceFrameItem frame,
+        string sourceFilePath)
+    {
+        if (!File.Exists(sourceFilePath) || !IsSupportedImage(sourceFilePath))
+        {
+            throw new InvalidDataException("请选择有效的 PNG、JPG、WEBP 或 BMP 图片。");
+        }
+
+        var manifest = LoadOrCreateManifest(character, action);
+        var index = ResolveManifestIndex(manifest, frame);
+        if (index < 0)
+        {
+            throw new InvalidOperationException("没有找到要替换的序列帧。");
+        }
+
+        var entry = manifest.Frames[index];
+        entry.RelativePath = ImportSourceIntoPool(character, action, sourceFilePath);
+        entry.IsBlank = false;
+        SaveManifest(character, action, manifest);
+        PruneUnreferencedFrameFiles(character, action, manifest);
+        return LoadSection(character, action, CancellationToken.None).Frames;
+    }
+
+    public IReadOnlyList<SequenceFrameItem> ReplaceFrameWithSources(
+        CharacterCard character,
+        SequenceFrameAction action,
+        SequenceFrameItem frame,
+        IReadOnlyList<string> sourceFilePaths)
+    {
+        if (sourceFilePaths.Count == 0 ||
+            sourceFilePaths.Any(path => !File.Exists(path) || !IsSupportedImage(path)))
+        {
+            throw new InvalidDataException("请选择至少一张有效的 PNG、JPG、WEBP 或 BMP 图片。");
+        }
+
+        var manifest = LoadOrCreateManifest(character, action);
+        var index = ResolveManifestIndex(manifest, frame);
+        if (index < 0)
+        {
+            throw new InvalidOperationException("没有找到要替换的序列帧。");
+        }
+
+        var relativePaths = sourceFilePaths
+            .Select(path => ImportSourceIntoPool(character, action, path))
+            .ToList();
+        var targetEntry = manifest.Frames[index];
+        targetEntry.RelativePath = relativePaths[0];
+        targetEntry.IsBlank = false;
+        for (var sourceIndex = 1; sourceIndex < relativePaths.Count; sourceIndex++)
+        {
+            manifest.Frames.Insert(index + sourceIndex, new SequenceFrameManifestEntry
             {
-                RelativePath = existingEntry is not null
-                    ? existingEntry.RelativePath
-                    : ToManifestRelativePath(character, action, frame.FilePath)
+                RelativePath = relativePaths[sourceIndex]
             });
         }
 
         SaveManifest(character, action, manifest);
         PruneUnreferencedFrameFiles(character, action, manifest);
         return LoadSection(character, action, CancellationToken.None).Frames;
+    }
+
+    public IReadOnlyList<SequenceFrameItem> SetFrameDuration(
+        CharacterCard character,
+        SequenceFrameAction action,
+        SequenceFrameItem frame,
+        int durationFrames)
+    {
+        var manifest = LoadOrCreateManifest(character, action);
+        var index = ResolveManifestIndex(manifest, frame);
+        if (index < 0)
+        {
+            throw new InvalidOperationException("没有找到要设置时长的序列帧。");
+        }
+
+        manifest.Frames[index].DurationFrames = Math.Clamp(durationFrames, 1, MaxFrameDuration);
+        SaveManifest(character, action, manifest);
+        return LoadSection(character, action, CancellationToken.None).Frames;
+    }
+
+    public IReadOnlyList<SequenceFrameItem> SetFrameVoice(
+        CharacterCard character,
+        SequenceFrameAction action,
+        SequenceFrameItem frame,
+        string? voiceFilePath)
+    {
+        var manifest = LoadOrCreateManifest(character, action);
+        var index = ResolveManifestIndex(manifest, frame);
+        if (index < 0)
+        {
+            throw new InvalidOperationException("没有找到要绑定语音的序列帧。");
+        }
+
+        manifest.Frames[index].VoiceRelativePath = string.IsNullOrWhiteSpace(voiceFilePath)
+            ? string.Empty
+            : ToCharacterRelativePath(character, ValidateVoicePath(character, voiceFilePath));
+        SaveManifest(character, action, manifest);
+        return LoadSection(character, action, CancellationToken.None).Frames;
+    }
+
+    public void AssignFrameSyncIds(
+        CharacterCard character,
+        SequenceFrameAction action,
+        IReadOnlyList<string> syncIds)
+    {
+        ArgumentNullException.ThrowIfNull(syncIds);
+        var manifest = LoadOrCreateManifest(character, action);
+        if (manifest.Frames.Count != syncIds.Count)
+        {
+            throw new InvalidOperationException(
+                $"序列帧身份数量与帧格数量不一致：{action.DisplayName}，帧格 {manifest.Frames.Count}，身份 {syncIds.Count}。");
+        }
+
+        var normalized = syncIds.Select(value => value?.Trim() ?? string.Empty).ToArray();
+        if (normalized.Any(string.IsNullOrWhiteSpace) ||
+            normalized.Distinct(StringComparer.OrdinalIgnoreCase).Count() != normalized.Length)
+        {
+            throw new InvalidOperationException($"序列帧身份包含空值或重复项：{action.DisplayName}。");
+        }
+
+        for (var index = 0; index < manifest.Frames.Count; index++)
+        {
+            manifest.Frames[index].SyncId = normalized[index];
+        }
+
+        SaveManifest(character, action, manifest);
     }
 
     public void SetActionFps(CharacterCard character, SequenceFrameAction action, int fps)
@@ -417,17 +730,21 @@ internal sealed class SequenceFrameService
                 cancellationToken.ThrowIfCancellationRequested();
                 if (entry.IsBlank)
                 {
-                    return CreateBlankFrameItem(index + 1);
+                    return CreateBlankFrameItem(character, entry, index + 1);
                 }
 
                 return CreateFrameItem(
                     ResolveManifestPath(character, action, entry.RelativePath),
                     index + 1,
-                    manifest.Frames.Count);
+                    manifest.Frames.Count,
+                    entry.DurationFrames,
+                    ResolveVoicePath(character, entry.VoiceRelativePath),
+                    entry.SyncId);
             })
             .Where(frame => frame.IsBlank || File.Exists(frame.FilePath))
             .OrderBy(frame => frame.Index)
             .ToList();
+        frames = AnnotateFrameReuse(frames);
 
         var invalidCount = frames.Count(frame => !frame.IsValid);
         var statusText = frames.Count == 0
@@ -438,7 +755,53 @@ internal sealed class SequenceFrameService
         return new SequenceFrameSection(action, frames, statusText, frames.Count == 0 || invalidCount > 0);
     }
 
-    private static SequenceFrameItem CreateFrameItem(string path, int sequenceIndex, int sequenceCount)
+    private static List<SequenceFrameItem> AnnotateFrameReuse(IReadOnlyList<SequenceFrameItem> frames)
+    {
+        var annotated = frames
+            .Select(frame => frame with
+            {
+                ReuseCount = 1,
+                ReuseOccurrence = 1,
+                ReuseSourceIndex = 0,
+                ReusePositionsText = string.Empty,
+                ReuseColorIndex = -1
+            })
+            .ToList();
+        var groups = annotated
+            .Where(frame => !frame.IsBlank && !string.IsNullOrWhiteSpace(frame.FilePath))
+            .GroupBy(frame => frame.FilePath, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .OrderBy(group => group.Min(frame => frame.Index))
+            .ToList();
+
+        for (var colorIndex = 0; colorIndex < groups.Count; colorIndex++)
+        {
+            var groupFrames = groups[colorIndex].OrderBy(frame => frame.Index).ToList();
+            var positions = string.Join("、", groupFrames.Select(frame => frame.Index));
+            for (var occurrenceIndex = 0; occurrenceIndex < groupFrames.Count; occurrenceIndex++)
+            {
+                var frameIndex = annotated.FindIndex(frame => frame.Index == groupFrames[occurrenceIndex].Index);
+                annotated[frameIndex] = annotated[frameIndex] with
+                {
+                    ReuseCount = groupFrames.Count,
+                    ReuseOccurrence = occurrenceIndex + 1,
+                    ReuseSourceIndex = groupFrames[0].Index,
+                    ReusePositionsText = positions,
+                    ReuseColorIndex = colorIndex
+                };
+            }
+        }
+
+        return annotated;
+    }
+
+    private static SequenceFrameItem CreateFrameItem(
+        string path,
+        int sequenceIndex,
+        int sequenceCount,
+        int durationFrames,
+        string voiceFilePath,
+        string syncId)
     {
         var actualWidth = 0;
         var actualHeight = 0;
@@ -459,17 +822,25 @@ internal sealed class SequenceFrameService
         return new SequenceFrameItem(
             info.FullName,
             fileUri,
-            $"{sequenceIndex.ToString().PadLeft(Math.Max(3, sequenceCount.ToString().Length), '0')}  {info.Name}",
+            $"{MaterialSequenceNaming.FormatIndex(sequenceIndex, sequenceCount)}  {info.Name}",
             $"{info.FullName}|{version}",
             sequenceIndex,
             actualWidth,
             actualHeight,
             actualWidth == RequiredWidth && actualHeight == RequiredHeight,
-            info.LastWriteTime);
+            info.LastWriteTime,
+            DurationFrames: Math.Clamp(durationFrames, 1, MaxFrameDuration),
+            VoiceFilePath: voiceFilePath,
+            VoiceFileName: Path.GetFileName(voiceFilePath),
+            SyncId: syncId);
     }
 
-    private static SequenceFrameItem CreateBlankFrameItem(int sequenceIndex)
+    private static SequenceFrameItem CreateBlankFrameItem(
+        CharacterCard character,
+        SequenceFrameManifestEntry entry,
+        int sequenceIndex)
     {
+        var voiceFilePath = ResolveVoicePath(character, entry.VoiceRelativePath);
         return new SequenceFrameItem(
             string.Empty,
             string.Empty,
@@ -480,7 +851,11 @@ internal sealed class SequenceFrameService
             RequiredHeight,
             true,
             DateTime.MinValue,
-            true);
+            true,
+            Math.Clamp(entry.DurationFrames, 1, MaxFrameDuration),
+            voiceFilePath,
+            Path.GetFileName(voiceFilePath),
+            SyncId: entry.SyncId);
     }
 
     private static void ClearActionFolder(string folderPath)
@@ -580,6 +955,7 @@ internal sealed class SequenceFrameService
 
     private SequenceFrameManifest NormalizeManifest(CharacterCard character, SequenceFrameAction action, SequenceFrameManifest manifest)
     {
+        manifest.SchemaVersion = 3;
         manifest.ActionCode = string.IsNullOrWhiteSpace(manifest.ActionCode) ? action.Code : manifest.ActionCode;
         manifest.Fps = Math.Clamp(manifest.Fps <= 0 ? DefaultFps : manifest.Fps, 1, 60);
         manifest.Frames ??= [];
@@ -592,6 +968,11 @@ internal sealed class SequenceFrameService
                 continue;
             }
 
+            entry.DurationFrames = Math.Clamp(entry.DurationFrames, 1, MaxFrameDuration);
+            entry.SyncId = string.IsNullOrWhiteSpace(entry.SyncId)
+                ? Guid.NewGuid().ToString("N")
+                : entry.SyncId.Trim();
+            entry.VoiceRelativePath = NormalizeRelativePath(entry.VoiceRelativePath ?? string.Empty);
             if (entry.IsBlank)
             {
                 entry.RelativePath = string.Empty;
@@ -622,6 +1003,7 @@ internal sealed class SequenceFrameService
 
     private void SaveManifest(CharacterCard character, SequenceFrameAction action, SequenceFrameManifest manifest)
     {
+        manifest.SchemaVersion = 3;
         manifest.ActionCode = action.Code;
         manifest.Fps = Math.Clamp(manifest.Fps <= 0 ? DefaultFps : manifest.Fps, 1, 60);
         manifest.Frames ??= [];
@@ -640,16 +1022,106 @@ internal sealed class SequenceFrameService
         File.Move(tempPath, manifestPath, overwrite: true);
     }
 
+    internal static void RemapVoiceReferences(
+        CharacterCard character,
+        IReadOnlyDictionary<string, string?> pathMappings)
+    {
+        if (pathMappings.Count == 0)
+        {
+            return;
+        }
+
+        var normalizedMappings = pathMappings.ToDictionary(
+            pair => Path.GetFullPath(pair.Key),
+            pair => string.IsNullOrWhiteSpace(pair.Value) ? null : Path.GetFullPath(pair.Value),
+            StringComparer.OrdinalIgnoreCase);
+        var materialFolderPath = Path.Combine(character.FolderPath, ZdMaterialFolderName);
+        if (!Directory.Exists(materialFolderPath))
+        {
+            return;
+        }
+
+        foreach (var manifestPath in Directory.EnumerateFiles(
+                     materialFolderPath,
+                     ManifestFileName,
+                     SearchOption.AllDirectories))
+        {
+            SequenceFrameManifest? manifest;
+            try
+            {
+                manifest = JsonSerializer.Deserialize(
+                    File.ReadAllText(manifestPath, Encoding.UTF8),
+                    ManifestJsonTypeInfo);
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
+
+            if (manifest?.Frames is null)
+            {
+                continue;
+            }
+
+            var changed = false;
+            foreach (var entry in manifest.Frames)
+            {
+                if (string.IsNullOrWhiteSpace(entry.VoiceRelativePath))
+                {
+                    continue;
+                }
+
+                var currentPath = Path.GetFullPath(Path.Combine(
+                    character.FolderPath,
+                    NormalizeRelativePath(entry.VoiceRelativePath)));
+                if (!normalizedMappings.TryGetValue(currentPath, out var targetPath))
+                {
+                    continue;
+                }
+
+                entry.VoiceRelativePath = targetPath is null
+                    ? string.Empty
+                    : NormalizeRelativePath(Path.GetRelativePath(character.FolderPath, targetPath));
+                changed = true;
+            }
+
+            if (!changed)
+            {
+                continue;
+            }
+
+            var tempPath = $"{manifestPath}.tmp";
+            File.WriteAllText(
+                tempPath,
+                JsonSerializer.Serialize(manifest, ManifestJsonTypeInfo),
+                Encoding.UTF8);
+            File.Move(tempPath, manifestPath, overwrite: true);
+        }
+    }
+
     private string ImportSourceIntoPool(CharacterCard character, SequenceFrameAction action, string sourcePath)
     {
+        var sourceFullPath = Path.GetFullPath(sourcePath);
+        var referencedCharacterFrame = EnumerateReferencedFramePaths(character)
+            .FirstOrDefault(path => string.Equals(
+                Path.GetFullPath(path),
+                sourceFullPath,
+                StringComparison.OrdinalIgnoreCase));
+        if (referencedCharacterFrame is not null)
+        {
+            return NormalizeRelativePath(Path.GetRelativePath(
+                GetActionFolderPath(character, action),
+                sourceFullPath));
+        }
+
         var framesFolderPath = GetFramesFolderPath(character, action);
         Directory.CreateDirectory(framesFolderPath);
-        var hash = ComputeFileHash(sourcePath);
+        var hash = ComputeFileHash(sourceFullPath);
         var fileName = $"{character.Code}-{action.Code}-{hash[..16]}.png";
         var targetPath = Path.Combine(framesFolderPath, fileName);
         if (!File.Exists(targetPath))
         {
-            SaveAsPng(sourcePath, targetPath);
+            SaveAsPng(sourceFullPath, targetPath);
         }
 
         return NormalizeRelativePath(Path.Combine(FramesFolderName, fileName));
@@ -672,6 +1144,54 @@ internal sealed class SequenceFrameService
                 NormalizeRelativePath(ToPoolRelativePath(frame.FilePath)),
                 StringComparison.OrdinalIgnoreCase))
             ?.index ?? -1;
+    }
+
+    private static SequenceFrameManifestEntry CloneEntry(
+        SequenceFrameManifestEntry entry,
+        bool preserveSyncId = true)
+    {
+        return new SequenceFrameManifestEntry
+        {
+            SyncId = preserveSyncId ? entry.SyncId : Guid.NewGuid().ToString("N"),
+            RelativePath = entry.RelativePath,
+            IsBlank = entry.IsBlank,
+            DurationFrames = entry.DurationFrames,
+            VoiceRelativePath = entry.VoiceRelativePath
+        };
+    }
+
+    private static string ValidateVoicePath(CharacterCard character, string voiceFilePath)
+    {
+        if (!VoiceMaterialService.IsWaveFile(voiceFilePath))
+        {
+            throw new InvalidDataException("序列帧只能绑定当前角色已有的有效 WAV 语音。");
+        }
+
+        var root = Path.GetFullPath(character.FolderPath).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+        var fullPath = Path.GetFullPath(voiceFilePath);
+        if (!fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("语音文件不在当前角色目录中，不能绑定到序列帧。");
+        }
+
+        return fullPath;
+    }
+
+    private static string ToCharacterRelativePath(CharacterCard character, string? filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath))
+        {
+            return string.Empty;
+        }
+
+        return NormalizeRelativePath(Path.GetRelativePath(character.FolderPath, Path.GetFullPath(filePath)));
+    }
+
+    private static string ResolveVoicePath(CharacterCard character, string? relativePath)
+    {
+        return string.IsNullOrWhiteSpace(relativePath)
+            ? string.Empty
+            : Path.GetFullPath(Path.Combine(character.FolderPath, NormalizeRelativePath(relativePath)));
     }
 
     private static string ComputeFileHash(string sourcePath)
@@ -801,6 +1321,11 @@ internal sealed class SequenceFrameService
     {
         data ??= new SequenceFramesData();
         data.ActionSettings ??= [];
+        data.DuplicateCheckMaterialCount = Math.Max(-1, data.DuplicateCheckMaterialCount);
+        data.DuplicateCheckDuplicateCount = Math.Max(0, data.DuplicateCheckDuplicateCount);
+        data.DuplicateContentHashes = new Dictionary<string, SequenceFrameDuplicateHashEntry>(
+            data.DuplicateContentHashes ?? [],
+            StringComparer.OrdinalIgnoreCase);
         foreach (var settings in data.ActionSettings)
         {
             settings.Fps = Math.Clamp(settings.Fps, 1, 60);

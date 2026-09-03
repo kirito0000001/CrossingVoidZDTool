@@ -23,6 +23,7 @@ internal sealed class SettingsViewModel : ObservableObject
     private bool _logUserOperations = true;
     private bool _logWarnings = true;
     private bool _logErrors = true;
+    private bool _backupBeforeUnrealSync = true;
     private bool _isLoadingSettings;
     private bool _isUndoingSetting;
     private string _settingUndoStatusText = "暂无可撤回的设置修改。";
@@ -68,6 +69,18 @@ internal sealed class SettingsViewModel : ObservableObject
     public string UnrealEnginePath => _settings.UnrealEnginePath ?? string.Empty;
 
     public string UnrealProjectPath => _settings.UnrealProjectPath ?? string.Empty;
+
+    public bool BackupBeforeUnrealSync
+    {
+        get => _backupBeforeUnrealSync;
+        set => SetSettingProperty(
+            ref _backupBeforeUnrealSync,
+            value,
+            nameof(BackupBeforeUnrealSync),
+            "同步前压缩备份 Unreal 项目",
+            () => _settings.BackupBeforeUnrealSync = value,
+            () => { });
+    }
 
     public string ProjectRootStatusTitle
     {
@@ -348,6 +361,9 @@ internal sealed class SettingsViewModel : ObservableObject
                 LogErrors = entry.OldValue;
                 LogSettingsChanged?.Invoke(this, EventArgs.Empty);
                 break;
+            case nameof(BackupBeforeUnrealSync):
+                BackupBeforeUnrealSync = entry.OldValue;
+                break;
         }
     }
 
@@ -374,6 +390,7 @@ internal sealed class SettingsViewModel : ObservableObject
             LogUserOperations = settings.LogUserOperations;
             LogWarnings = settings.LogWarnings;
             LogErrors = settings.LogErrors;
+            BackupBeforeUnrealSync = settings.BackupBeforeUnrealSync;
         }
         finally
         {

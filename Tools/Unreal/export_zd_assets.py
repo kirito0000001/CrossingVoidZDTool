@@ -5,8 +5,12 @@ import re
 import traceback
 import unreal
 
+SHARED_BUFF_ICON_ROOT = "/Game/AssetMaterial/ImageS/BUFF"
+SHARED_BATTLE_EFFECT_ROOT = "/Game/AssetMaterial/Sound/Pvp_Effect"
 DEFAULT_TARGET_PATHS = [
     "/Game/AssetMaterial/ImageS/CharaterS",
+    SHARED_BUFF_ICON_ROOT,
+    SHARED_BATTLE_EFFECT_ROOT,
     "/Game/GameActor2D",
 ]
 BASE_MATERIAL_ROOT = "/Game/AssetMaterial/ImageS/CharaterS"
@@ -156,6 +160,7 @@ def _merge_selected_manifest(previous_manifest, current_manifest, selected_codes
         return kept
 
     current_manifest["assets"] = merge_list("assets", _asset_character_code)
+    current_manifest["characterSummaries"] = merge_list("characterSummaries", _entry_character_code)
     current_manifest["characterItems"] = merge_list("characterItems", _entry_character_code)
     current_manifest["characterActors"] = merge_list("characterActors", _entry_character_code)
     current_manifest["characterSequences"] = merge_list("characterSequences", _entry_character_code)
@@ -213,6 +218,10 @@ def _tags(asset_data):
 def _is_texture_asset(asset_data):
     asset_class = _asset_class(asset_data).lower()
     return "texture" in asset_class
+
+
+def _is_sound_wave_asset(asset_data):
+    return "soundwave" in _asset_class(asset_data).lower()
 
 
 def _safe_file_name(value):
@@ -346,6 +355,14 @@ def _int_value(value):
         return int(value)
     except Exception:
         return 0
+
+
+def _bool_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    return _to_text(value).strip().lower() in ("true", "1", "yes")
 
 
 def _first_property_value(objects, names, default=None):
@@ -997,6 +1014,7 @@ def _export_item_data_from_asset(asset, object_path=""):
             "critical": _int_value(_get_editor_property(char_data, "Critical")),
             "criticalC": _int_value(_get_editor_property(char_data, "CriticalC")),
             "synchronize": _int_value(_get_editor_property(char_data, "Synchronize")),
+            "anti": _bool_value(_get_editor_property(char_data, "Anti")),
         }
     }, ""
 
@@ -1042,6 +1060,7 @@ def _export_character_items_from_disk(project_path):
             continue
 
         object_path = "{}/{}.{}".format(CHAR_ITEM_ROOT, asset_name, asset_name)
+        asset = None
         try:
             asset = unreal.load_asset(object_path)
             item_data, read_message = _export_item_data_from_asset(asset, object_path)
@@ -1056,6 +1075,7 @@ def _export_character_items_from_disk(project_path):
             "code": asset_name[5:],
             "assetName": asset_name,
             "objectPath": object_path,
+            "assetClass": _loaded_asset_class(asset),
             "hasItemData": item_data is not None,
             "readMessage": read_message,
             "itemData": item_data or {},
@@ -1094,6 +1114,7 @@ def _export_character_items(registry, project_path):
             "code": code,
             "assetName": asset_name,
             "objectPath": _object_path(asset),
+            "assetClass": _asset_class(asset),
             "hasItemData": item_data is not None,
             "readMessage": read_message,
             "itemData": item_data or {},
@@ -1109,6 +1130,21 @@ def _export_character_items(registry, project_path):
 
     items.sort(key=lambda item: item.get("code", ""))
     return items
+
+
+def _build_character_summaries(character_items):
+    summaries = []
+    for item in character_items:
+        code = _to_text(item.get("code", "")).strip()
+        item_data = item.get("itemData", {})
+        display_name = _to_text(item_data.get("name", "")).strip() if isinstance(item_data, dict) else ""
+        if code and display_name:
+            summaries.append({
+                "code": code,
+                "displayName": display_name,
+            })
+    summaries.sort(key=lambda item: item.get("code", "").lower())
+    return summaries
 
 
 def _export_character_actor_data(asset, object_path, code, asset_name):
@@ -1757,6 +1793,47 @@ def _sprite_source_texture_path(sprite):
     return ""
 
 
+def _loaded_asset_class(asset):
+    if asset is None:
+        return ""
+    try:
+        return _to_text(asset.get_class().get_name())
+    except Exception:
+        return ""
+
+
+def _export_sound_wave(asset_data, export_root):
+    package_path = _to_text(asset_data.package_path)
+    if not _is_sound_wave_asset(asset_data):
+        return ""
+    try:
+        asset = asset_data.get_asset()
+    except Exception:
+        asset = unreal.load_asset(_object_path(asset_data))
+    if asset is None:
+        return ""
+    if package_path.startswith(CHARACTER_ACTOR_ROOT + "/"):
+        relative_package = package_path[len(CHARACTER_ACTOR_ROOT) + 1:]
+        folder = os.path.join(export_root, "Voices", *relative_package.split("/")[:-1])
+    elif package_path.startswith(SHARED_BATTLE_EFFECT_ROOT):
+        relative_package = package_path[len(SHARED_BATTLE_EFFECT_ROOT):].strip("/")
+        folder = os.path.join(export_root, "Shared", "Audio", "BattleEffects", *relative_package.split("/")[:-1])
+    else:
+        return ""
+    os.makedirs(folder, exist_ok=True)
+    output_path = os.path.join(folder, "{}.wav".format(_safe_file_name(asset_data.asset_name)))
+    task = unreal.AssetExportTask()
+    task.object = asset
+    task.filename = output_path
+    task.automated = True
+    task.replace_identical = True
+    task.prompt = False
+    task.selected = False
+    if unreal.Exporter.run_asset_export_task(task):
+        return output_path if os.path.exists(output_path) else ""
+    return ""
+
+
 def _flipbook_frames_per_second(asset):
     try:
         value = unreal.load_asset(asset.get("objectPath", "")).get_editor_property("frames_per_second")
@@ -1801,6 +1878,52 @@ def _ordered_flipbook_frame_assets(flipbook_assets, texture_assets, all_assets):
     return ordered_frames, len(sprite_paths)
 
 
+def _sequence_sound_notifies(sequence_assets, all_assets, character_code, frames_per_second, frame_count):
+    result = []
+    fps = frames_per_second if frames_per_second > 0 else 12.0
+    character_sound_root = "{}/{}/Sound/".format(CHARACTER_ACTOR_ROOT, character_code).lower()
+    for sequence_asset in sequence_assets:
+        sequence_object_path = sequence_asset.get("objectPath", "")
+        sequence = unreal.load_asset(sequence_object_path)
+        if sequence is None:
+            continue
+        notifies = _get_editor_property(sequence, "AnimNotifies", []) or []
+        for notify in notifies:
+            try:
+                class_name = _to_text(notify.get_class().get_name())
+            except Exception:
+                class_name = _to_text(type(notify).__name__)
+            if "paperzdanimnotify_playsound" not in class_name.lower():
+                continue
+            sound = _get_editor_property(notify, "Sound")
+            sound_object_path = _object_path_text(sound).strip()
+            if not sound_object_path:
+                continue
+            time_seconds = float(_get_editor_property(notify, "Time", 0.0) or 0.0)
+            track_index = int(_get_editor_property(notify, "TrackIndex", 0) or 0)
+            frame_index = max(0, int(round(time_seconds * fps)))
+            if frame_count > 0:
+                frame_index = min(frame_index, frame_count - 1)
+            matched = _find_asset_by_object_path(all_assets, sound_object_path)
+            try:
+                sound_class = _to_text(sound.get_class().get_name())
+            except Exception:
+                sound_class = matched.get("assetClass", "") if matched else ""
+            result.append({
+                "frameIndex": frame_index,
+                "timeSeconds": time_seconds,
+                "trackIndex": track_index,
+                "soundObjectPath": sound_object_path,
+                "soundAssetName": _asset_name_from_object_path(sound_object_path),
+                "soundAssetClass": sound_class,
+                "exportedFilePath": matched.get("exportedFilePath", "") if matched else "",
+                "isCharacterVoice": sound_object_path.lower().startswith(character_sound_root),
+                "sequenceObjectPath": sequence_object_path,
+            })
+    result.sort(key=lambda item: (item["frameIndex"], item["trackIndex"], item["soundObjectPath"]))
+    return result
+
+
 def _new_sequence_action_bucket(identity):
     return {
         "actionCode": identity.get("actionCode", ""),
@@ -1821,7 +1944,7 @@ def _add_unique_text(values, value):
         values.append(text)
 
 
-def _build_sequence_actions(code, obj, actor_asset, actor_asset_map):
+def _build_sequence_actions(code, obj, actor_asset, actor_asset_map, manifest_assets):
     buckets = {}
     anim_sequence_assets = []
     material_assets = []
@@ -1908,6 +2031,15 @@ def _build_sequence_actions(code, obj, actor_asset, actor_asset_map):
             ordered_frames = [_sequence_asset_export_item(asset) for asset in _sorted_sequence_frame_assets(texture_assets)]
         preview_frames = ordered_frames[:3]
         frames_per_second = _flipbook_frames_per_second(playback_flipbook_assets[0]) if playback_flipbook_assets else 0.0
+        sound_notifies = _sequence_sound_notifies(
+            bucket["animSequences"],
+            all_actor_assets + [
+                asset for asset in manifest_assets
+                if asset.get("packagePath", "").startswith(SHARED_BATTLE_EFFECT_ROOT)
+            ],
+            code,
+            frames_per_second,
+            len(ordered_frames))
         has_data = bool(bucket["referencedSequences"] or bucket["animSequences"] or texture_assets or sprite_assets or playback_flipbook_assets)
         result.append({
             "actionCode": bucket["actionCode"],
@@ -1925,6 +2057,7 @@ def _build_sequence_actions(code, obj, actor_asset, actor_asset_map):
             "framesPerSecond": frames_per_second,
             "orderedFrames": ordered_frames,
             "previewFrames": preview_frames,
+            "soundNotifies": sound_notifies,
         })
 
     category_order = {"base": 0, "skill": 1, "link": 2, "other": 3}
@@ -1960,7 +2093,7 @@ def _export_character_sequences(character_actors, manifest_assets, project_path)
         anim_maps_asset = unreal.load_asset(anim_maps_object_path)
         actor_asset = unreal.load_asset(actor_object_path) if actor_object_path else None
         obj = _default_object(actor_asset, actor_object_path) if actor_asset is not None else None
-        actions = _build_sequence_actions(code, obj, actor_asset, actor_asset_map)
+        actions = _build_sequence_actions(code, obj, actor_asset, actor_asset_map, manifest_assets)
         anim_sequence_count = sum(len(action.get("animSequences", [])) for action in actions)
         frame_texture_count = sum(int(action.get("textureCount", 0)) for action in actions)
         has_data = anim_maps_asset is not None or anim_sequence_count > 0 or frame_texture_count > 0
@@ -3082,7 +3215,7 @@ def _export():
                 include_only_on_disk_assets=False)
         except TypeError:
             found = registry.get_assets_by_path(unreal.Name(target_path), True)
-        if selected_codes:
+        if selected_codes and target_path not in (SHARED_BUFF_ICON_ROOT, SHARED_BATTLE_EFFECT_ROOT):
             found = [
                 asset for asset in found
                 if _character_code_from_package_path(_to_text(asset.package_path), target_path).lower() in selected_codes
@@ -3108,6 +3241,13 @@ def _export():
                 unreal.log_warning("ZDToolbox texture preview export failed: {}\n{}".format(
                     _object_path(asset),
                     traceback.format_exc()))
+            if not exported_file_path:
+                try:
+                    exported_file_path = _export_sound_wave(asset, export_root)
+                except Exception:
+                    unreal.log_warning("ZDToolbox voice export failed: {}\n{}".format(
+                        _object_path(asset),
+                        traceback.format_exc()))
 
             assets.append({
                 "assetName": _to_text(asset.asset_name),
@@ -3148,11 +3288,13 @@ def _export():
         item.get("packagePath", ""),
         item.get("assetName", "")))
     manifest = {
-        "schemaVersion": 1,
+        "schemaVersion": 2,
         "generatedAt": datetime.datetime.now().isoformat(timespec="seconds"),
         "projectPath": project_path,
         "targets": target_paths,
         "assets": assets,
+        "characterSummaries": _build_character_summaries(character_items),
+        "summaryGeneratedAt": datetime.datetime.now().isoformat(timespec="seconds"),
         "characterItems": character_items,
         "characterActors": character_actors,
         "characterSequences": character_sequences,

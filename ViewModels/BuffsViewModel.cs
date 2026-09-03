@@ -1,5 +1,6 @@
 using System;
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,9 +26,14 @@ internal sealed class BuffsViewModel : ObservableObject
     private bool _isEditorOpen;
 
     public BuffsViewModel(BuffService buffService)
+        : this(buffService, DispatcherQueue.GetForCurrentThread())
+    {
+    }
+
+    internal BuffsViewModel(BuffService buffService, DispatcherQueue? dispatcherQueue)
     {
         _buffService = buffService;
-        _dispatcherQueue = DispatcherQueue.GetForCurrentThread();
+        _dispatcherQueue = dispatcherQueue;
         BuffEntry.AnyBuffEdited += (_, _) => NotifyEdited();
     }
 
@@ -37,6 +43,7 @@ internal sealed class BuffsViewModel : ObservableObject
 
     public string[] DamageTypeOptions { get; } =
     [
+        string.Empty,
         "发送方-属性",
         "发送方-最终",
         "接收方-属性",
@@ -46,6 +53,12 @@ internal sealed class BuffsViewModel : ObservableObject
     public string[] GainTypeOptions { get; } = ["增益", "削弱"];
 
     public string[] TaskPriorityOptions { get; } = ["低", "正常", "高", "紧急"];
+
+    public string[] EffectTypeOptions { get; } = ["属性修改", "最终伤害", "速度", "技能锁定", "防御", "生命", "自定义效果"];
+
+    public string[] EffectTargetOptions { get; } = ["自身", "自身主战", "自身护援", "敌方主战", "敌方护援", "发送方", "接收方"];
+
+    public string[] EffectOperationOptions { get; } = ["加算", "乘算", "覆盖", "锁定", "蓝图逻辑"];
 
     public BuffEntry? SelectedBuff
     {
@@ -94,6 +107,11 @@ internal sealed class BuffsViewModel : ObservableObject
         _isLoading = true;
         try
         {
+            if (_currentCharacter is not null && _isDirty)
+            {
+                await SaveCurrentCharacterAsync(cancellationToken);
+            }
+
             if (character is null)
             {
                 _currentCharacter = null;
@@ -120,30 +138,24 @@ internal sealed class BuffsViewModel : ObservableObject
 
     public async Task<bool> SaveAsync(CharacterCard? character, CancellationToken cancellationToken = default)
     {
-        if (character is null || !_isDirty)
+        if (!IsCurrentCharacter(character) || !_isDirty)
         {
             return false;
         }
 
-        RefreshOwnerText(character);
-        var snapshot = BuffService.Clone(_data);
-        await Task.Run(() => _buffService.Save(character, snapshot), cancellationToken);
-        _isDirty = false;
-        UpdateNotice();
-        StatusText = $"BUFF 已保存：{DateTime.Now:HH:mm:ss}";
-        return true;
+        return await SaveCurrentCharacterAsync(cancellationToken);
     }
 
     public bool SaveNow(CharacterCard? character)
     {
-        if (character is null || !_isDirty)
+        if (!IsCurrentCharacter(character) || !_isDirty || _currentCharacter is null)
         {
             return false;
         }
 
-        RefreshOwnerText(character);
+        RefreshOwnerText(_currentCharacter);
         var snapshot = BuffService.Clone(_data);
-        _buffService.Save(character, snapshot);
+        _buffService.Save(_currentCharacter, snapshot);
         _isDirty = false;
         UpdateNotice();
         StatusText = $"BUFF 已保存：{DateTime.Now:HH:mm:ss}";
@@ -164,7 +176,7 @@ internal sealed class BuffsViewModel : ObservableObject
             if (targetPath is not null)
             {
                 buff.IconPath = targetPath;
-                buff.IconUri = new Uri(targetPath).AbsoluteUri;
+                buff.IconUri = BuffService.CreateIconUri(targetPath);
             }
         }
 
@@ -201,13 +213,23 @@ internal sealed class BuffsViewModel : ObservableObject
         SelectedBuff = null;
     }
 
+    public void AddEffect(BuffEntry buff)
+    {
+        buff.Effects.Add(new BuffEffectModule());
+    }
+
+    public bool RemoveEffect(BuffEntry buff, BuffEffectModule effect)
+    {
+        return buff.Effects.Remove(effect);
+    }
+
     public async Task ImportIconAsync(CharacterCard character, BuffEntry buff, string sourcePath, CancellationToken cancellationToken = default)
     {
         RefreshNaming(character);
         var generatedCode = buff.GeneratedCode;
         var targetPath = await Task.Run(() => _buffService.ImportIconFile(character, generatedCode, sourcePath), cancellationToken);
         buff.IconPath = targetPath;
-        buff.IconUri = new Uri(targetPath).AbsoluteUri;
+        buff.IconUri = BuffService.CreateIconUri(targetPath);
         MarkEdited();
     }
 
@@ -220,7 +242,7 @@ internal sealed class BuffsViewModel : ObservableObject
         if (targetPath is not null)
         {
             buff.IconPath = targetPath;
-            buff.IconUri = new Uri(targetPath).AbsoluteUri;
+            buff.IconUri = BuffService.CreateIconUri(targetPath);
             MarkEdited();
             return true;
         }
@@ -287,10 +309,6 @@ internal sealed class BuffsViewModel : ObservableObject
         var missingName = Buffs.Count(buff => string.IsNullOrWhiteSpace(buff.Name));
         var missingOwner = Buffs.Count(buff => string.IsNullOrWhiteSpace(buff.OwnerText));
         var missingDescription = Buffs.Count(buff => string.IsNullOrWhiteSpace(buff.Description));
-        var invalidStacks = Buffs.Count(buff => !int.TryParse(buff.Stacks, out _));
-        var invalidCompleteStacks = Buffs.Count(buff => !int.TryParse(buff.CompleteStacks, out _));
-        var invalidStrength = Buffs.Count(buff => !int.TryParse(buff.Strength, out _));
-        var invalidCompleteStrength = Buffs.Count(buff => !int.TryParse(buff.CompleteStrength, out _));
 
         if (Buffs.Count == 0)
         {
@@ -303,11 +321,7 @@ internal sealed class BuffsViewModel : ObservableObject
                 missingIcon > 0 ? $"缺图标 {missingIcon}" : string.Empty,
                 missingName > 0 ? $"缺名称 {missingName}" : string.Empty,
                 missingOwner > 0 ? $"缺归属 {missingOwner}" : string.Empty,
-                missingDescription > 0 ? $"缺说明 {missingDescription}" : string.Empty,
-                invalidStacks > 0 ? $"层数基础值不是整数 {invalidStacks}" : string.Empty,
-                invalidCompleteStacks > 0 ? $"层数上限不是整数 {invalidCompleteStacks}" : string.Empty,
-                invalidStrength > 0 ? $"强度基础值不是整数 {invalidStrength}" : string.Empty,
-                invalidCompleteStrength > 0 ? $"强度上限不是整数 {invalidCompleteStrength}" : string.Empty
+                missingDescription > 0 ? $"缺说明 {missingDescription}" : string.Empty
             }
             .Where(text => !string.IsNullOrWhiteSpace(text))
             .ToArray();
@@ -332,5 +346,36 @@ internal sealed class BuffsViewModel : ObservableObject
     private void RefreshBindings()
     {
         OnPropertyChanged(nameof(Buffs));
+    }
+
+    private async Task<bool> SaveCurrentCharacterAsync(CancellationToken cancellationToken)
+    {
+        if (_currentCharacter is null || !_isDirty)
+        {
+            return false;
+        }
+
+        var owner = _currentCharacter;
+        RefreshOwnerText(owner);
+        var snapshot = BuffService.Clone(_data);
+        await Task.Run(() => _buffService.Save(owner, snapshot), cancellationToken);
+        _isDirty = false;
+        UpdateNotice();
+        StatusText = $"BUFF 已保存：{DateTime.Now:HH:mm:ss}";
+        return true;
+    }
+
+    private bool IsCurrentCharacter(CharacterCard? character)
+    {
+        if (character is null || _currentCharacter is null)
+        {
+            return false;
+        }
+
+        return string.Equals(character.Code, _currentCharacter.Code, StringComparison.OrdinalIgnoreCase) &&
+               string.Equals(
+                   Path.GetFullPath(character.FolderPath),
+                   Path.GetFullPath(_currentCharacter.FolderPath),
+                   StringComparison.OrdinalIgnoreCase);
     }
 }

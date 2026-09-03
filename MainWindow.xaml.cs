@@ -30,6 +30,7 @@ namespace CrossingVoidZDTool
         private readonly ApplicationViewModel _applicationViewModel;
         private readonly WinUiDialogService _dialogService;
         private readonly BaseMaterialService _baseMaterialService = new();
+        private readonly VoiceMaterialService _voiceMaterialService = new();
         private readonly ProductionStatusService _productionStatusService = new();
         private readonly Stopwatch _globalProgressStopwatch = new();
         private readonly DispatcherQueueTimer _globalProgressElapsedTimer;
@@ -38,12 +39,14 @@ namespace CrossingVoidZDTool
         private readonly DispatcherQueueTimer _skillsSaveTimer;
         private readonly DispatcherQueueTimer _buffsSaveTimer;
         private readonly DispatcherQueueTimer _sequencePreviewTimer;
-        private readonly DispatcherQueueTimer _draftFieldHintTimer;
         private readonly DispatcherQueueTimer _baseMaterialRefreshTimer;
         private readonly Dictionary<InfoBar, DispatcherQueueTimer> _floatingTipTimers = new();
         private readonly Queue<(LogKind Kind, string DisplayText, string CopyText)> _logLines = new();
+        private readonly PageScrollPositionStore _pageScrollPositions = new();
         private FileSystemWatcher? _baseMaterialWatcher;
+        private FileSystemWatcher? _voiceMaterialWatcher;
         private string? _watchedBaseMaterialRoot;
+        private string? _watchedVoiceMaterialRoot;
         private string? _clipboardTextValue;
         private int? _clipboardNumberValue;
         private CharacterReferenceImage? _viewingReferenceImage;
@@ -71,27 +74,36 @@ namespace CrossingVoidZDTool
         private Point _lastReferenceImagePointerPosition;
         private double _sequencePreviewScale = 1;
         private bool _isPanningSequencePreview;
+        private double _sequenceEditorPreviewScale = 1;
+        private bool _isPanningSequenceEditorPreview;
         private bool _isReorderingSequenceFrames;
+        private bool _isDeletingSequenceFrame;
+        private bool _isSynchronizingSequenceFrameSelection;
+        private bool _isSelectingSequenceFrameCopyTarget;
+        private IReadOnlyList<SequenceFrameItem> _pendingSequenceFramesToDuplicate = [];
         private Point _lastSequencePreviewPointerPosition;
+        private Point _lastSequenceEditorPreviewPointerPosition;
         private bool _isChangingShellSelectionInternally;
         private int _baseMaterialInternalWriteDepth;
         private CancellationTokenSource? _globalProgressCancellation;
         private TaskCompletionSource<string?>? _characterCreateDialogCompletion;
-        private int _draftFieldHintAnimationToken;
-        private Point _lastDraftFieldHintPosition;
-        private bool _isDraftFieldHovering;
-        private string _pendingDraftFieldHintText = string.Empty;
         private bool _isOpeningDraftCharacterCard;
 
         public MainWindow()
         {
             SynchronizationContext.SetSynchronizationContext(new DispatcherQueueSynchronizationContext(DispatcherQueue));
             var settingsViewModel = new SettingsViewModel(new AppSettingsService(), new ProjectRootMigrationService());
-            _applicationViewModel = new ApplicationViewModel(settingsViewModel, new GlobalProgressViewModel(), _baseMaterialService);
+            _applicationViewModel = new ApplicationViewModel(
+                settingsViewModel,
+                new GlobalProgressViewModel(),
+                _baseMaterialService,
+                _voiceMaterialService);
             InitializeComponent();
             RootGrid.DataContext = _applicationViewModel;
             _dialogService = new WinUiDialogService(() => RootGrid.XamlRoot);
+            InitializeVoicePlayback();
             RegisterSettingsShortcuts();
+            RegisterSequenceFrameEditorShortcuts();
             RegisterSkillIconPickerWheelHandler();
             ApplyCustomTitleBar();
             ApplyWindowIcon();
@@ -115,13 +127,9 @@ namespace CrossingVoidZDTool
             _sequencePreviewTimer = DispatcherQueue.CreateTimer();
             _sequencePreviewTimer.Interval = TimeSpan.FromMilliseconds(1000d / 12d);
             _sequencePreviewTimer.Tick += SequencePreviewTimer_Tick;
-            _draftFieldHintTimer = DispatcherQueue.CreateTimer();
-            _draftFieldHintTimer.Interval = TimeSpan.FromSeconds(2);
-            _draftFieldHintTimer.Tick += DraftFieldHintTimer_Tick;
             _baseMaterialRefreshTimer = DispatcherQueue.CreateTimer();
             _baseMaterialRefreshTimer.Interval = TimeSpan.FromMilliseconds(450);
             _baseMaterialRefreshTimer.Tick += BaseMaterialRefreshTimer_Tick;
-            Activated += MainWindow_Activated;
             Closed += MainWindow_Closed;
             _applicationViewModel.CharacterDesk.DraftTextEdited += (_, _) => ScheduleDraftSave();
             _applicationViewModel.UnrealSync.CharacterInfoEdited += (_, _) => ScheduleCharacterInfoSave();
@@ -157,6 +165,8 @@ namespace CrossingVoidZDTool
             FlushPendingCharacterInfoSave();
             FlushPendingSkillsSave();
             FlushPendingBuffsSave();
+            _applicationViewModel.UnrealProjectSync.FlushSessionCache();
+            DisposeVoicePlayback();
         }
 
         private SettingsViewModel Settings => _applicationViewModel.Settings;

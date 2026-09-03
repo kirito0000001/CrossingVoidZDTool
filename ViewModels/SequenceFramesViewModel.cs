@@ -17,9 +17,25 @@ namespace CrossingVoidZDTool.ViewModels;
 
 internal sealed class SequenceFramesViewModel : ObservableObject
 {
+    private static readonly (string ActionCode, VoiceMaterialKind Kind)[] VoiceKindMappings =
+    [
+        ("Click", VoiceMaterialKind.Click),
+        ("Death", VoiceMaterialKind.Death),
+        ("Defeat", VoiceMaterialKind.Defeat),
+        ("Ondm", VoiceMaterialKind.Hurt),
+        ("Victory", VoiceMaterialKind.Victory),
+        ("Sk1", VoiceMaterialKind.Skill1),
+        ("Sk2", VoiceMaterialKind.Skill2),
+        ("Ko", VoiceMaterialKind.Ultimate),
+        ("Sub", VoiceMaterialKind.Support),
+        ("Link", VoiceMaterialKind.Combo)
+    ];
+
     private readonly SequenceFrameService _sequenceFrameService;
     private readonly CharacterSkillsService _skillsService;
     private readonly CharacterFormService _formService = new();
+    private readonly VoiceMaterialService _voiceMaterialService = new();
+    private readonly SequenceVoiceSyncAnalyzer _voiceSyncAnalyzer = new();
     private string _statusText = "未打开序列帧页面。";
     private string _previewTitle = "未选择动作";
     private string _currentFrameUri = string.Empty;
@@ -36,8 +52,12 @@ internal sealed class SequenceFramesViewModel : ObservableObject
     private bool _isApplyingPreviewFps;
     private bool _isPreviewing;
     private bool _isPreloadingPreview;
+    private bool _pauseEditorPreviewWhenVoiceEnds;
+    private SequenceEditorPlaybackMode _editorPlaybackMode = SequenceEditorPlaybackMode.Loop;
     private SequenceFrameSection? _previewSection;
     private SequenceFrameSection? _selectedSection;
+    private SequenceFrameItem? _selectedEditorFrame;
+    private double _editorFrameDurationInput = double.NaN;
     private SequenceFramesData _data = new();
     private int _previewIndex;
     private CharacterCard? _currentCharacter;
@@ -59,6 +79,8 @@ internal sealed class SequenceFramesViewModel : ObservableObject
     public ObservableCollection<SequenceFrameItem> SelectedSectionFrames { get; } = [];
 
     public ObservableCollection<SequenceFrameCollectionItem> CollectionItems { get; } = [];
+
+    public ObservableCollection<SequenceFrameVoiceOption> AvailableVoices { get; } = [];
 
     public event EventHandler? SequenceFramesSaved;
 
@@ -134,10 +156,15 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         set
         {
             var normalized = value < 1 ? 1 : value > 60 ? 60 : value;
-            if (SetProperty(ref _previewFps, normalized) && !_isApplyingPreviewFps)
+            var changed = SetProperty(ref _previewFps, normalized);
+            if (changed && !_isApplyingPreviewFps)
             {
                 SaveSelectedSectionFps(normalized);
+                RefreshVoiceSyncAnalysis();
             }
+
+            OnPropertyChanged(nameof(EditorFrameDurationText));
+            OnPropertyChanged(nameof(EditorSequenceSummary));
         }
     }
 
@@ -160,9 +187,38 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         set => SetProperty(ref _isPreloadingPreview, value);
     }
 
+    public bool PauseEditorPreviewWhenVoiceEnds
+    {
+        get => _pauseEditorPreviewWhenVoiceEnds;
+        set => SetProperty(ref _pauseEditorPreviewWhenVoiceEnds, value);
+    }
+
     public string PlayPauseGlyph => IsPreviewing ? "\uE769" : "\uE768";
 
     public string PlayPauseToolTip => IsPreviewing ? "暂停播放" : "播放当前序列";
+
+    public SequenceEditorPlaybackMode EditorPlaybackMode
+    {
+        get => _editorPlaybackMode;
+        set
+        {
+            if (SetProperty(ref _editorPlaybackMode, value))
+            {
+                OnPropertyChanged(nameof(IsEditorPlaybackLoop));
+            }
+        }
+    }
+
+    public bool IsEditorPlaybackLoop
+    {
+        get => EditorPlaybackMode == SequenceEditorPlaybackMode.Loop;
+        set
+        {
+            EditorPlaybackMode = value
+                ? SequenceEditorPlaybackMode.Loop
+                : SequenceEditorPlaybackMode.Once;
+        }
+    }
 
     public SequenceFrameSection? SelectedSection
     {
@@ -182,6 +238,70 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         : $"{SelectedSection.Action.DisplayName} / {SelectedSection.Action.Code}";
 
     public bool HasSelectedSection => SelectedSection is not null;
+
+    public SequenceFrameSection? PreviewSection => _previewSection;
+
+    public SequenceFrameItem? SelectedEditorFrame
+    {
+        get => _selectedEditorFrame;
+        set
+        {
+            if (!SetProperty(ref _selectedEditorFrame, value))
+            {
+                EditorFrameDurationInput = value?.DurationFrames ?? double.NaN;
+                return;
+            }
+
+            EditorFrameDurationInput = value?.DurationFrames ?? double.NaN;
+            OnPropertyChanged(nameof(HasSelectedEditorFrame));
+            OnPropertyChanged(nameof(EditorFrameDurationText));
+            OnPropertyChanged(nameof(EditorSelectedFrameText));
+            OnPropertyChanged(nameof(SelectedEditorVoicePath));
+            OnPropertyChanged(nameof(SelectedEditorVoiceOption));
+            if (value is not null)
+            {
+                SelectFrame(value);
+            }
+        }
+    }
+
+    public bool HasSelectedEditorFrame => SelectedEditorFrame is not null;
+
+    public string SelectedEditorVoicePath => SelectedEditorFrame?.VoiceFilePath ?? string.Empty;
+
+    public SequenceFrameVoiceOption? SelectedEditorVoiceOption => AvailableVoices.FirstOrDefault(option =>
+        string.Equals(option.FilePath, SelectedEditorVoicePath, StringComparison.OrdinalIgnoreCase));
+
+    public double EditorFrameDurationInput
+    {
+        get => _editorFrameDurationInput;
+        set => SetProperty(ref _editorFrameDurationInput, value);
+    }
+
+    public string EditorFrameDurationText => SelectedEditorFrame is null
+        ? "未选择帧"
+        : $"{SelectedEditorFrame.DurationFrames} 格 / {SelectedEditorFrame.DurationFrames / (double)Math.Max(1, PreviewFps):0.###} 秒";
+
+    public string EditorSelectedFrameText => SelectedEditorFrame is null
+        ? "未选择帧"
+        : $"第 {SelectedEditorFrame.Index} 帧 · {SelectedEditorFrame.PlainFileName}";
+
+    public string EditorSequenceSummary
+    {
+        get
+        {
+            var totalFrames = SelectedSectionFrames.Sum(frame => frame.DurationFrames);
+            return $"{SelectedSectionFrames.Count} 个素材帧 · {totalFrames} 格 · {totalFrames / (double)Math.Max(1, PreviewFps):0.###} 秒";
+        }
+    }
+
+    public string EditorPlaybackPositionText => CurrentPreviewFrame is null
+        ? "0 / 0"
+        : $"{CurrentPreviewFrame.Index} / {PreviewFrames.Count}";
+
+    public SequenceFrameItem? CurrentPreviewFrame => PreviewFrames.Count == 0 || _previewIndex < 0 || _previewIndex >= PreviewFrames.Count
+        ? null
+        : PreviewFrames[_previewIndex];
 
     public async Task LoadAsync(CharacterCard? character, CancellationToken cancellationToken = default)
     {
@@ -254,20 +374,58 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     public async Task DeleteFrameAsync(CharacterCard character, SequenceFrameSection section, SequenceFrameItem frame, CancellationToken cancellationToken = default)
     {
-        await Task.Run(() => _sequenceFrameService.DeleteFrame(character, section.Action, frame), cancellationToken);
-        await ReloadAfterFrameMutationAsync(character, section.Action.Code, cancellationToken);
+        var frames = await Task.Run(() => _sequenceFrameService.DeleteFrame(character, section.Action, frame), cancellationToken);
+        ApplyFrameMutation(section, frames, frame.Index);
+    }
+
+    public async Task DeleteFramesAsync(
+        CharacterCard character,
+        SequenceFrameSection section,
+        IReadOnlyList<SequenceFrameItem> selectedFrames,
+        CancellationToken cancellationToken = default)
+    {
+        var selectedIndex = selectedFrames.Count == 0 ? 1 : selectedFrames.Min(frame => frame.Index);
+        var frames = await Task.Run(
+            () => _sequenceFrameService.DeleteFrames(character, section.Action, selectedFrames),
+            cancellationToken);
+        ApplyFrameMutation(section, frames, selectedIndex);
     }
 
     public async Task DuplicateFrameAsync(CharacterCard character, SequenceFrameSection section, SequenceFrameItem frame, CancellationToken cancellationToken = default)
     {
-        await Task.Run(() => _sequenceFrameService.DuplicateFrame(character, section.Action, frame), cancellationToken);
-        await ReloadAfterFrameMutationAsync(character, section.Action.Code, cancellationToken);
+        var frames = await Task.Run(() => _sequenceFrameService.DuplicateFrame(character, section.Action, frame), cancellationToken);
+        ApplyFrameMutation(section, frames, frame.Index + 1);
     }
 
-    public async Task InsertBlankFrameAsync(CharacterCard character, SequenceFrameSection section, SequenceFrameItem? afterFrame, CancellationToken cancellationToken = default)
+    public async Task DuplicateFramesAsync(
+        CharacterCard character,
+        SequenceFrameSection section,
+        IReadOnlyList<SequenceFrameItem> selectedFrames,
+        SequenceFrameItem afterFrame,
+        CancellationToken cancellationToken = default)
     {
-        await Task.Run(() => _sequenceFrameService.InsertBlankFrame(character, section.Action, afterFrame), cancellationToken);
-        await ReloadAfterFrameMutationAsync(character, section.Action.Code, cancellationToken);
+        var frames = await Task.Run(
+            () => _sequenceFrameService.DuplicateFrames(character, section.Action, selectedFrames, afterFrame),
+            cancellationToken);
+        ApplyFrameMutation(section, frames, afterFrame.Index + 1);
+    }
+
+    public async Task InsertBlankFrameAsync(
+        CharacterCard character,
+        SequenceFrameSection section,
+        SequenceFrameItem? anchorFrame,
+        SequenceFrameInsertPosition position,
+        CancellationToken cancellationToken = default)
+    {
+        var frames = await Task.Run(
+            () => _sequenceFrameService.InsertBlankFrame(character, section.Action, anchorFrame, position),
+            cancellationToken);
+        var selectedIndex = anchorFrame is null
+            ? frames.Count
+            : position == SequenceFrameInsertPosition.Before
+                ? anchorFrame.Index
+                : anchorFrame.Index + 1;
+        ApplyFrameMutation(section, frames, selectedIndex);
     }
 
     public Task<IReadOnlyList<string>> CreateSectionSnapshotAsync(CharacterCard character, SequenceFrameSection section, CancellationToken cancellationToken = default)
@@ -278,13 +436,77 @@ internal sealed class SequenceFramesViewModel : ObservableObject
     public async Task RestoreSectionSnapshotAsync(CharacterCard character, SequenceFrameSection section, IReadOnlyList<string> snapshotFilePaths, CancellationToken cancellationToken = default)
     {
         await Task.Run(() => _sequenceFrameService.RestoreActionFrames(character, section.Action, snapshotFilePaths), cancellationToken);
-        await ReloadAfterFrameMutationAsync(character, section.Action.Code, cancellationToken);
+        await ReloadAfterFrameMutationAsync(
+            character,
+            section.Action.Code,
+            SelectedEditorFrame?.Index ?? 1,
+            cancellationToken);
     }
 
     public async Task ReorderFramesAsync(CharacterCard character, SequenceFrameSection section, IReadOnlyList<SequenceFrameItem> orderedFrames, CancellationToken cancellationToken = default)
     {
-        await Task.Run(() => _sequenceFrameService.ReorderFrames(character, section.Action, orderedFrames), cancellationToken);
-        await ReloadAfterFrameMutationAsync(character, section.Action.Code, cancellationToken);
+        var selectedIndex = SelectedEditorFrame is null
+            ? 1
+            : Math.Max(
+                1,
+                orderedFrames
+                    .Select((item, index) => new { item, index })
+                    .FirstOrDefault(entry => Equals(entry.item, SelectedEditorFrame))
+                    ?.index + 1 ?? 1);
+        var frames = await Task.Run(() => _sequenceFrameService.ReorderFrames(character, section.Action, orderedFrames), cancellationToken);
+        ApplyFrameMutation(section, frames, selectedIndex);
+    }
+
+    public async Task ReplaceFrameAsync(
+        CharacterCard character,
+        SequenceFrameSection section,
+        SequenceFrameItem frame,
+        string sourceFilePath,
+        CancellationToken cancellationToken = default)
+    {
+        var frames = await Task.Run(
+            () => _sequenceFrameService.ReplaceFrame(character, section.Action, frame, sourceFilePath),
+            cancellationToken);
+        ApplyFrameMutation(section, frames, frame.Index);
+    }
+
+    public async Task ReplaceFrameWithSourcesAsync(
+        CharacterCard character,
+        SequenceFrameSection section,
+        SequenceFrameItem frame,
+        IReadOnlyList<string> sourceFilePaths,
+        CancellationToken cancellationToken = default)
+    {
+        var frames = await Task.Run(
+            () => _sequenceFrameService.ReplaceFrameWithSources(character, section.Action, frame, sourceFilePaths),
+            cancellationToken);
+        ApplyFrameMutation(section, frames, frame.Index);
+    }
+
+    public async Task SetFrameDurationAsync(
+        CharacterCard character,
+        SequenceFrameSection section,
+        SequenceFrameItem frame,
+        int durationFrames,
+        CancellationToken cancellationToken = default)
+    {
+        var frames = await Task.Run(
+            () => _sequenceFrameService.SetFrameDuration(character, section.Action, frame, durationFrames),
+            cancellationToken);
+        ApplyFrameMutation(section, frames, frame.Index);
+    }
+
+    public async Task SetFrameVoiceAsync(
+        CharacterCard character,
+        SequenceFrameSection section,
+        SequenceFrameItem frame,
+        string? voiceFilePath,
+        CancellationToken cancellationToken = default)
+    {
+        var frames = await Task.Run(
+            () => _sequenceFrameService.SetFrameVoice(character, section.Action, frame, voiceFilePath),
+            cancellationToken);
+        ApplyFrameMutation(section, frames, frame.Index);
     }
 
     public string GetActionFolderPath(CharacterCard character, SequenceFrameSection section)
@@ -294,6 +516,8 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     public void SelectSection(SequenceFrameSection section)
     {
+        ApplyPreviewFps(GetSectionFps(section.Action.Code));
+        section = ApplyVoiceSyncAnalysis(section);
         PreviewFrames.Clear();
         foreach (var frame in section.Frames.OrderBy(frame => frame.Index).ThenBy(frame => frame.FileName))
         {
@@ -304,46 +528,96 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         _previewSection = section;
         PreviewTitle = $"{section.Action.DisplayName} / {section.Action.Code}";
         IsPreviewing = false;
-        ApplyPreviewFps(GetSectionFps(section.Action.Code));
         UpdateCurrentFrame(PreviewFrames.FirstOrDefault());
+    }
+
+    public bool TrySelectSection(string actionCode)
+    {
+        var section = EnumerateAllSections().FirstOrDefault(item =>
+            string.Equals(item.Action.Code, actionCode, StringComparison.OrdinalIgnoreCase));
+        if (section is null)
+        {
+            return false;
+        }
+
+        SelectSection(section);
+        return true;
     }
 
     public void SelectSectionForManagement(SequenceFrameSection section)
     {
+        section = ApplyVoiceSyncAnalysis(section);
         SelectedSection = section;
         SelectedSectionFrames.Clear();
         foreach (var frame in section.Frames.OrderBy(frame => frame.Index).ThenBy(frame => frame.FileName))
         {
             SelectedSectionFrames.Add(frame);
         }
+
+        SelectedEditorFrame = SelectedSectionFrames.FirstOrDefault();
+        RefreshAvailableVoices();
+        OnPropertyChanged(nameof(EditorSequenceSummary));
+    }
+
+    public void SelectEditorFrame(SequenceFrameItem frame)
+    {
+        SelectedEditorFrame = SelectedSectionFrames.FirstOrDefault(item => item.Index == frame.Index) ?? frame;
     }
 
     public async Task RefreshCollectionAsync(IProgress<ProgressUpdate>? progress = null, CancellationToken cancellationToken = default)
     {
         var sections = EnumerateAllSections().ToList();
+        var materialCount = CountFrameMaterials(sections);
+        var useSavedDuplicateResults = _data.DuplicateCheckMaterialCount == materialCount;
+        var cachedHashes = new Dictionary<string, SequenceFrameDuplicateHashEntry>(
+            _data.DuplicateContentHashes,
+            StringComparer.OrdinalIgnoreCase);
         var items = await Task.Run(
-            () => BuildCollectionItems(sections, progress, cancellationToken),
+            () => BuildCollectionItems(
+                sections,
+                detectDuplicates: false,
+                useSavedDuplicateResults,
+                cachedHashes,
+                progress,
+                cancellationToken),
             cancellationToken);
-        CollectionItems.Clear();
-        foreach (var item in items)
+        ReplaceCollectionItems(items);
+        if (!useSavedDuplicateResults)
         {
-            CollectionItems.Add(item);
+            CollectionSummaryText = $"共 {CollectionItems.Count} 张图片，尚未检测重复。";
+            return;
         }
 
+        UpdateCollectionDuplicateSummary();
+        SaveDuplicateCheckResultIfChanged();
+    }
+
+    public async Task DetectCollectionDuplicatesAsync(
+        IProgress<ProgressUpdate>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var sections = EnumerateAllSections().ToList();
+        var items = await Task.Run(
+            () => BuildCollectionItems(
+                sections,
+                detectDuplicates: true,
+                useSavedDuplicateResults: false,
+                cachedHashes: null,
+                progress,
+                cancellationToken),
+            cancellationToken);
+        ReplaceCollectionItems(items);
+
         var duplicateCount = CollectionItems.Count(item => item.HasDuplicate);
-        CollectionSummaryText = duplicateCount > 0
-            ? $"共 {CollectionItems.Count} 张图片，{duplicateCount} 张存在内容重复。"
-            : $"共 {CollectionItems.Count} 张图片，未发现内容完全重复图片。";
+        UpdateCollectionDuplicateSummary();
+        SaveDuplicateCheckResult();
         if (duplicateCount > 0)
         {
             SetNotice(InfoBarSeverity.Warning, "发现重复图片", $"帧合集发现 {duplicateCount} 张内容重复图片。请在重复标识卡片右键处理重复。");
         }
-        else if (_currentCharacter is not null)
+        else
         {
-            _data.DuplicateCheckSignature = _currentSequenceSignature;
-            _sequenceFrameService.SaveData(_currentCharacter, _data);
             UpdateNotice();
-            SequenceFramesSaved?.Invoke(this, EventArgs.Empty);
         }
     }
 
@@ -354,6 +628,9 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     private IReadOnlyList<SequenceFrameCollectionItem> BuildCollectionItems(
         IReadOnlyList<SequenceFrameSection> sections,
+        bool detectDuplicates,
+        bool useSavedDuplicateResults,
+        IReadOnlyDictionary<string, SequenceFrameDuplicateHashEntry>? cachedHashes,
         IProgress<ProgressUpdate>? progress,
         CancellationToken cancellationToken)
     {
@@ -382,7 +659,7 @@ internal sealed class SequenceFramesViewModel : ObservableObject
             var first = group.First();
             var percent = groupedFrames.Count == 0 ? 100 : 5 + (index + 1) * 85d / groupedFrames.Count;
             progress?.Report(new ProgressUpdate(
-                "正在检测帧内容重复...",
+                detectDuplicates ? "正在检测帧内容重复..." : "正在整理帧合集...",
                 percent,
                 first.Frame.FileName));
             frameRecords.Add((
@@ -391,10 +668,17 @@ internal sealed class SequenceFramesViewModel : ObservableObject
                     .Select(item => $"{item.SectionTitle} #{item.Frame.Index}")
                     .Distinct(StringComparer.OrdinalIgnoreCase)
                     .ToList(),
-                ComputeImageContentHash(first.Frame.FilePath)));
+                detectDuplicates
+                    ? ComputeImageContentHash(first.Frame.FilePath)
+                    : useSavedDuplicateResults
+                        ? GetSavedOrUpdatedContentHash(first.Frame.FilePath, cachedHashes)
+                        : string.Empty));
         }
 
-        progress?.Report(new ProgressUpdate("正在整理重复检测结果...", 94, $"{frameRecords.Count} 张图片"));
+        progress?.Report(new ProgressUpdate(
+            detectDuplicates ? "正在整理重复检测结果..." : "帧合集整理完成。",
+            94,
+            $"{frameRecords.Count} 张图片"));
         var duplicateMap = frameRecords
             .Where(item => !string.IsNullOrWhiteSpace(item.Hash))
             .GroupBy(item => item.Hash, StringComparer.Ordinal)
@@ -410,7 +694,7 @@ internal sealed class SequenceFramesViewModel : ObservableObject
             .ToDictionary(item => item.FilePath, item => item.Text, StringComparer.OrdinalIgnoreCase);
 
         var result = new List<SequenceFrameCollectionItem>();
-        foreach (var record in frameRecords.OrderBy(item => item.Frame.FileName, StringComparer.OrdinalIgnoreCase))
+        foreach (var record in frameRecords)
         {
             var hasDuplicate = duplicateMap.TryGetValue(record.Frame.FilePath, out var duplicateText);
             result.Add(new SequenceFrameCollectionItem(
@@ -421,12 +705,132 @@ internal sealed class SequenceFramesViewModel : ObservableObject
                 Path.GetFileName(record.Frame.FilePath),
                 record.Hash,
                 $"{record.Frame.ActualWidth}x{record.Frame.ActualHeight}",
-                $"使用位置：{string.Join("、", record.Usages)}",
+                string.Join(" / ", record.Usages),
+                record.Usages.Count,
                 hasDuplicate,
                 duplicateText ?? string.Empty));
         }
 
         return result;
+    }
+
+    private void ReplaceCollectionItems(IReadOnlyList<SequenceFrameCollectionItem> items)
+    {
+        CollectionItems.Clear();
+        foreach (var item in items)
+        {
+            CollectionItems.Add(item);
+        }
+    }
+
+    private static int CountFrameMaterials(IReadOnlyList<SequenceFrameSection> sections)
+    {
+        return sections
+            .SelectMany(section => section.Frames)
+            .Where(frame => !frame.IsBlank && File.Exists(frame.FilePath))
+            .Select(frame => Path.GetFullPath(frame.FilePath))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Count();
+    }
+
+    private string GetSavedOrUpdatedContentHash(
+        string filePath,
+        IReadOnlyDictionary<string, SequenceFrameDuplicateHashEntry>? cachedHashes)
+    {
+        var file = new FileInfo(filePath);
+        var cacheKey = GetDuplicateCacheKey(file.FullName);
+        if (cachedHashes is not null &&
+            cachedHashes.TryGetValue(cacheKey, out var cached) &&
+            cached.FileLength == file.Length &&
+            cached.LastWriteTimeUtcTicks == file.LastWriteTimeUtc.Ticks &&
+            !string.IsNullOrWhiteSpace(cached.ContentHash))
+        {
+            return cached.ContentHash;
+        }
+
+        return ComputeImageContentHash(file.FullName);
+    }
+
+    private string GetDuplicateCacheKey(string filePath)
+    {
+        var fullPath = Path.GetFullPath(filePath);
+        return _currentCharacter is null
+            ? fullPath.Replace('\\', '/')
+            : Path.GetRelativePath(_currentCharacter.FolderPath, fullPath).Replace('\\', '/');
+    }
+
+    private void UpdateCollectionDuplicateSummary()
+    {
+        var duplicateCount = CollectionItems.Count(item => item.HasDuplicate);
+        CollectionSummaryText = duplicateCount > 0
+            ? $"共 {CollectionItems.Count} 张图片，{duplicateCount} 张存在内容重复。"
+            : $"共 {CollectionItems.Count} 张图片，未发现内容完全重复图片。";
+    }
+
+    private void SaveDuplicateCheckResultIfChanged()
+    {
+        var hashes = BuildDuplicateHashCache();
+        var duplicateCount = CollectionItems.Count(item => item.HasDuplicate);
+        if (_data.DuplicateCheckMaterialCount == CollectionItems.Count &&
+            _data.DuplicateCheckDuplicateCount == duplicateCount &&
+            DuplicateHashCachesMatch(_data.DuplicateContentHashes, hashes))
+        {
+            return;
+        }
+
+        SaveDuplicateCheckResult(hashes, duplicateCount);
+    }
+
+    private void SaveDuplicateCheckResult()
+    {
+        SaveDuplicateCheckResult(
+            BuildDuplicateHashCache(),
+            CollectionItems.Count(item => item.HasDuplicate));
+    }
+
+    private void SaveDuplicateCheckResult(
+        Dictionary<string, SequenceFrameDuplicateHashEntry> hashes,
+        int duplicateCount)
+    {
+        if (_currentCharacter is null)
+        {
+            return;
+        }
+
+        _data.DuplicateCheckSignature = _currentSequenceSignature;
+        _data.DuplicateCheckMaterialCount = CollectionItems.Count;
+        _data.DuplicateCheckDuplicateCount = duplicateCount;
+        _data.DuplicateContentHashes = hashes;
+        _sequenceFrameService.SaveData(_currentCharacter, _data);
+        SequenceFramesSaved?.Invoke(this, EventArgs.Empty);
+    }
+
+    private Dictionary<string, SequenceFrameDuplicateHashEntry> BuildDuplicateHashCache()
+    {
+        var hashes = new Dictionary<string, SequenceFrameDuplicateHashEntry>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in CollectionItems.Where(item => !string.IsNullOrWhiteSpace(item.ContentHash)))
+        {
+            var file = new FileInfo(item.FilePath);
+            hashes[GetDuplicateCacheKey(file.FullName)] = new SequenceFrameDuplicateHashEntry
+            {
+                ContentHash = item.ContentHash,
+                FileLength = file.Length,
+                LastWriteTimeUtcTicks = file.LastWriteTimeUtc.Ticks
+            };
+        }
+
+        return hashes;
+    }
+
+    private static bool DuplicateHashCachesMatch(
+        IReadOnlyDictionary<string, SequenceFrameDuplicateHashEntry> left,
+        IReadOnlyDictionary<string, SequenceFrameDuplicateHashEntry> right)
+    {
+        return left.Count == right.Count && left.All(pair =>
+            right.TryGetValue(pair.Key, out var candidate) &&
+            string.Equals(pair.Value.ContentHash, candidate.ContentHash, StringComparison.Ordinal) &&
+            pair.Value.FileLength == candidate.FileLength &&
+            pair.Value.LastWriteTimeUtcTicks == candidate.LastWriteTimeUtcTicks);
     }
 
     public IReadOnlyList<SequenceFrameCollectionItem> GetDuplicateCollectionItems(SequenceFrameCollectionItem item)
@@ -460,8 +864,57 @@ internal sealed class SequenceFramesViewModel : ObservableObject
                 cancellationToken),
             cancellationToken);
         await LoadAsync(character, cancellationToken);
-        await RefreshCollectionAsync(cancellationToken: cancellationToken);
+        await DetectCollectionDuplicatesAsync(cancellationToken: cancellationToken);
         return updatedCount;
+    }
+
+    public async Task<int> ResolveAllDuplicateFramesAsync(
+        CharacterCard character,
+        IProgress<ProgressUpdate>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        var indexedItems = CollectionItems
+            .Select((item, index) => new { Item = item, Index = index })
+            .ToList();
+        var duplicateGroups = indexedItems
+            .Where(entry => entry.Item.HasDuplicate && !string.IsNullOrWhiteSpace(entry.Item.ContentHash))
+            .GroupBy(entry => entry.Item.ContentHash, StringComparer.Ordinal)
+            .Where(group => group.Count() > 1)
+            .OrderBy(group => group.Min(entry => entry.Index))
+            .ToList();
+        if (duplicateGroups.Count == 0)
+        {
+            return 0;
+        }
+
+        var skills = await Task.Run(() => _skillsService.Load(character), cancellationToken);
+        var updatedReferenceCount = 0;
+        for (var groupIndex = 0; groupIndex < duplicateGroups.Count; groupIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var group = duplicateGroups[groupIndex].ToList();
+            var kept = group
+                .OrderByDescending(entry => entry.Item.UsageCount)
+                .ThenBy(entry => entry.Index)
+                .First();
+            progress?.Report(new ProgressUpdate(
+                "正在处理重复帧资源...",
+                5 + groupIndex * 85d / duplicateGroups.Count,
+                $"第 {groupIndex + 1}/{duplicateGroups.Count} 组 · 保留 {kept.Item.UsageText}"));
+            updatedReferenceCount += await Task.Run(
+                () => _sequenceFrameService.ReplaceDuplicateFrameReferences(
+                    character,
+                    skills,
+                    kept.Item.FilePath,
+                    group.Select(entry => entry.Item.FilePath).ToList(),
+                    cancellationToken: cancellationToken),
+                cancellationToken);
+        }
+
+        progress?.Report(new ProgressUpdate("正在刷新帧合集...", 94, "保存新的重复检测结果"));
+        await LoadAsync(character, cancellationToken);
+        await DetectCollectionDuplicatesAsync(cancellationToken: cancellationToken);
+        return updatedReferenceCount;
     }
 
     public void SelectFrame(SequenceFrameItem frame)
@@ -499,6 +952,23 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         IsPreviewing = true;
     }
 
+    public void StartEditorPreview()
+    {
+        if (PreviewFrames.Count == 0)
+        {
+            return;
+        }
+
+        if (EditorPlaybackMode == SequenceEditorPlaybackMode.Once &&
+            _previewIndex == PreviewFrames.Count - 1)
+        {
+            _previewIndex = 0;
+            UpdateCurrentFrame(PreviewFrames[0]);
+        }
+
+        StartPreview();
+    }
+
     public void StopPreview()
     {
         IsPreviewing = false;
@@ -513,6 +983,24 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
         _previewIndex = (_previewIndex + 1) % PreviewFrames.Count;
         UpdateCurrentFrame(PreviewFrames[_previewIndex]);
+    }
+
+    public bool AdvanceEditorPreviewFrame()
+    {
+        if (!IsPreviewing || PreviewFrames.Count == 0)
+        {
+            return false;
+        }
+
+        if (EditorPlaybackMode == SequenceEditorPlaybackMode.Once &&
+            _previewIndex == PreviewFrames.Count - 1)
+        {
+            StopPreview();
+            return false;
+        }
+
+        AdvancePreviewFrame();
+        return true;
     }
 
     private void ApplyPreviewFps(int value)
@@ -572,23 +1060,128 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         CurrentFrameText = "暂无预览帧";
         IsPreviewing = false;
         _previewIndex = 0;
+        OnPropertyChanged(nameof(EditorPlaybackPositionText));
     }
 
     private void ClearSelectedSection()
     {
+        SelectedEditorFrame = null;
         SelectedSectionFrames.Clear();
+        AvailableVoices.Clear();
         SelectedSection = null;
+        OnPropertyChanged(nameof(EditorSequenceSummary));
     }
 
-    private async Task ReloadAfterFrameMutationAsync(CharacterCard character, string actionCode, CancellationToken cancellationToken)
+    private void ApplyFrameMutation(
+        SequenceFrameSection previousSection,
+        IReadOnlyList<SequenceFrameItem> frames,
+        int selectedIndex)
+    {
+        var orderedFrames = frames.OrderBy(frame => frame.Index).ToList();
+        var invalidCount = orderedFrames.Count(frame => !frame.IsValid);
+        var statusText = orderedFrames.Count == 0
+            ? "未设置"
+            : invalidCount > 0
+                ? $"{orderedFrames.Count} 张，{invalidCount} 张尺寸不合规"
+                : $"{orderedFrames.Count} 张，尺寸合规";
+        var updatedSection = new SequenceFrameSection(
+            previousSection.Action,
+            orderedFrames,
+            statusText,
+            orderedFrames.Count == 0 || invalidCount > 0);
+        updatedSection = ApplyVoiceSyncAnalysis(updatedSection);
+        orderedFrames = updatedSection.Frames.ToList();
+
+        ReplaceSection(BaseSectionGroups, updatedSection);
+        ReplaceSection(SkillSectionGroups, updatedSection);
+        var comboIndex = ComboSections
+            .Select((section, index) => new { section, index })
+            .FirstOrDefault(item => item.section.Action.Code == updatedSection.Action.Code)
+            ?.index ?? -1;
+        if (comboIndex >= 0)
+        {
+            ComboSections[comboIndex] = updatedSection;
+        }
+
+        _previewSection = updatedSection;
+        SelectedSection = updatedSection;
+        SynchronizeFrameCollection(PreviewFrames, orderedFrames);
+        SynchronizeFrameCollection(SelectedSectionFrames, orderedFrames);
+        _previewIndex = orderedFrames.Count == 0
+            ? 0
+            : Math.Clamp(selectedIndex - 1, 0, orderedFrames.Count - 1);
+        PreviewTitle = $"{updatedSection.Action.DisplayName} / {updatedSection.Action.Code}";
+        IsPreviewing = false;
+        UpdateCurrentFrame(CurrentPreviewFrame);
+        SelectedEditorFrame = CurrentPreviewFrame;
+        RefreshAvailableVoices();
+        _currentSequenceSignature = BuildSequenceSignature(EnumerateAllSections().ToList());
+        OnPropertyChanged(nameof(EditorSequenceSummary));
+        UpdateNotice();
+        SequenceFramesSaved?.Invoke(this, EventArgs.Empty);
+    }
+
+    private static void ReplaceSection(
+        ObservableCollection<SequenceFrameSectionGroup> groups,
+        SequenceFrameSection updatedSection)
+    {
+        for (var groupIndex = 0; groupIndex < groups.Count; groupIndex++)
+        {
+            var sectionIndex = groups[groupIndex].Sections
+                .Select((section, index) => new { section, index })
+                .FirstOrDefault(item => item.section.Action.Code == updatedSection.Action.Code)
+                ?.index ?? -1;
+            if (sectionIndex < 0)
+            {
+                continue;
+            }
+
+            var sections = groups[groupIndex].Sections.ToList();
+            sections[sectionIndex] = updatedSection;
+            groups[groupIndex] = groups[groupIndex] with { Sections = sections };
+            return;
+        }
+    }
+
+    private static void SynchronizeFrameCollection(
+        ObservableCollection<SequenceFrameItem> target,
+        IReadOnlyList<SequenceFrameItem> source)
+    {
+        var sharedCount = Math.Min(target.Count, source.Count);
+        for (var index = 0; index < sharedCount; index++)
+        {
+            if (!Equals(target[index], source[index]))
+            {
+                target[index] = source[index];
+            }
+        }
+
+        while (target.Count > source.Count)
+        {
+            target.RemoveAt(target.Count - 1);
+        }
+
+        for (var index = target.Count; index < source.Count; index++)
+        {
+            target.Add(source[index]);
+        }
+    }
+
+    private async Task ReloadAfterFrameMutationAsync(
+        CharacterCard character,
+        string actionCode,
+        int selectedIndex = 1,
+        CancellationToken cancellationToken = default)
     {
         await LoadAsync(character, cancellationToken);
         var section = EnumerateAllSections()
             .FirstOrDefault(item => item.Action.Code == actionCode);
         if (section is not null)
         {
-            SelectSectionForManagement(section);
             SelectSection(section);
+            SelectSectionForManagement(section);
+            SelectedEditorFrame = SelectedSectionFrames.FirstOrDefault(frame => frame.Index == selectedIndex)
+                ?? SelectedSectionFrames.LastOrDefault();
         }
         else
         {
@@ -596,8 +1189,128 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         }
     }
 
+    private void RefreshAvailableVoices()
+    {
+        AvailableVoices.Clear();
+        AvailableVoices.Add(new SequenceFrameVoiceOption("无语音", string.Empty));
+        if (_currentCharacter is null || SelectedSection is null)
+        {
+            OnPropertyChanged(nameof(SelectedEditorVoicePath));
+            OnPropertyChanged(nameof(SelectedEditorVoiceOption));
+            return;
+        }
+
+        var sections = _voiceMaterialService.LoadSections(_currentCharacter);
+        var hasMappedKind = TryGetVoiceKindForAction(SelectedSection.Action.Code, out var mappedKind);
+        foreach (var section in sections.Where(section => !hasMappedKind || section.Spec.Kind == mappedKind))
+        {
+            foreach (var item in section.Items.Where(item => item.CanPlay))
+            {
+                AvailableVoices.Add(new SequenceFrameVoiceOption(
+                    $"{section.Spec.DisplayName} / {item.FileName}",
+                    item.FilePath));
+            }
+        }
+
+        var catalog = sections
+            .SelectMany(section => section.Items.Select(item => new { section.Spec, Item = item }))
+            .Where(entry => entry.Item.CanPlay)
+            .ToDictionary(entry => entry.Item.FilePath, StringComparer.OrdinalIgnoreCase);
+        foreach (var voicePath in SelectedSection.Frames
+                     .Select(frame => frame.VoiceFilePath)
+                     .Where(path => !string.IsNullOrWhiteSpace(path))
+                     .Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            if (AvailableVoices.Any(option => string.Equals(
+                    option.FilePath,
+                    voicePath,
+                    StringComparison.OrdinalIgnoreCase)) ||
+                !catalog.TryGetValue(voicePath, out var currentVoice))
+            {
+                continue;
+            }
+
+            AvailableVoices.Add(new SequenceFrameVoiceOption(
+                $"{currentVoice.Spec.DisplayName} / {currentVoice.Item.FileName}",
+                currentVoice.Item.FilePath));
+        }
+
+        OnPropertyChanged(nameof(SelectedEditorVoicePath));
+        OnPropertyChanged(nameof(SelectedEditorVoiceOption));
+    }
+
+    private SequenceFrameSection ApplyVoiceSyncAnalysis(SequenceFrameSection section)
+    {
+        var results = _voiceSyncAnalyzer.Analyze(section.Frames, PreviewFps)
+            .ToDictionary(result => result.FrameIndex);
+        var frames = section.Frames
+            .OrderBy(frame => frame.Index)
+            .ThenBy(frame => frame.FileName, StringComparer.OrdinalIgnoreCase)
+            .Select(frame => frame with
+            {
+                VoiceSyncResult = results.GetValueOrDefault(frame.Index)
+            })
+            .ToList();
+        return section with { Frames = frames };
+    }
+
+    private void RefreshVoiceSyncAnalysis()
+    {
+        if (SelectedSection is null)
+        {
+            return;
+        }
+
+        var selectedIndex = SelectedEditorFrame?.Index ?? 1;
+        var updatedSection = ApplyVoiceSyncAnalysis(SelectedSection);
+        SelectedSection = updatedSection;
+        SynchronizeFrameCollection(SelectedSectionFrames, updatedSection.Frames);
+        if (_previewSection?.Action.Code == updatedSection.Action.Code)
+        {
+            _previewSection = updatedSection;
+            SynchronizeFrameCollection(PreviewFrames, updatedSection.Frames);
+            _previewIndex = PreviewFrames.Count == 0
+                ? 0
+                : Math.Clamp(_previewIndex, 0, PreviewFrames.Count - 1);
+            UpdateCurrentFrame(CurrentPreviewFrame);
+        }
+
+        SelectedEditorFrame = SelectedSectionFrames.FirstOrDefault(frame => frame.Index == selectedIndex)
+            ?? SelectedSectionFrames.LastOrDefault();
+        OnPropertyChanged(nameof(EditorSequenceSummary));
+    }
+
+    private static bool TryGetVoiceKindForAction(string actionCode, out VoiceMaterialKind kind)
+    {
+        foreach (var mapping in VoiceKindMappings)
+        {
+            if (IsActionCodeInFamily(actionCode, mapping.ActionCode))
+            {
+                kind = mapping.Kind;
+                return true;
+            }
+        }
+
+        kind = default;
+        return false;
+    }
+
+    private static bool IsActionCodeInFamily(string actionCode, string baseCode)
+    {
+        if (string.Equals(actionCode, baseCode, StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        return actionCode.StartsWith(baseCode, StringComparison.OrdinalIgnoreCase) &&
+               actionCode.Length > baseCode.Length &&
+               actionCode[baseCode.Length..].All(char.IsDigit);
+    }
+
     private void UpdateCurrentFrame(SequenceFrameItem? frame)
     {
+        OnPropertyChanged(nameof(CurrentPreviewFrame));
+        OnPropertyChanged(nameof(EditorPlaybackPositionText));
         CurrentFrameUri = frame?.FileUri ?? string.Empty;
         CurrentFrameFilePath = frame?.FilePath ?? string.Empty;
         CurrentFrameCacheKey = frame?.CacheKey ?? string.Empty;
@@ -608,9 +1321,20 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         }
 
         var total = Math.Max(PreviewFrames.Count, frame.Index);
-        var width = Math.Max(3, total.ToString().Length);
+        var width = MaterialSequenceNaming.GetWidth(total);
         var frameIndexText = $"{frame.Index.ToString().PadLeft(width, '0')}/{total.ToString().PadLeft(width, '0')}";
         CurrentFrameText = $"{frameIndexText}  {frame.PlainFileName}  |  {frame.ActualWidth}x{frame.ActualHeight}";
+        if (SelectedSection?.Action.Code == _previewSection?.Action.Code &&
+            !Equals(_selectedEditorFrame, frame))
+        {
+            SetProperty(ref _selectedEditorFrame, frame, nameof(SelectedEditorFrame));
+            EditorFrameDurationInput = frame.DurationFrames;
+            OnPropertyChanged(nameof(HasSelectedEditorFrame));
+            OnPropertyChanged(nameof(EditorFrameDurationText));
+            OnPropertyChanged(nameof(EditorSelectedFrameText));
+            OnPropertyChanged(nameof(SelectedEditorVoicePath));
+            OnPropertyChanged(nameof(SelectedEditorVoiceOption));
+        }
     }
 
     private static IEnumerable<SequenceFrameSectionGroup> BuildSectionGroups(
@@ -687,10 +1411,16 @@ internal sealed class SequenceFramesViewModel : ObservableObject
             return;
         }
 
-        if (allSections.Any(section => section.Frames.Count > 0) &&
-            !string.Equals(_data.DuplicateCheckSignature, _currentSequenceSignature, StringComparison.Ordinal))
+        var materialCount = CountFrameMaterials(allSections);
+        if (materialCount > 0 && _data.DuplicateCheckMaterialCount != materialCount)
         {
-            SetNotice(InfoBarSeverity.Informational, "请确认重复帧", "当前序列内容尚未打开帧合集确认重复内容。点击右侧“打开帧合集”，无重复后此提示会自动消失；序列变更后会重新提示。");
+            SetNotice(InfoBarSeverity.Informational, "请确认重复帧", "帧素材数量已经变化。打开帧合集并点击“检测重复”，完成后此提示会自动消失。");
+            return;
+        }
+
+        if (_data.DuplicateCheckDuplicateCount > 0)
+        {
+            SetNotice(InfoBarSeverity.Warning, "发现重复图片", $"当前检测结果仍有 {_data.DuplicateCheckDuplicateCount} 张重复资源，请打开帧合集处理。");
             return;
         }
 

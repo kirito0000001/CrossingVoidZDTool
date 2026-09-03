@@ -1,5 +1,8 @@
 using System;
+using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Text.Json.Serialization;
 
 namespace CrossingVoidZDTool;
@@ -33,10 +36,12 @@ internal sealed class BuffEntry : CrossingVoidZDTool.ViewModels.ObservableObject
     private string _iconPath = string.Empty;
     private string _iconUri = string.Empty;
     private string _gainType = "增益";
-    private string _stacks = string.Empty;
-    private string _completeStacks = string.Empty;
-    private string _strength = string.Empty;
-    private string _completeStrength = string.Empty;
+    private int _stacks;
+    private int _completeStacks = 3;
+    private int _strength = 1;
+    private int _completeStrength = 10;
+    private int _completedCount;
+    private bool _endsWhenStacksReachZero;
     private string _ownerText = string.Empty;
     private string _taskPriority = "正常";
     private string _triggerTiming = string.Empty;
@@ -44,6 +49,19 @@ internal sealed class BuffEntry : CrossingVoidZDTool.ViewModels.ObservableObject
     private string _readStatus = string.Empty;
     private string _sourceAssetPath = string.Empty;
     private string _draft = string.Empty;
+    private string _initializationNotes = string.Empty;
+    private string _conditionUpdateNotes = string.Empty;
+    private string _completionNotes = string.Empty;
+    private string _removalNotes = string.Empty;
+    private ObservableCollection<BuffEffectModule> _effects = [];
+    private readonly HashSet<BuffEffectModule> _subscribedEffects = [];
+
+    public BuffEntry()
+    {
+        AttachEffects(_effects);
+    }
+
+    public string SyncId { get; set; } = Guid.NewGuid().ToString("N");
 
     public int Index
     {
@@ -120,28 +138,89 @@ internal sealed class BuffEntry : CrossingVoidZDTool.ViewModels.ObservableObject
         set => SetBuffProperty(ref _gainType, value, notifyDisplayProperties: true);
     }
 
-    public string Stacks
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
+    public int Stacks
     {
         get => _stacks;
         set => SetBuffProperty(ref _stacks, value, notifyDisplayProperties: true);
     }
 
-    public string CompleteStacks
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
+    public int CompleteStacks
     {
         get => _completeStacks;
         set => SetBuffProperty(ref _completeStacks, value, notifyDisplayProperties: true);
     }
 
-    public string Strength
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
+    public int Strength
     {
         get => _strength;
         set => SetBuffProperty(ref _strength, value, notifyDisplayProperties: true);
     }
 
-    public string CompleteStrength
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
+    public int CompleteStrength
     {
         get => _completeStrength;
         set => SetBuffProperty(ref _completeStrength, value, notifyDisplayProperties: true);
+    }
+
+    [JsonNumberHandling(JsonNumberHandling.AllowReadingFromString)]
+    public int CompletedCount
+    {
+        get => _completedCount;
+        set => SetBuffProperty(ref _completedCount, value, notifyDisplayProperties: true);
+    }
+
+    public bool EndsWhenStacksReachZero
+    {
+        get => _endsWhenStacksReachZero;
+        set => SetBuffProperty(ref _endsWhenStacksReachZero, value);
+    }
+
+    public ObservableCollection<BuffEffectModule> Effects
+    {
+        get => _effects;
+        set
+        {
+            var next = value ?? [];
+            if (ReferenceEquals(_effects, next))
+            {
+                return;
+            }
+
+            DetachEffects(_effects);
+            _effects = next;
+            AttachEffects(_effects);
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(EffectSummaryText));
+            RaiseEdited();
+        }
+    }
+
+    public string InitializationNotes
+    {
+        get => _initializationNotes;
+        set => SetBuffProperty(ref _initializationNotes, value);
+    }
+
+    public string ConditionUpdateNotes
+    {
+        get => _conditionUpdateNotes;
+        set => SetBuffProperty(ref _conditionUpdateNotes, value);
+    }
+
+    public string CompletionNotes
+    {
+        get => _completionNotes;
+        set => SetBuffProperty(ref _completionNotes, value);
+    }
+
+    public string RemovalNotes
+    {
+        get => _removalNotes;
+        set => SetBuffProperty(ref _removalNotes, value);
     }
 
     public string OwnerText
@@ -197,10 +276,13 @@ internal sealed class BuffEntry : CrossingVoidZDTool.ViewModels.ObservableObject
         : $"归属：{OwnerText.Trim()}";
 
     [JsonIgnore]
-    public string ValueSummaryText => $"层数 {TextOrUnset(Stacks)}~{TextOrUnset(CompleteStacks)} / 强度 {TextOrUnset(Strength)}~{TextOrUnset(CompleteStrength)}";
+    public string ValueSummaryText => $"层数 {Stacks}~{CompleteStacks} / 强度 {Strength}~{CompleteStrength}";
 
     [JsonIgnore]
-    public string TypeSummaryText => $"{TextOrUnset(GainType)} · {TextOrUnset(DamageType)} · {TextOrUnset(TaskPriority)}";
+    public string EffectSummaryText => Effects.Count == 0 ? "未配置效果模块" : $"效果模块 {Effects.Count} 个";
+
+    [JsonIgnore]
+    public string TypeSummaryText => $"{TextOrUnset(GainType)} · {DamageTypeOrMarker()} · {TextOrUnset(TaskPriority)}";
 
     [JsonIgnore]
     public string ShortDescription => string.IsNullOrWhiteSpace(Description)
@@ -225,9 +307,9 @@ internal sealed class BuffEntry : CrossingVoidZDTool.ViewModels.ObservableObject
         set => SetBuffProperty(ref _draft, value);
     }
 
-    private void SetBuffProperty(
-        ref string field,
-        string value,
+    private void SetBuffProperty<T>(
+        ref T field,
+        T value,
         [System.Runtime.CompilerServices.CallerMemberName] string? propertyName = null,
         bool notifyDisplayProperties = false)
     {
@@ -247,6 +329,72 @@ internal sealed class BuffEntry : CrossingVoidZDTool.ViewModels.ObservableObject
     }
 
     private static string TextOrUnset(string value) => string.IsNullOrWhiteSpace(value) ? "未填" : value.Trim();
+
+    private string DamageTypeOrMarker() => string.IsNullOrWhiteSpace(DamageType) ? "仅标记" : DamageType.Trim();
+
+    private void AttachEffects(ObservableCollection<BuffEffectModule> effects)
+    {
+        effects.CollectionChanged += Effects_CollectionChanged;
+        foreach (var effect in effects)
+        {
+            AttachEffect(effect);
+        }
+    }
+
+    private void DetachEffects(ObservableCollection<BuffEffectModule> effects)
+    {
+        effects.CollectionChanged -= Effects_CollectionChanged;
+        foreach (var effect in _subscribedEffects)
+        {
+            effect.PropertyChanged -= Effect_PropertyChanged;
+        }
+
+        _subscribedEffects.Clear();
+    }
+
+    private void Effects_CollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.Action == NotifyCollectionChangedAction.Reset)
+        {
+            foreach (var effect in _subscribedEffects)
+            {
+                effect.PropertyChanged -= Effect_PropertyChanged;
+            }
+
+            _subscribedEffects.Clear();
+        }
+        else if (e.OldItems is not null)
+        {
+            foreach (BuffEffectModule effect in e.OldItems)
+            {
+                if (_subscribedEffects.Remove(effect))
+                {
+                    effect.PropertyChanged -= Effect_PropertyChanged;
+                }
+            }
+        }
+
+        foreach (var effect in _effects)
+        {
+            AttachEffect(effect);
+        }
+
+        OnPropertyChanged(nameof(EffectSummaryText));
+        RaiseEdited();
+    }
+
+    private void Effect_PropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        RaiseEdited();
+    }
+
+    private void AttachEffect(BuffEffectModule effect)
+    {
+        if (_subscribedEffects.Add(effect))
+        {
+            effect.PropertyChanged += Effect_PropertyChanged;
+        }
+    }
 
     public static IDisposable SuppressEditNotifications()
     {
@@ -278,5 +426,58 @@ internal sealed class BuffEntry : CrossingVoidZDTool.ViewModels.ObservableObject
             _isDisposed = true;
             onDispose();
         }
+    }
+}
+
+internal sealed class BuffEffectModule : CrossingVoidZDTool.ViewModels.ObservableObject
+{
+    private string _effectType = "属性修改";
+    private string _target = "自身";
+    private string _attribute = string.Empty;
+    private string _operation = "加算";
+    private double _value;
+    private double _perStackValue;
+    private string _implementationNotes = string.Empty;
+
+    public string EffectType
+    {
+        get => _effectType;
+        set => SetProperty(ref _effectType, value);
+    }
+
+    public string Target
+    {
+        get => _target;
+        set => SetProperty(ref _target, value);
+    }
+
+    public string Attribute
+    {
+        get => _attribute;
+        set => SetProperty(ref _attribute, value);
+    }
+
+    public string Operation
+    {
+        get => _operation;
+        set => SetProperty(ref _operation, value);
+    }
+
+    public double Value
+    {
+        get => _value;
+        set => SetProperty(ref _value, value);
+    }
+
+    public double PerStackValue
+    {
+        get => _perStackValue;
+        set => SetProperty(ref _perStackValue, value);
+    }
+
+    public string ImplementationNotes
+    {
+        get => _implementationNotes;
+        set => SetProperty(ref _implementationNotes, value);
     }
 }

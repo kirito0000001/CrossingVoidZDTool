@@ -130,6 +130,7 @@ internal sealed class SequencePreviewBitmapCache
             converted.UnlockBits(bitmapData);
         }
 
+        writeableBitmap.Invalidate();
         return writeableBitmap;
     }
 

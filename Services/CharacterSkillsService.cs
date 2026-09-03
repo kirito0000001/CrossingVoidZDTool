@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
@@ -16,7 +17,14 @@ internal sealed class CharacterSkillsService
         using var multiplierNotifications = SkillMultiplierLevel.SuppressEditNotifications();
 
         var toolboxData = _toolboxDataService.Load(character);
-        return NormalizeCore(toolboxData.Skills, _formService.GetFormLimit(character));
+        var requiresSyncIdentityMigration = toolboxData.Skills is null || toolboxData.Skills.SchemaVersion < 2;
+        var skills = NormalizeCore(toolboxData.Skills, _formService.GetFormLimit(character));
+        if (RepairMissingIconPaths(character, skills) || requiresSyncIdentityMigration)
+        {
+            _toolboxDataService.Update(character, current => current.Skills = skills);
+        }
+
+        return skills;
     }
 
     public void Save(CharacterCard character, CharacterSkillsData data)
@@ -74,6 +82,7 @@ internal sealed class CharacterSkillsService
             data.UltimateSkill ??= [];
             data.SupportSkill ??= [];
             data.ComboSkills ??= [];
+            data.SchemaVersion = 2;
             var normalizedFormLimit = Math.Max(1, formLimit);
             SyncCollectionCount(data.FirstSkill, normalizedFormLimit);
             SyncCollectionCount(data.SecondSkill, normalizedFormLimit);
@@ -145,6 +154,9 @@ internal sealed class CharacterSkillsService
 
     private static void NormalizeEntry(CharacterSkillEntry entry)
     {
+        entry.SyncId = string.IsNullOrWhiteSpace(entry.SyncId)
+            ? Guid.NewGuid().ToString("N")
+            : entry.SyncId.Trim();
         RefreshIconUri(entry);
         entry.SkillState = NormalizeSkillState(entry.SkillState);
         entry.GuardState = NormalizeGuardState(entry.GuardState);
@@ -193,6 +205,7 @@ internal sealed class CharacterSkillsService
 
     private static void MergeEntry(CharacterSkillEntry existing, CharacterSkillEntry next)
     {
+        next.SyncId = string.IsNullOrWhiteSpace(next.SyncId) ? existing.SyncId : next.SyncId;
         next.PositionName = KeepExistingWhenBlank(existing.PositionName, next.PositionName);
         next.Description = KeepExistingWhenBlank(existing.Description, next.Description);
         next.PtCost = KeepExistingWhenBlank(existing.PtCost, next.PtCost);
@@ -275,6 +288,79 @@ internal sealed class CharacterSkillsService
         entry.IconUri = File.Exists(entry.IconPath)
             ? new Uri(entry.IconPath).AbsoluteUri
             : string.Empty;
+    }
+
+    private static bool RepairMissingIconPaths(CharacterCard character, CharacterSkillsData skills)
+    {
+        var repaired = false;
+        foreach (var entry in EnumerateEntries(skills))
+        {
+            var resolvedPath = ResolveRenumberedIconPath(character, entry.IconPath);
+            if (string.IsNullOrWhiteSpace(resolvedPath) ||
+                string.Equals(entry.IconPath, resolvedPath, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            entry.IconPath = resolvedPath;
+            RefreshIconUri(entry);
+            repaired = true;
+        }
+
+        return repaired;
+    }
+
+    private static IEnumerable<CharacterSkillEntry> EnumerateEntries(CharacterSkillsData skills)
+    {
+        return skills.FirstSkill
+            .Concat(skills.SecondSkill)
+            .Concat(skills.UltimateSkill)
+            .Concat(skills.SupportSkill)
+            .Concat(skills.ComboSkills);
+    }
+
+    private static string? ResolveRenumberedIconPath(CharacterCard character, string iconPath)
+    {
+        if (string.IsNullOrWhiteSpace(iconPath) || File.Exists(iconPath))
+        {
+            return null;
+        }
+
+        var fileName = Path.GetFileName(iconPath);
+        if (!TryResolveSkillIconIndex(character.Code, fileName, out var expectedIndex))
+        {
+            return null;
+        }
+
+        var iconFolderPath = Path.Combine(character.FolderPath, "AssetMaterial", "SkillIcon");
+        if (!Directory.Exists(iconFolderPath))
+        {
+            return null;
+        }
+
+        var matches = Directory
+            .EnumerateFiles(iconFolderPath)
+            .Where(path => TryResolveSkillIconIndex(character.Code, Path.GetFileName(path), out var index) &&
+                           index == expectedIndex)
+            .Take(2)
+            .Select(Path.GetFullPath)
+            .ToArray();
+        return matches.Length == 1 ? matches[0] : null;
+    }
+
+    private static bool TryResolveSkillIconIndex(string characterCode, string fileName, out int index)
+    {
+        index = 0;
+        if (!string.Equals(Path.GetExtension(fileName), ".png", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var name = Path.GetFileNameWithoutExtension(fileName);
+        var prefix = $"{characterCode}-SkillIcon-";
+        return name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase) &&
+               int.TryParse(name[prefix.Length..], out index) &&
+               index > 0;
     }
 
     private static string NormalizeSkillState(string value)

@@ -276,6 +276,27 @@ namespace CrossingVoidZDTool
             }
         }
 
+        private void AddBuffEffectButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_applicationViewModel.Buffs.SelectedBuff is not BuffEntry buff)
+            {
+                return;
+            }
+
+            _applicationViewModel.Buffs.AddEffect(buff);
+        }
+
+        private void RemoveBuffEffectButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_applicationViewModel.Buffs.SelectedBuff is not BuffEntry buff ||
+                sender is not Button { CommandParameter: BuffEffectModule effect })
+            {
+                return;
+            }
+
+            _applicationViewModel.Buffs.RemoveEffect(buff, effect);
+        }
+
         private void OpenBuffFolderButton_Click(object sender, RoutedEventArgs e)
         {
             if (CharacterDesk.CurrentCharacter is null)

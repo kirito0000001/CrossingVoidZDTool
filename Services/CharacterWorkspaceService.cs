@@ -24,6 +24,9 @@ internal sealed class CharacterWorkspaceService
     private const string ToolboxDataFileName = "ZDToolboxData.json";
     private const string LegacyDraftFileName = "St1-设计理念.txt";
     private const string CharacterBackupsFolderName = "CharacterBackups";
+    private const string DraftFolderName = "Draft";
+    private const string CompletedFolderName = "Completed";
+    private const string ExportFolderName = "Export";
     private const int MaxManualCharacterBackupCount = 3;
     private const int MaxAutomaticCharacterBackupCount = 3;
 
@@ -46,16 +49,40 @@ internal sealed class CharacterWorkspaceService
 
     public IReadOnlyList<CharacterCard> LoadCharacters(string projectRootPath, CancellationToken cancellationToken = default)
     {
-        Directory.CreateDirectory(projectRootPath);
+        EnsureWorkspaceFolders(projectRootPath);
         var cards = new List<CharacterCard>();
-        foreach (var directoryPath in Directory.EnumerateDirectories(projectRootPath).OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        foreach (var stateFolder in new[]
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var card = TryLoadCharacterCard(directoryPath);
-            if (card is not null)
+            (Path: GetDraftFolderPath(projectRootPath), IsCompleted: false),
+            (Path: GetCompletedFolderPath(projectRootPath), IsCompleted: true)
+        })
+        {
+            foreach (var directoryPath in Directory.EnumerateDirectories(stateFolder.Path)
+                         .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                var card = TryLoadCharacterCard(directoryPath);
+                if (card is null)
+                {
+                    continue;
+                }
+
+                if (card.IsCompleted != stateFolder.IsCompleted)
+                {
+                    throw new InvalidDataException(
+                        $"角色 {card.Code} 的完成状态与所在目录不一致：{directoryPath}");
+                }
+
                 cards.Add(card);
             }
+        }
+
+        var duplicate = cards
+            .GroupBy(card => card.Code, StringComparer.OrdinalIgnoreCase)
+            .FirstOrDefault(group => group.Count() > 1);
+        if (duplicate is not null)
+        {
+            throw new IOException($"Draft 和 Completed 中同时存在角色 {duplicate.Key}，请先保留其中一份。");
         }
 
         return cards
@@ -71,9 +98,9 @@ internal sealed class CharacterWorkspaceService
             throw new ArgumentException("角色名字不能为空。", nameof(characterName));
         }
 
-        Directory.CreateDirectory(projectRootPath);
+        EnsureWorkspaceFolders(projectRootPath);
         var code = CreateUniqueCharacterCode(projectRootPath, characterName);
-        var characterFolderPath = Path.Combine(projectRootPath, code);
+        var characterFolderPath = Path.Combine(GetDraftFolderPath(projectRootPath), code);
         var createdNewFolder = !Directory.Exists(characterFolderPath);
         Directory.CreateDirectory(characterFolderPath);
         EnsureCharacterFolders(characterFolderPath);
@@ -98,9 +125,18 @@ internal sealed class CharacterWorkspaceService
             throw new ArgumentException("角色英文代号不能为空。", nameof(code));
         }
 
-        Directory.CreateDirectory(projectRootPath);
+        EnsureWorkspaceFolders(projectRootPath);
         var normalizedCode = NormalizeManualCharacterCode(code);
-        var characterFolderPath = Path.Combine(projectRootPath, normalizedCode);
+        var completedFolderPath = Path.Combine(GetCompletedFolderPath(projectRootPath), normalizedCode);
+        var draftFolderPath = Path.Combine(GetDraftFolderPath(projectRootPath), normalizedCode);
+        if (Directory.Exists(completedFolderPath) && Directory.Exists(draftFolderPath))
+        {
+            throw new IOException($"Draft 和 Completed 中同时存在角色 {normalizedCode}，请先保留其中一份：{completedFolderPath}；{draftFolderPath}");
+        }
+
+        var characterFolderPath = Directory.Exists(completedFolderPath)
+            ? completedFolderPath
+            : draftFolderPath;
         var createdNewFolder = !Directory.Exists(characterFolderPath);
         Directory.CreateDirectory(characterFolderPath);
         EnsureCharacterFolders(characterFolderPath);
@@ -409,13 +445,22 @@ internal sealed class CharacterWorkspaceService
         }
 
         var oldFolderPath = Path.GetFullPath(character.FolderPath);
-        var projectRootPath = Path.GetDirectoryName(oldFolderPath)
+        var currentParentPath = Path.GetDirectoryName(oldFolderPath)
             ?? throw new InvalidOperationException("角色目录无效。");
-        var newFolderPath = Path.Combine(projectRootPath, normalizedCode);
+        var projectRootPath = GetProjectRootPath(oldFolderPath);
+        var newFolderPath = Path.Combine(currentParentPath, normalizedCode);
         var sameFolderIgnoringCase = string.Equals(oldFolderPath, newFolderPath, StringComparison.OrdinalIgnoreCase);
-        if (!sameFolderIgnoringCase && Directory.Exists(newFolderPath))
+        var conflictingPath = new[]
+            {
+                Path.Combine(GetCompletedFolderPath(projectRootPath), normalizedCode),
+                Path.Combine(GetDraftFolderPath(projectRootPath), normalizedCode)
+            }
+            .FirstOrDefault(path =>
+                Directory.Exists(path) &&
+                !string.Equals(Path.GetFullPath(path), oldFolderPath, StringComparison.OrdinalIgnoreCase));
+        if (conflictingPath is not null)
         {
-            throw new InvalidOperationException($"已存在同名角色目录：{newFolderPath}");
+            throw new InvalidOperationException($"已存在同名角色目录：{conflictingPath}");
         }
 
         var metadata = ReadMetadata(oldFolderPath) ?? new CharacterMetadata
@@ -974,6 +1019,18 @@ internal sealed class CharacterWorkspaceService
     public CharacterCard SetCompleted(CharacterCard character, bool isCompleted)
     {
         EnsureCharacterStructure(character);
+        var projectRootPath = GetProjectRootPath(character.FolderPath);
+        var targetParentPath = isCompleted ? GetCompletedFolderPath(projectRootPath) : GetDraftFolderPath(projectRootPath);
+        var targetPath = Path.Combine(targetParentPath, character.Code);
+        if (!string.Equals(
+                Path.GetFullPath(character.FolderPath),
+                Path.GetFullPath(targetPath),
+                StringComparison.OrdinalIgnoreCase) &&
+            Directory.Exists(targetPath))
+        {
+            throw new IOException($"移动角色失败，目标目录已存在：{targetPath}");
+        }
+
         var metadataFilePath = Path.Combine(character.FolderPath, ToolFolderName, MetadataFileName);
         var metadata = File.Exists(metadataFilePath)
             ? JsonSerializer.Deserialize(
@@ -987,7 +1044,115 @@ internal sealed class CharacterWorkspaceService
         };
         metadata.IsCompleted = isCompleted;
         SaveMetadata(character.FolderPath, metadata);
-        return TryLoadCharacterCard(character.FolderPath) ?? character with { IsCompleted = isCompleted };
+        var updated = TryLoadCharacterCard(character.FolderPath) ?? character with { IsCompleted = isCompleted };
+        return MoveCharacterToStateFolder(projectRootPath, updated, isCompleted);
+    }
+
+    public string GetDefaultExportRootPath(string projectRootPath)
+    {
+        return Path.Combine(Path.GetFullPath(projectRootPath), ExportFolderName);
+    }
+
+    public string ExportCharacterFolder(
+        CharacterCard character,
+        string exportRootPath,
+        bool overwrite,
+        IProgress<CharacterBackupProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureCharacterStructure(character);
+        var sourcePath = Path.GetFullPath(character.FolderPath);
+        var normalizedExportRoot = Path.GetFullPath(exportRootPath);
+        if (IsPathInsideDirectory(normalizedExportRoot, sourcePath))
+        {
+            throw new InvalidOperationException("导出位置不能放在当前角色文件夹内部。");
+        }
+
+        Directory.CreateDirectory(normalizedExportRoot);
+        var targetPath = Path.Combine(normalizedExportRoot, character.Code);
+        if (string.Equals(sourcePath, Path.GetFullPath(targetPath), StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException("导出目标不能与当前角色文件夹相同。");
+        }
+
+        if (Directory.Exists(targetPath) && !overwrite)
+        {
+            throw new IOException($"导出目标已存在：{targetPath}");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        progress?.Report(new CharacterBackupProgress("正在扫描角色文件...", 0, 0, 0, 0, 0, null));
+        var files = Directory.EnumerateFiles(sourcePath, "*", SearchOption.AllDirectories).ToList();
+        var directories = Directory.EnumerateDirectories(sourcePath, "*", SearchOption.AllDirectories).ToList();
+        var totalBytes = files.Sum(filePath => new FileInfo(filePath).Length);
+        var tempPath = Path.Combine(normalizedExportRoot, $".{character.Code}.exporting-{Guid.NewGuid():N}");
+        var displacedTargetPath = Path.Combine(normalizedExportRoot, $".{character.Code}.replacing-{Guid.NewGuid():N}");
+
+        try
+        {
+            Directory.CreateDirectory(tempPath);
+            foreach (var directoryPath in directories)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Directory.CreateDirectory(Path.Combine(tempPath, Path.GetRelativePath(sourcePath, directoryPath)));
+            }
+
+            long completedBytes = 0;
+            for (var index = 0; index < files.Count; index++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var filePath = files[index];
+                var relativePath = Path.GetRelativePath(sourcePath, filePath);
+                var targetFilePath = Path.Combine(tempPath, relativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(targetFilePath)!);
+                File.Copy(filePath, targetFilePath, overwrite: false);
+                completedBytes += new FileInfo(filePath).Length;
+                var percent = files.Count == 0
+                    ? 90
+                    : Math.Min(90, Math.Max(1, (index + 1) * 90d / files.Count));
+                progress?.Report(new CharacterBackupProgress(
+                    $"正在导出 {index + 1}/{files.Count}：{relativePath}",
+                    percent,
+                    index + 1,
+                    files.Count,
+                    completedBytes,
+                    totalBytes,
+                    relativePath));
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            progress?.Report(new CharacterBackupProgress("正在写入导出目录...", 95, files.Count, files.Count, totalBytes, totalBytes, null));
+            if (Directory.Exists(targetPath))
+            {
+                Directory.Move(targetPath, displacedTargetPath);
+            }
+
+            try
+            {
+                Directory.Move(tempPath, targetPath);
+            }
+            catch
+            {
+                if (Directory.Exists(displacedTargetPath) && !Directory.Exists(targetPath))
+                {
+                    Directory.Move(displacedTargetPath, targetPath);
+                }
+
+                throw;
+            }
+
+            TryDeleteDirectory(displacedTargetPath);
+            progress?.Report(new CharacterBackupProgress("导出完成。", 100, files.Count, files.Count, totalBytes, totalBytes, null));
+            return targetPath;
+        }
+        finally
+        {
+            TryDeleteDirectory(tempPath);
+            if (Directory.Exists(displacedTargetPath) && !Directory.Exists(targetPath))
+            {
+                Directory.Move(displacedTargetPath, targetPath);
+            }
+        }
     }
 
     private static string GetCharacterBackupsPath(CharacterCard character)
@@ -1123,13 +1288,77 @@ internal sealed class CharacterWorkspaceService
         var baseCode = NormalizeCharacterCode(characterName);
         var code = baseCode;
         var index = 2;
-        while (Directory.Exists(Path.Combine(projectRootPath, code)))
+        while (Directory.Exists(Path.Combine(GetCompletedFolderPath(projectRootPath), code)) ||
+               Directory.Exists(Path.Combine(GetDraftFolderPath(projectRootPath), code)))
         {
             code = $"{baseCode}_{index:00}";
             index++;
         }
 
         return code;
+    }
+
+    private static void EnsureWorkspaceFolders(string projectRootPath)
+    {
+        Directory.CreateDirectory(projectRootPath);
+        Directory.CreateDirectory(GetDraftFolderPath(projectRootPath));
+        Directory.CreateDirectory(GetCompletedFolderPath(projectRootPath));
+        Directory.CreateDirectory(Path.Combine(projectRootPath, ExportFolderName));
+    }
+
+    private static string GetDraftFolderPath(string projectRootPath)
+    {
+        return Path.Combine(Path.GetFullPath(projectRootPath), DraftFolderName);
+    }
+
+    private static string GetCompletedFolderPath(string projectRootPath)
+    {
+        return Path.Combine(Path.GetFullPath(projectRootPath), CompletedFolderName);
+    }
+
+    private static string GetProjectRootPath(string characterFolderPath)
+    {
+        var parent = Directory.GetParent(Path.GetFullPath(characterFolderPath))
+            ?? throw new InvalidOperationException("角色目录无效。");
+        if (!string.Equals(parent.Name, DraftFolderName, StringComparison.OrdinalIgnoreCase) &&
+            !string.Equals(parent.Name, CompletedFolderName, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException($"角色目录必须位于 Draft 或 Completed：{characterFolderPath}");
+        }
+
+        return parent.Parent?.FullName
+            ?? throw new InvalidOperationException($"{parent.Name} 目录缺少项目根目录。");
+    }
+
+    private static CharacterCard MoveCharacterToStateFolder(
+        string projectRootPath,
+        CharacterCard character,
+        bool isCompleted)
+    {
+        var targetParentPath = isCompleted ? GetCompletedFolderPath(projectRootPath) : GetDraftFolderPath(projectRootPath);
+        Directory.CreateDirectory(targetParentPath);
+        var sourcePath = Path.GetFullPath(character.FolderPath);
+        var targetPath = Path.Combine(targetParentPath, character.Code);
+        if (string.Equals(sourcePath, Path.GetFullPath(targetPath), StringComparison.OrdinalIgnoreCase))
+        {
+            return character;
+        }
+
+        if (Directory.Exists(targetPath))
+        {
+            throw new IOException($"移动角色失败，目标目录已存在：{targetPath}");
+        }
+
+        var movedPath = MoveOrCopyCharacterFolder(sourcePath, targetPath);
+        return TryLoadCharacterCard(movedPath) ?? BuildCharacterCard(
+            movedPath,
+            new CharacterMetadata
+            {
+                Code = character.Code,
+                Name = character.Name,
+                IsCompleted = isCompleted,
+                LastEditedAt = character.LastEditedAt
+            });
     }
 
     private static string NormalizeCharacterCode(string characterName)

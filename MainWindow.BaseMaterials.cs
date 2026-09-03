@@ -33,43 +33,66 @@ namespace CrossingVoidZDTool
             }
 
             var root = Path.Combine(CharacterDesk.CurrentCharacter.FolderPath, "AssetMaterial");
+            var voiceRoot = Path.Combine(CharacterDesk.CurrentCharacter.FolderPath, "Sound");
             Directory.CreateDirectory(root);
+            Directory.CreateDirectory(voiceRoot);
             if (string.Equals(_watchedBaseMaterialRoot, root, StringComparison.OrdinalIgnoreCase) &&
-                _baseMaterialWatcher is not null)
+                string.Equals(_watchedVoiceMaterialRoot, voiceRoot, StringComparison.OrdinalIgnoreCase) &&
+                _baseMaterialWatcher is not null &&
+                _voiceMaterialWatcher is not null)
             {
                 return;
             }
 
             StopBaseMaterialWatcher();
             _watchedBaseMaterialRoot = root;
-            _baseMaterialWatcher = new FileSystemWatcher(root)
+            _watchedVoiceMaterialRoot = voiceRoot;
+            _baseMaterialWatcher = CreateMaterialWatcher(root);
+            _voiceMaterialWatcher = CreateMaterialWatcher(voiceRoot);
+        }
+
+        private FileSystemWatcher CreateMaterialWatcher(string root)
+        {
+            var watcher = new FileSystemWatcher(root)
             {
                 IncludeSubdirectories = true,
                 NotifyFilter = NotifyFilters.FileName | NotifyFilters.LastWrite | NotifyFilters.Size | NotifyFilters.DirectoryName
             };
-            _baseMaterialWatcher.Created += BaseMaterialFolder_Changed;
-            _baseMaterialWatcher.Changed += BaseMaterialFolder_Changed;
-            _baseMaterialWatcher.Deleted += BaseMaterialFolder_Changed;
-            _baseMaterialWatcher.Renamed += BaseMaterialFolder_Changed;
-            _baseMaterialWatcher.EnableRaisingEvents = true;
+            watcher.Created += BaseMaterialFolder_Changed;
+            watcher.Changed += BaseMaterialFolder_Changed;
+            watcher.Deleted += BaseMaterialFolder_Changed;
+            watcher.Renamed += BaseMaterialFolder_Changed;
+            watcher.EnableRaisingEvents = true;
+            return watcher;
         }
 
         private void StopBaseMaterialWatcher()
         {
             _baseMaterialRefreshTimer.Stop();
-            if (_baseMaterialWatcher is null)
+            if (_baseMaterialWatcher is not null)
             {
-                return;
+                DisposeMaterialWatcher(_baseMaterialWatcher);
+                _baseMaterialWatcher = null;
             }
 
-            _baseMaterialWatcher.EnableRaisingEvents = false;
-            _baseMaterialWatcher.Created -= BaseMaterialFolder_Changed;
-            _baseMaterialWatcher.Changed -= BaseMaterialFolder_Changed;
-            _baseMaterialWatcher.Deleted -= BaseMaterialFolder_Changed;
-            _baseMaterialWatcher.Renamed -= BaseMaterialFolder_Changed;
-            _baseMaterialWatcher.Dispose();
-            _baseMaterialWatcher = null;
+            if (_voiceMaterialWatcher is not null)
+            {
+                DisposeMaterialWatcher(_voiceMaterialWatcher);
+                _voiceMaterialWatcher = null;
+            }
+
             _watchedBaseMaterialRoot = null;
+            _watchedVoiceMaterialRoot = null;
+        }
+
+        private void DisposeMaterialWatcher(FileSystemWatcher watcher)
+        {
+            watcher.EnableRaisingEvents = false;
+            watcher.Created -= BaseMaterialFolder_Changed;
+            watcher.Changed -= BaseMaterialFolder_Changed;
+            watcher.Deleted -= BaseMaterialFolder_Changed;
+            watcher.Renamed -= BaseMaterialFolder_Changed;
+            watcher.Dispose();
         }
 
         private void BaseMaterialFolder_Changed(object sender, FileSystemEventArgs e)
@@ -103,28 +126,15 @@ namespace CrossingVoidZDTool
 
         private async Task RefreshBaseMaterialsWithFeedbackAsync()
         {
-            var scrollOffset = LineArtScrollViewer.VerticalOffset;
             try
             {
                 await RefreshBaseMaterialsAsync();
-                await RestoreBaseMaterialScrollOffsetAsync(scrollOffset);
             }
             catch (Exception ex)
             {
                 ShowFloatingTip(InfoBarSeverity.Error, "基础素材检查失败", ex.Message);
                 AppendLog(LogKind.Error, "基础素材检查失败。", ex);
             }
-        }
-
-        private async Task RestoreBaseMaterialScrollOffsetAsync(double scrollOffset)
-        {
-            await Task.Yield();
-            LineArtScrollViewer.UpdateLayout();
-            LineArtScrollViewer.ChangeView(
-                null,
-                Math.Min(scrollOffset, LineArtScrollViewer.ScrollableHeight),
-                null,
-                true);
         }
 
         private async Task RunBaseMaterialInternalWriteAsync(Func<Task> writeAction)
@@ -137,7 +147,6 @@ namespace CrossingVoidZDTool
             }
             finally
             {
-                await Task.Delay(550);
                 _baseMaterialRefreshTimer.Stop();
                 _baseMaterialInternalWriteDepth = Math.Max(0, _baseMaterialInternalWriteDepth - 1);
             }
@@ -152,6 +161,43 @@ namespace CrossingVoidZDTool
                 return;
             }
 
+            int? fixedSlotIndex = null;
+            if (kind == BaseMaterialKind.BattleAvatar)
+            {
+                fixedSlotIndex = _applicationViewModel.LineArt.Sections
+                    .FirstOrDefault(section => section.Spec.Kind == BaseMaterialKind.BattleAvatar)?
+                    .SlotGroups
+                    .SelectMany(group => group.Slots)
+                    .FirstOrDefault(slot => slot.IsMissing)?
+                    .Index;
+                if (fixedSlotIndex is null)
+                {
+                    ShowFloatingTip(InfoBarSeverity.Informational, "对局内头像已齐全", "四个固定槽位都已设置，请在对应槽位中替换图片。");
+                    return;
+                }
+            }
+
+            await ImportBaseMaterialAsync(kind, fixedSlotIndex);
+        }
+
+        private async void ImportBattleAvatarSlotButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button { Tag: BaseMaterialSlot slot })
+            {
+                return;
+            }
+
+            await ImportBaseMaterialAsync(BaseMaterialKind.BattleAvatar, slot.Index, slot.DisplayName);
+        }
+
+        private async Task ImportBaseMaterialAsync(BaseMaterialKind kind, int? fixedSlotIndex, string? slotDisplayName = null)
+        {
+            if (CharacterDesk.CurrentCharacter is null)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择角色", "请先在角色台选择当前制作角色。");
+                return;
+            }
+
             var sourcePath = await PickImageAsync();
             if (sourcePath is null)
             {
@@ -160,7 +206,6 @@ namespace CrossingVoidZDTool
 
             try
             {
-                var scrollOffset = LineArtScrollViewer.VerticalOffset;
                 var crop = await GetOptionalBaseMaterialCropAsync(kind, sourcePath);
                 if (crop is null && NeedsManualCrop(kind, sourcePath))
                 {
@@ -169,18 +214,20 @@ namespace CrossingVoidZDTool
 
                 if (crop is { } cropRectangle)
                 {
-                    await RunBaseMaterialInternalWriteAsync(() =>
-                        _applicationViewModel.LineArt.ImportWithCropAsync(CharacterDesk.CurrentCharacter, kind, sourcePath, cropRectangle));
+                    await RunBaseMaterialInternalWriteAsync(() => fixedSlotIndex is { } index
+                        ? _applicationViewModel.LineArt.ImportWithCropAtIndexAsync(CharacterDesk.CurrentCharacter, kind, sourcePath, cropRectangle, index)
+                        : _applicationViewModel.LineArt.ImportWithCropAsync(CharacterDesk.CurrentCharacter, kind, sourcePath, cropRectangle));
                 }
                 else
                 {
-                    await RunBaseMaterialInternalWriteAsync(() =>
-                        _applicationViewModel.LineArt.ImportAsync(CharacterDesk.CurrentCharacter, kind, sourcePath));
+                    await RunBaseMaterialInternalWriteAsync(() => fixedSlotIndex is { } index
+                        ? _applicationViewModel.LineArt.ImportAtIndexAsync(CharacterDesk.CurrentCharacter, kind, sourcePath, index)
+                        : _applicationViewModel.LineArt.ImportAsync(CharacterDesk.CurrentCharacter, kind, sourcePath));
                 }
-                await RestoreBaseMaterialScrollOffsetAsync(scrollOffset);
                 MarkLastEditedModule("LineArt");
-                ShowFloatingTip(InfoBarSeverity.Success, "基础素材已导入", BaseMaterialService.GetSpec(kind).DisplayName);
-                AppendLog(LogKind.User, $"导入基础素材：{BaseMaterialService.GetSpec(kind).DisplayName} <- {Path.GetFileName(sourcePath)}");
+                var displayName = slotDisplayName ?? BaseMaterialService.GetSpec(kind).DisplayName;
+                ShowFloatingTip(InfoBarSeverity.Success, "基础素材已导入", displayName);
+                AppendLog(LogKind.User, $"导入基础素材：{displayName} <- {Path.GetFileName(sourcePath)}");
             }
             catch (Exception ex)
             {
@@ -207,7 +254,6 @@ namespace CrossingVoidZDTool
 
             try
             {
-                var scrollOffset = LineArtScrollViewer.VerticalOffset;
                 var crop = await ShowBaseMaterialCropDialogAsync(item.Kind, sourcePath);
                 if (crop is not { } cropRectangle)
                 {
@@ -216,7 +262,6 @@ namespace CrossingVoidZDTool
 
                 await RunBaseMaterialInternalWriteAsync(() =>
                     _applicationViewModel.LineArt.RepairWithCropAsync(CharacterDesk.CurrentCharacter, item.Kind, sourcePath, item.Index, cropRectangle));
-                await RestoreBaseMaterialScrollOffsetAsync(scrollOffset);
                 MarkLastEditedModule("LineArt");
                 ShowFloatingTip(InfoBarSeverity.Success, "基础素材已修复", item.DisplayName);
                 AppendLog(LogKind.User, $"修复并重新裁剪基础素材：{item.DisplayName} #{item.Index} <- {Path.GetFileName(sourcePath)}");
@@ -244,7 +289,6 @@ namespace CrossingVoidZDTool
 
             try
             {
-                var scrollOffset = LineArtScrollViewer.VerticalOffset;
                 var crop = await GetOptionalBaseMaterialCropAsync(item.Kind, sourcePath);
                 if (crop is null && NeedsManualCrop(item.Kind, sourcePath))
                 {
@@ -261,7 +305,6 @@ namespace CrossingVoidZDTool
                     await RunBaseMaterialInternalWriteAsync(() =>
                         _applicationViewModel.LineArt.RepairAsync(CharacterDesk.CurrentCharacter, item.Kind, sourcePath, item.Index));
                 }
-                await RestoreBaseMaterialScrollOffsetAsync(scrollOffset);
                 MarkLastEditedModule("LineArt");
                 ShowFloatingTip(InfoBarSeverity.Success, "基础素材已重新导入", item.DisplayName);
                 AppendLog(LogKind.User, $"重新导入基础素材：{item.DisplayName} #{item.Index} <- {Path.GetFileName(sourcePath)}");
@@ -339,7 +382,12 @@ namespace CrossingVoidZDTool
             _baseMaterialCropSpec = spec;
 
             BaseMaterialCropTitleText.Text = $"裁剪{spec.DisplayName}";
-            BaseMaterialCropSubtitleText.Text = $"源图 {width}x{height}，目标 {spec.Width}x{spec.Height}。滚轮缩放，拖动平移，右键或 Esc 取消。";
+            BaseMaterialCropSubtitleText.Text = spec.Kind == BaseMaterialKind.SupportCutIn
+                ? $"源图 {width}x{height}，透明画布 {spec.Width}x{spec.Height}。可自由缩放和平移，紫色遮罩仅供预览。"
+                : $"源图 {width}x{height}，目标 {spec.Width}x{spec.Height}。滚轮缩放，拖动平移，右键或 Esc 取消。";
+            SupportCutInCropMask.Visibility = spec.Kind == BaseMaterialKind.SupportCutIn
+                ? Visibility.Visible
+                : Visibility.Collapsed;
             BaseMaterialCropImage.Source = await LoadBitmapFromFileAsync(sourcePath);
             ResetBaseMaterialCropControls();
             BaseMaterialCropHost.Visibility = Visibility.Visible;
@@ -444,6 +492,11 @@ namespace CrossingVoidZDTool
 
         private void ClampBaseMaterialCropPan()
         {
+            if (_baseMaterialCropSpec?.Kind == BaseMaterialKind.SupportCutIn)
+            {
+                return;
+            }
+
             var imageSize = GetBaseMaterialCropImagePreviewSize();
             var maxX = Math.Max(0, (imageSize.Width * _baseMaterialCropScale - BaseMaterialCropTargetFrame.Width) / 2);
             var maxY = Math.Max(0, (imageSize.Height * _baseMaterialCropScale - BaseMaterialCropTargetFrame.Height) / 2);
@@ -474,7 +527,8 @@ namespace CrossingVoidZDTool
                 return Rectangle.Empty;
             }
 
-            var scale = Math.Max(1, _baseMaterialCropScale);
+            var isFreeCanvas = _baseMaterialCropSpec.Kind == BaseMaterialKind.SupportCutIn;
+            var scale = Math.Max(isFreeCanvas ? 0.1 : 1, _baseMaterialCropScale);
             var imageSize = GetBaseMaterialCropImagePreviewSize();
             var scaledImageWidth = imageSize.Width * scale;
             var scaledImageHeight = imageSize.Height * scale;
@@ -487,6 +541,15 @@ namespace CrossingVoidZDTool
             var cropY = (targetTop - imageTop) / scaledImageHeight * _baseMaterialCropSourceHeight;
             var cropWidth = BaseMaterialCropTargetFrame.Width / scaledImageWidth * _baseMaterialCropSourceWidth;
             var cropHeight = BaseMaterialCropTargetFrame.Height / scaledImageHeight * _baseMaterialCropSourceHeight;
+            if (isFreeCanvas)
+            {
+                return new Rectangle(
+                    (int)Math.Round(cropX),
+                    (int)Math.Round(cropY),
+                    Math.Max(1, (int)Math.Round(cropWidth)),
+                    Math.Max(1, (int)Math.Round(cropHeight)));
+            }
+
             cropWidth = Math.Min(cropWidth, _baseMaterialCropSourceWidth);
             cropHeight = Math.Min(cropHeight, _baseMaterialCropSourceHeight);
 
@@ -506,6 +569,7 @@ namespace CrossingVoidZDTool
             _baseMaterialCropSourcePath = null;
             _baseMaterialCropSpec = null;
             BaseMaterialCropImage.Source = null;
+            SupportCutInCropMask.Visibility = Visibility.Collapsed;
             BaseMaterialCropHost.Visibility = Visibility.Collapsed;
             completion?.TrySetResult(crop);
         }
@@ -547,7 +611,8 @@ namespace CrossingVoidZDTool
         {
             var point = e.GetCurrentPoint(BaseMaterialCropPreviewFrame);
             var factor = point.Properties.MouseWheelDelta > 0 ? 1.08 : 1 / 1.08;
-            _baseMaterialCropScale = Math.Clamp(_baseMaterialCropScale * factor, 1, 6);
+            var minimumScale = _baseMaterialCropSpec?.Kind == BaseMaterialKind.SupportCutIn ? 0.1 : 1;
+            _baseMaterialCropScale = Math.Clamp(_baseMaterialCropScale * factor, minimumScale, 6);
             UpdateBaseMaterialCropPreview();
             e.Handled = true;
         }

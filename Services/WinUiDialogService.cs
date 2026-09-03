@@ -17,6 +17,7 @@ internal sealed class WinUiDialogService
 
     public async Task<DialogResultKind> ShowContentAsync(ContentDialogRequest request, CancellationToken cancellationToken = default)
     {
+        var xamlRoot = _getXamlRoot();
         var dialog = new ContentDialog
         {
             Title = request.Title,
@@ -26,7 +27,8 @@ internal sealed class WinUiDialogService
             CloseButtonText = request.CloseButtonText,
             DefaultButton = request.DefaultButton,
             PrimaryButtonStyle = request.PrimaryButtonStyle,
-            XamlRoot = _getXamlRoot()
+            XamlRoot = xamlRoot,
+            RequestedTheme = (xamlRoot.Content as FrameworkElement)?.ActualTheme ?? ElementTheme.Default
         };
 
         request.ConfigureDialog?.Invoke(dialog);

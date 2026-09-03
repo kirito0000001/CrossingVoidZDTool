@@ -86,6 +86,43 @@ namespace CrossingVoidZDTool
             KeyboardAccelerator sender,
             KeyboardAcceleratorInvokedEventArgs args)
         {
+            if (SequenceFrameDuplicateResolverHost.Visibility == Visibility.Visible)
+            {
+                HideSequenceFrameDuplicateResolver();
+                args.Handled = true;
+                return;
+            }
+
+            if (SequenceFramesCollectionHost.Visibility == Visibility.Visible)
+            {
+                if (_isSequenceFrameCollectionMultiSelecting)
+                {
+                    CancelSequenceFrameCollectionMultiSelection();
+                }
+                else
+                {
+                    HideSequenceFrameCollection();
+                }
+
+                args.Handled = true;
+                return;
+            }
+
+            if (SequenceFramesManagerHost.Visibility == Visibility.Visible)
+            {
+                if (_isSelectingSequenceFrameCopyTarget)
+                {
+                    CancelSequenceFrameCopyTargetSelection();
+                }
+                else
+                {
+                    HideSequenceFrameManager();
+                }
+
+                args.Handled = true;
+                return;
+            }
+
             if (ActionFramesPage.Visibility != Visibility.Visible ||
                 !CharacterDesk.IsDraftOpen)
             {
@@ -336,8 +373,8 @@ namespace CrossingVoidZDTool
                 Text = displayText,
                 TextWrapping = TextWrapping.Wrap,
                 FontFamily = new FontFamily("Consolas"),
-                Foreground = GetLogForeground(kind),
-                IsTextSelectionEnabled = false
+                IsTextSelectionEnabled = false,
+                Style = GetLogTextStyle(kind)
             };
 
             var border = new Border
@@ -345,11 +382,10 @@ namespace CrossingVoidZDTool
                 Margin = new Thickness(0, 0, 0, 6),
                 Padding = new Thickness(8, 6, 8, 6),
                 CornerRadius = new CornerRadius(4),
-                Background = GetLogBackground(kind),
-                BorderBrush = GetLogBorderBrush(kind),
                 BorderThickness = new Thickness(1),
                 Child = block,
-                Tag = copyText
+                Tag = copyText,
+                Style = GetLogBlockStyle(kind)
             };
             border.Tapped += LogBlock_Tapped;
             return border;
@@ -483,45 +519,26 @@ namespace CrossingVoidZDTool
             return string.Join(Environment.NewLine, lines);
         }
 
-        private static Brush? GetLogBrush(LogKind kind)
+        private static Style GetLogTextStyle(LogKind kind)
         {
-            return kind switch
+            return Application.Current.Resources[kind switch
             {
-                LogKind.User => new SolidColorBrush(Colors.ForestGreen),
-                LogKind.Warning => new SolidColorBrush(Colors.DarkOrange),
-                LogKind.Error => new SolidColorBrush(Colors.Firebrick),
-                _ => null
-            };
+                LogKind.User => "LogUserTextStyle",
+                LogKind.Warning => "LogWarningTextStyle",
+                LogKind.Error => "LogErrorTextStyle",
+                _ => "LogDefaultTextStyle"
+            }] as Style ?? throw new InvalidOperationException("日志文字样式资源不可用。");
         }
 
-        private static Brush GetLogForeground(LogKind kind)
+        private static Style GetLogBlockStyle(LogKind kind)
         {
-            return new SolidColorBrush(kind switch
+            return Application.Current.Resources[kind switch
             {
-                LogKind.Warning => Colors.Gold,
-                LogKind.Error => Colors.OrangeRed,
-                _ => Color.FromArgb(255, 225, 225, 225)
-            });
-        }
-
-        private static Brush GetLogBackground(LogKind kind)
-        {
-            return new SolidColorBrush(kind switch
-            {
-                LogKind.Warning => Color.FromArgb(42, 160, 110, 0),
-                LogKind.Error => Color.FromArgb(52, 130, 24, 24),
-                _ => Color.FromArgb(26, 255, 255, 255)
-            });
-        }
-
-        private static Brush GetLogBorderBrush(LogKind kind)
-        {
-            return new SolidColorBrush(kind switch
-            {
-                LogKind.Warning => Color.FromArgb(120, 220, 170, 40),
-                LogKind.Error => Color.FromArgb(150, 230, 80, 70),
-                _ => Color.FromArgb(65, 255, 255, 255)
-            });
+                LogKind.User => "LogUserBlockStyle",
+                LogKind.Warning => "LogWarningBlockStyle",
+                LogKind.Error => "LogErrorBlockStyle",
+                _ => "LogDefaultBlockStyle"
+            }] as Style ?? throw new InvalidOperationException("日志容器样式资源不可用。");
         }
 
     }

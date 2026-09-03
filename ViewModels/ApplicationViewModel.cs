@@ -7,7 +7,11 @@ internal sealed class ApplicationViewModel : ObservableObject
 {
     private ToolboxModuleKey _selectedModule = ToolboxModuleKey.CharacterDesk;
 
-    public ApplicationViewModel(SettingsViewModel settings, GlobalProgressViewModel globalProgress, BaseMaterialService baseMaterialService)
+    public ApplicationViewModel(
+        SettingsViewModel settings,
+        GlobalProgressViewModel globalProgress,
+        BaseMaterialService baseMaterialService,
+        VoiceMaterialService voiceMaterialService)
     {
         Settings = settings;
         GlobalProgress = globalProgress;
@@ -15,7 +19,7 @@ internal sealed class ApplicationViewModel : ObservableObject
         ProductionStatus = new ProductionStatusViewModel();
         CharacterDesk = new CharacterDeskViewModel(new CharacterWorkspaceService());
         ActionFrames = new ActionFramesViewModel();
-        LineArt = new LineArtViewModel(baseMaterialService);
+        LineArt = new LineArtViewModel(baseMaterialService, voiceMaterialService);
         UnrealSync = new UnrealSyncViewModel(new CharacterInfoService());
         Skills = new SkillsViewModel(new CharacterSkillsService());
         SequenceFrames = new SequenceFramesViewModel(new SequenceFrameService(), new CharacterSkillsService());

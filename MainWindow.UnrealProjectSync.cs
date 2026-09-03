@@ -5,47 +5,18 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using CrossingVoidZDTool.Services;
-using Microsoft.UI;
-using Microsoft.UI.Dispatching;
-using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
-using Windows.Foundation;
 using Windows.Storage.Pickers;
-using Windows.UI;
 using WinRT.Interop;
 
 namespace CrossingVoidZDTool
 {
     public sealed partial class MainWindow
     {
-        private Grid? _unrealSequencePreviewOverlay;
-        private readonly SequencePreviewBitmapCache _unrealSequencePreviewCache = new();
-        private DispatcherQueueTimer? _unrealSequencePreviewTimer;
-        private Image? _unrealSequencePreviewImage;
-        private Image? _unrealSequencePreviewBackImage;
-        private TextBlock? _unrealSequencePreviewFrameText;
-        private FontIcon? _unrealSequencePreviewPlayPauseIcon;
-        private CompositeTransform? _unrealSequencePreviewTransform;
-        private Grid? _unrealSequencePreviewCanvas;
-        private Grid? _unrealSequencePreviewImageLayer;
-        private IReadOnlyList<SequenceFrameItem> _unrealSequencePreviewFrames = [];
-        private int _unrealSequencePreviewIndex;
-        private int _unrealSequencePreviewFps = 12;
-        private bool _isUnrealSequencePreviewPlaying;
-        private bool _isPanningUnrealSequencePreview;
-        private bool _isUnrealSequencePreviewFrontActive = true;
-        private double _unrealSequencePreviewScale = 1;
-        private Point _lastUnrealSequencePreviewPointerPosition;
-        private const double UnrealSequencePreviewWidth = 928;
-        private const double UnrealSequencePreviewHeight = 640;
-        private static readonly SolidColorBrush UnrealSequencePreviewDialogBrush = new(Color.FromArgb(255, 42, 42, 42));
-        private static readonly SolidColorBrush UnrealSequencePreviewCanvasBrush = new(Color.FromArgb(255, 54, 54, 54));
-        private static readonly SolidColorBrush UnrealSequencePreviewTextBrush = new(Colors.White);
-        private static readonly SolidColorBrush UnrealSequencePreviewSubtleTextBrush = new(Color.FromArgb(255, 210, 210, 210));
-
+        private int _workflowStepAfterPublishDetection;
         private async void ChooseUnrealProjectSyncEngineButton_Click(object sender, RoutedEventArgs e)
         {
             var picker = new FileOpenPicker
@@ -86,47 +57,29 @@ namespace CrossingVoidZDTool
             AppendLog(LogKind.User, $"选择虚幻项目：{selectedFile.Path}");
         }
 
-        private void CheckUnrealProjectSyncButton_Click(object sender, RoutedEventArgs e)
-        {
-            SaveUnrealProjectSyncSettings();
-            _applicationViewModel.UnrealProjectSync.Detect();
-            var status = _applicationViewModel.UnrealProjectSync.CanSync ? "通过" : "未完整";
-            AppendLog(LogKind.User, $"重新检测虚幻同步台关联：{status}");
-        }
-
-        private void WriteUnrealExportScriptButton_Click(object sender, RoutedEventArgs e)
-        {
-            try
-            {
-                SaveUnrealProjectSyncSettings();
-                var scriptPath = _applicationViewModel.UnrealProjectSync.GetExportScriptPath();
-                ShowFloatingTip(
-                    File.Exists(scriptPath) ? InfoBarSeverity.Success : InfoBarSeverity.Warning,
-                    File.Exists(scriptPath) ? "已找到内置导出脚本" : "内置导出脚本缺失",
-                    scriptPath);
-                AppendLog(LogKind.User, $"检查 Unreal 内置导出脚本：{scriptPath}");
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "导出脚本检查失败", ex.Message);
-                AppendLog(LogKind.Error, "导出脚本检查失败。", ex);
-            }
-        }
-
         private async void GetUnrealProjectCharactersButton_Click(object sender, RoutedEventArgs e)
         {
             var scrollOffset = CaptureUnrealProjectSyncScrollOffset();
             try
             {
+                if (!_applicationViewModel.UnrealProjectSync.IsEngineToToolbox)
+                {
+                    _applicationViewModel.UnrealProjectSync.RefreshDraftSources(CharacterDesk.CompletedCharacters);
+                    CompleteGlobalProgress("已完成角色来源刷新", $"当前已完成角色 {CharacterDesk.CompletedCharacters.Count} 个。");
+                    RestoreUnrealProjectSyncScrollOffset(scrollOffset);
+                    await HideGlobalProgressAfterDelayAsync();
+                    return;
+                }
+
                 SaveUnrealProjectSyncSettings();
                 ShowGlobalProgress("获取项目角色", _applicationViewModel.UnrealProjectSync.ProjectPath);
-                UpdateGlobalProgress("正在扫描项目角色文件夹...", 15, _applicationViewModel.UnrealProjectSync.ProjectPath);
+                UpdateGlobalProgress("正在读取项目角色文件...", 15, _applicationViewModel.UnrealProjectSync.ProjectPath);
                 await Task.Yield();
                 _applicationViewModel.UnrealProjectSync.Detect();
                 RestoreUnrealProjectSyncScrollOffset(scrollOffset);
                 CompleteGlobalProgress(
                     "项目角色已刷新",
-                    $"已扫描到候选角色 {_applicationViewModel.UnrealProjectSync.CharacterCandidates.Count} 个；未获取详情的角色会标记为不是最新数据。");
+                    $"已读取候选角色 {_applicationViewModel.UnrealProjectSync.CharacterCandidates.Count} 个；名称直接来自角色条目文件，未获取详情的角色仍标记为不是最新数据。");
                 AppendLog(
                     LogKind.User,
                     $"虚幻项目角色列表刷新完成：Candidates={_applicationViewModel.UnrealProjectSync.CharacterCandidates.Count}，Project={_applicationViewModel.UnrealProjectSync.ProjectPath}。");
@@ -148,77 +101,239 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private async void GetSelectedUnrealCharacterDetailsButton_Click(object sender, RoutedEventArgs e)
+        private async void ImportSelectedUnrealCharacterToDraftButton_Click(object sender, RoutedEventArgs e)
         {
-            var scrollOffset = CaptureUnrealProjectSyncScrollOffset();
-            var selectedCodes = _applicationViewModel.UnrealProjectSync.GetSelectedCharacterCodes();
-            if (selectedCodes.Length == 0)
+            var source = _applicationViewModel.UnrealProjectSync.SelectedSource;
+            var candidate = source?.UnrealCandidate;
+            if (candidate is null)
             {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未勾选角色", "请先勾选需要获取最新信息的角色卡。");
-                AppendLog(LogKind.Warning, "获取选中角色信息被跳过：没有勾选任何角色。");
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择角色", "请先在左侧选择一个 Unreal 角色。");
+                return;
+            }
+
+            var selectedStableIds = _applicationViewModel.UnrealProjectSync.GetSelectedStableIds();
+            if (selectedStableIds.Count == 0)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "尚未选择导入内容", "请先检测角色，再在中间勾选需要导入的模块。");
                 return;
             }
 
             try
             {
-                SaveUnrealProjectSyncSettings();
-                ShowGlobalProgress("获取选中角色信息", string.Join("、", selectedCodes));
-                UpdateGlobalProgress("正在准备 Unreal 导出...", 2, $"{selectedCodes.Length} 个角色");
-                await Task.Yield();
-                var progress = new Progress<ProgressUpdate>(update =>
-                    UpdateGlobalProgress(update.Message, update.Percent, update.Detail, update.IsIndeterminate));
-                var result = await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
-                    selectedCodes,
-                    progress,
+                ShowGlobalProgress("从虚幻导入", candidate.Code);
+                UpdateGlobalProgress("正在写入所选 Draft 模块...", 72, candidate.Code);
+                var result = await Task.Run(
+                    () => new UnrealBridgeDraftImportService().Import(Settings.ProjectRootPath, candidate, selectedStableIds),
                     GetGlobalProgressCancellationToken());
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
+                var unrealSnapshot = new UnrealBridgeSemanticSnapshotService().Build(candidate);
+                var toolboxSnapshot = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(result.Character);
+                var stateService = new UnrealBridgeStateService();
+                var baseline = new UnrealBridgeBaselineService().BuildSelected(
+                    result.Character.Code,
+                    _applicationViewModel.UnrealProjectSync.ProjectPath,
+                    toolboxSnapshot,
+                    unrealSnapshot,
+                    selectedStableIds,
+                    stateService.Load(result.Character, _applicationViewModel.UnrealProjectSync.ProjectPath));
+                stateService.Save(
+                    result.Character,
+                    _applicationViewModel.UnrealProjectSync.ProjectPath,
+                    baseline);
+                await CharacterDesk.LoadCharactersAsync(
+                    Settings.ProjectRootPath,
+                    result.Character.Code,
+                    result.Character.Code,
+                    GetGlobalProgressCancellationToken());
+                _applicationViewModel.UnrealProjectSync.CompleteImportOperation(
+                    result.Character.FolderPath,
+                    result.RemovedDuplicateCount);
                 CompleteGlobalProgress(
-                    result.ExitCode == 0 ? "选中角色信息已刷新" : "Unreal 导出返回异常",
-                    $"已请求 {selectedCodes.Length} 个角色，候选角色 {_applicationViewModel.UnrealProjectSync.CharacterCandidates.Count} 个，导出资产 {result.AssetCount} 个。");
+                    "导入完成",
+                    $"{result.Character.Code} 已写入 Draft；模块：{string.Join("、", result.ImportedModules)}；清理重复 {result.RemovedDuplicateCount} 个。");
+                ShowFloatingTip(InfoBarSeverity.Success, "已导入到 Draft", result.Character.FolderPath);
                 AppendLog(
-                    result.ExitCode == 0 ? LogKind.User : LogKind.Warning,
-                    $"选中角色信息获取完成：ExitCode={result.ExitCode}，Selected={string.Join(",", selectedCodes)}，Assets={result.AssetCount}，Manifest={result.ManifestPath}。");
+                    LogKind.User,
+                    $"从虚幻统一导入角色：{result.Character.Code}，Modules={string.Join(",", result.ImportedModules)}，Created={result.CreatedNew}。");
                 await HideGlobalProgressAfterDelayAsync();
             }
             catch (OperationCanceledException ex)
             {
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
-                CompleteGlobalProgress("获取选中角色信息已取消", "Unreal 导出进程已停止。");
-                AppendLog(LogKind.Warning, "选中角色信息获取已取消。", ex);
+                _applicationViewModel.UnrealProjectSync.FailImportOperation("导入已取消，当前选择未执行。");
+                CompleteGlobalProgress("导入已取消", candidate.Code);
+                AppendLog(LogKind.Warning, "从虚幻导入已取消。", ex);
                 await HideGlobalProgressAfterDelayAsync();
             }
             catch (Exception ex)
             {
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
-                CompleteGlobalProgress("获取选中角色信息失败", ex.Message);
-                AppendLog(LogKind.Error, "获取选中角色信息失败。", ex);
+                _applicationViewModel.UnrealProjectSync.FailImportOperation(ex.Message);
+                CompleteGlobalProgress("导入失败", ex.Message);
+                ShowFloatingTip(InfoBarSeverity.Error, "从虚幻导入失败", ex.Message);
+                AppendLog(LogKind.Error, "从虚幻统一导入失败。", ex);
                 await HideGlobalProgressAfterDelayAsync();
             }
         }
 
-        private void OpenUnrealExportFolderButton_Click(object sender, RoutedEventArgs e)
+        private async void PublishCurrentCharacterAssetsToUnrealButton_Click(object sender, RoutedEventArgs e)
         {
+            var character = _applicationViewModel.UnrealProjectSync.SelectedSource?.DraftCharacter;
+            if (character is null)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
+                return;
+            }
+
+            var enginePath = _applicationViewModel.UnrealProjectSync.EnginePath;
+            var projectPath = _applicationViewModel.UnrealProjectSync.ProjectPath;
+            var stateService = new UnrealBridgeStateService();
+            var baseline = stateService.Load(character, projectPath);
+
             try
             {
-                var folderPath = _applicationViewModel.UnrealProjectSync.ExportDirectoryPath;
-                if (string.IsNullOrWhiteSpace(folderPath))
+                _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code);
+                // 最终同步前始终刷新 Unreal 快照，页面缓存只用于恢复工作进度。
+                await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
+                    [character.Code],
+                    cancellationToken: GetGlobalProgressCancellationToken());
+                _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code, requireAssetTypes: true);
+                var latestCandidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.FirstOrDefault(item =>
+                    string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase));
+                if (latestCandidate is null || !latestCandidate.CharacterInfo.HasData)
                 {
-                    ShowFloatingTip(InfoBarSeverity.Warning, "暂无导出目录", "请先选择 Unreal 项目。");
+                    throw new InvalidOperationException($"未找到 Unreal 角色 Item 资产。\n正确名称示例：Item_{character.Code}\n期望路径：/Game/ITems/CharItemS/Item_{character.Code}.Item_{character.Code}");
+                }
+                var latestChanges = new UnrealBridgeDiffService().Compare(
+                    new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character),
+                    new UnrealBridgeSemanticSnapshotService().Build(latestCandidate),
+                    UnrealBridgeDirection.PublishToUnreal,
+                    baseline)
+                    .Select(change => change with { IsSelected = change.IsSelected && UnrealBridgePublishSupportPolicy.CanExecute(change) })
+                    .ToArray();
+                latestChanges = _applicationViewModel.UnrealProjectSync.FilterPublishChanges(latestChanges).ToArray();
+                var previousSelection = _applicationViewModel.UnrealProjectSync.GetSelectedStableIds();
+                _applicationViewModel.UnrealProjectSync.SetPublishSelectionTree(
+                    UnrealSyncSelectionTreeBuilder.FromChanges(latestChanges, UnrealBridgePublishSupportPolicy.CanExecute));
+                foreach (var leaf in _applicationViewModel.UnrealProjectSync.SelectionTreeRoots.SelectMany(root => root.Children))
+                {
+                    leaf.IsChecked = previousSelection.Contains(leaf.StableId) && leaf.IsSelectable;
+                }
+                var changes = _applicationViewModel.UnrealProjectSync.SelectionTreeRoots
+                    .SelectMany(root => root.Children)
+                    .Where(item => item.Change is not null)
+                    .Select(item => item.Change! with { IsSelected = item.IsChecked == true })
+                    .ToArray();
+                if (changes.Length == 0)
+                {
+                    ShowFloatingTip(InfoBarSeverity.Warning, "尚未检测差异", "请先检测差异，再勾选需要同步的内容。");
                     return;
                 }
 
-                Directory.CreateDirectory(folderPath);
-                Process.Start(new ProcessStartInfo
+                var unsupported = changes.Where(change => change.IsSelected &&
+                    !_applicationViewModel.UnrealProjectSync.CanExecutePublishChange(change)).ToArray();
+                if (unsupported.Length > 0)
                 {
-                    FileName = folderPath,
-                    UseShellExecute = true
-                });
-                AppendLog(LogKind.User, $"打开 Unreal 导出目录：{folderPath}");
+                    ShowFloatingTip(InfoBarSeverity.Warning, "包含尚未完成重定向的同步项", $"请先完成规整：{string.Join("、", unsupported.Select(item => item.DisplayName))}");
+                    return;
+                }
+
+                ShowGlobalProgress("同步所选到虚幻", character.Code);
+                var executableCount = changes.Count(change => change.IsSelected);
+                var deferredCount = changes.Count(change =>
+                    change.Kind != UnrealBridgeChangeKind.Unchanged && !change.IsSelected);
+                if (executableCount == 0)
+                {
+                    _applicationViewModel.UnrealProjectSync.CompletePublishOperation(0, deferredCount);
+                    CompleteGlobalProgress("没有可自动同步的素材改动", deferredCount == 0
+                        ? "两端已有素材一致。"
+                        : $"还有 {deferredCount} 项属于新增、删除、冲突或语义结构，需要在差异树中明确处理。");
+                    await HideGlobalProgressAfterDelayAsync();
+                    return;
+                }
+
+                var plan = new UnrealBridgeExecutionPlanService().Build(
+                    UnrealBridgeDirection.PublishToUnreal,
+                    character.Code,
+                    projectPath,
+                    changes,
+                    deletionsConfirmed: false,
+                    isFirstPublish: false,
+                    templateCharacterCode: baseline?.TemplateCharacterCode ?? string.Empty,
+                    baseline: baseline,
+                    normalizationItems: _applicationViewModel.UnrealProjectSync.NormalizationItems);
+                if (plan.BackupRequired || Settings.BackupBeforeUnrealSync)
+                {
+                    UpdateGlobalProgress("正在压缩备份 Unreal 项目...", 40, projectPath, true);
+                    var backupPath = Path.Combine(
+                        Path.GetDirectoryName(projectPath)!,
+                        "Saved",
+                        "ZDToolboxBackups",
+                        $"{character.Code}-{DateTime.Now:yyyyMMdd-HHmmss}.zip");
+                    var backupInfo = new UnrealBridgeBackupService().BuildZipProjectStartInfo(enginePath, projectPath, backupPath);
+                    using var backupProcess = Process.Start(backupInfo)
+                        ?? throw new InvalidOperationException("无法启动 Unreal 项目备份进程。");
+                    var backupOutput = backupProcess.StandardOutput.ReadToEndAsync();
+                    var backupError = backupProcess.StandardError.ReadToEndAsync();
+                    await backupProcess.WaitForExitAsync(GetGlobalProgressCancellationToken());
+                    if (backupProcess.ExitCode != 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"Unreal 项目备份失败，退出码 {backupProcess.ExitCode}。\n{await backupOutput}\n{await backupError}");
+                    }
+                }
+
+                UpdateGlobalProgress("正在写入 Unreal 素材...", 58, $"{executableCount} 项", true);
+                var workFolder = Path.Combine(
+                    Path.GetDirectoryName(projectPath)!,
+                    "Intermediate",
+                    "ZDToolboxBridge",
+                    character.Code);
+                Directory.CreateDirectory(workFolder);
+                var planPath = Path.Combine(workFolder, "plan.json");
+                var progressPath = Path.Combine(workFolder, "progress.json");
+                var resultPath = Path.Combine(workFolder, "result.json");
+                var executor = new UnrealBridgeExecutorService();
+                executor.SavePlan(planPath, plan);
+                var result = await executor.ExecuteAsync(
+                    executor.BuildProcessStartInfo(enginePath, projectPath, planPath, progressPath, resultPath),
+                    progressPath,
+                    resultPath,
+                    new Progress<UnrealBridgeExecutionProgress>(value =>
+                        UpdateGlobalProgress(value.Message, 58 + value.CompletedCount * 24d / Math.Max(1, value.TotalCount), value.StableId)),
+                    GetGlobalProgressCancellationToken());
+
+                UpdateGlobalProgress("正在复扫验证...", 86, character.Code, true);
+                await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
+                    [character.Code],
+                    cancellationToken: GetGlobalProgressCancellationToken());
+                var refreshedCandidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.First(item =>
+                    string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase));
+                var rescanned = new UnrealBridgeSemanticSnapshotService().Build(refreshedCandidate);
+                rescanned = new UnrealBridgePostExecutionIdentityService().Restore(rescanned, result);
+                var verifiedState = new UnrealBridgeVerificationService().BuildVerifiedState(
+                    plan,
+                    result,
+                    new UnrealBridgeToolboxSnapshotService().Build(character),
+                    rescanned);
+                stateService.Save(character, projectPath, verifiedState);
+                _applicationViewModel.UnrealProjectSync.CompletePublishOperation(executableCount, deferredCount);
+                CompleteGlobalProgress("同步到虚幻完成", $"已验证 {executableCount} 项；另有 {deferredCount} 项未执行。");
+                ShowFloatingTip(InfoBarSeverity.Success, "同步到虚幻完成", $"已验证 {executableCount} 项。");
+                AppendLog(LogKind.User, $"同步所选内容到 Unreal：{character.Code}，Executed={executableCount}，Deferred={deferredCount}。");
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            catch (OperationCanceledException ex)
+            {
+                _applicationViewModel.UnrealProjectSync.FailPublishOperation("同步已取消，当前差异选择仍保留。");
+                CompleteGlobalProgress("同步已取消", character.Code);
+                AppendLog(LogKind.Warning, "同步已有素材已取消。", ex);
+                await HideGlobalProgressAfterDelayAsync();
             }
             catch (Exception ex)
             {
-                ShowFloatingTip(InfoBarSeverity.Error, "导出目录打开失败", ex.Message);
-                AppendLog(LogKind.Error, "导出目录打开失败。", ex);
+                _applicationViewModel.UnrealProjectSync.FailPublishOperation(ex.Message);
+                CompleteGlobalProgress("同步失败", ex.Message);
+                ShowFloatingTip(InfoBarSeverity.Error, "同步到 Unreal 失败", ex.Message);
+                AppendLog(LogKind.Error, "同步已有素材到 Unreal 失败。", ex);
+                await HideGlobalProgressAfterDelayAsync();
             }
         }
 
@@ -226,1142 +341,341 @@ namespace CrossingVoidZDTool
         {
             if (sender is ToggleSwitch toggle)
             {
-                if (_applicationViewModel.UnrealProjectSync.IsEngineToToolbox == toggle.IsOn)
+                var directionChanged = _applicationViewModel.UnrealProjectSync.IsEngineToToolbox != toggle.IsOn;
+                if (directionChanged)
                 {
-                    return;
+                    _applicationViewModel.UnrealProjectSync.IsEngineToToolbox = toggle.IsOn;
                 }
 
-                _applicationViewModel.UnrealProjectSync.IsEngineToToolbox = toggle.IsOn;
-                AppendLog(LogKind.User, $"切换虚幻同步方向：{_applicationViewModel.UnrealProjectSync.DirectionTitle}");
-            }
-        }
-
-        private void UnrealCharacterCandidateButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is Button { DataContext: UnrealProjectSyncCharacterCandidate candidate })
-            {
-                var scrollOffset = CaptureUnrealProjectSyncScrollOffset();
-                _applicationViewModel.UnrealProjectSync.SelectCharacterCandidate(candidate);
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
-                AppendLog(LogKind.User, $"选择虚幻同步角色候选：{candidate.Code}");
-            }
-        }
-
-        private async void SyncUnrealCandidateToMaterialLibraryButton_Click(object sender, RoutedEventArgs e)
-        {
-            var candidate = _applicationViewModel.UnrealProjectSync.SelectedCharacterCandidate;
-            if (candidate is null)
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择引擎角色", "请先点击一个引擎角色候选。");
-                return;
-            }
-
-            if (!await ConfirmSyncStaleUnrealCandidateAsync(candidate))
-            {
-                return;
-            }
-
-            try
-            {
-                ShowGlobalProgress("同步到素材库", candidate.Code);
-                UpdateGlobalProgress("正在准备工具箱素材卡...", 5, candidate.Code);
-                await Task.Yield();
-                var result = await CharacterDesk.EnsureCharacterByCodeAsync(
-                    candidate.Code,
-                    candidate.DisplayName,
-                    GetGlobalProgressCancellationToken());
-                UpdateGlobalProgress("正在同步全部 St2 基础素材...", 35, candidate.Code);
-                _applicationViewModel.LineArt.Sections.Clear();
-                var importedCount = await Task.Run(
-                    () => _applicationViewModel.UnrealProjectSync.SyncAllMaterialBucketsToToolbox(result.Character, candidate),
-                    GetGlobalProgressCancellationToken());
-                UpdateGlobalProgress("正在刷新基础素材页面...", 90, result.Character.StatusDisplayText);
-                _applicationViewModel.UnrealProjectSync.Detect();
-                await RefreshBaseMaterialsAsync();
-                MarkLastEditedModule("LineArt");
-                PersistCurrentCharacterSelection();
-                StartBaseMaterialWatcher();
-                CompleteGlobalProgress("素材库同步完成", $"St2 已同步 {importedCount} 张基础素材。");
-                ShowFloatingTip(InfoBarSeverity.Success, "同步到素材库完成", $"已同步 {importedCount} 张基础素材。");
-                AppendLog(
-                    LogKind.User,
-                    $"同步 Unreal 基础素材库到工具箱：{result.Character.Code}，Imported={importedCount}，CreatedNew={result.CreatedNew}。");
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (OperationCanceledException ex)
-            {
-                CompleteGlobalProgress("素材库同步已取消", candidate.Code);
-                AppendLog(LogKind.Warning, "素材库同步已取消。", ex);
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (Exception ex)
-            {
-                CompleteGlobalProgress("素材库同步失败", ex.Message);
-                ShowFloatingTip(InfoBarSeverity.Error, "同步到素材库失败", ex.Message);
-                AppendLog(LogKind.Error, "同步到素材库失败。", ex);
-                await HideGlobalProgressAfterDelayAsync();
-            }
-        }
-
-        private async void SyncUnrealCandidateToCharacterInfoButton_Click(object sender, RoutedEventArgs e)
-        {
-            var candidate = _applicationViewModel.UnrealProjectSync.SelectedCharacterCandidate;
-            if (candidate is null)
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择引擎角色", "请先点击一个引擎角色候选。");
-                return;
-            }
-
-            if (!await ConfirmSyncStaleUnrealCandidateAsync(candidate))
-            {
-                return;
-            }
-
-            if (!candidate.CharacterInfo.HasItemData)
-            {
-                ShowFloatingTip(
-                    InfoBarSeverity.Warning,
-                    "角色信息未读取成功",
-                    candidate.CharacterInfo.ReadStatusText);
-                AppendLog(LogKind.Warning, $"同步 St3 角色信息被跳过：{candidate.Code}，{candidate.CharacterInfo.ReadStatusText}");
-                return;
-            }
-
-            try
-            {
-                ShowGlobalProgress("同步到角色信息", candidate.Code);
-                UpdateGlobalProgress("正在准备工具箱角色卡...", 8, candidate.Code);
-                await Task.Yield();
-                var ensureResult = await CharacterDesk.EnsureCharacterByCodeAsync(
-                    candidate.Code,
-                    candidate.DisplayName,
-                    GetGlobalProgressCancellationToken());
-
-                UpdateGlobalProgress("正在写入 St3 角色信息...", 45, candidate.CharacterInfo.SourceText);
-                await Task.Run(
-                    () => _applicationViewModel.UnrealProjectSync.SyncCharacterInfoToToolbox(ensureResult.Character, candidate),
-                    GetGlobalProgressCancellationToken());
-
-                UpdateGlobalProgress("正在刷新角色信息页面...", 85, ensureResult.Character.StatusDisplayText);
-                await RefreshCharacterInfoAsync();
-                if (!string.IsNullOrWhiteSpace(candidate.CharacterInfo.Name))
+                _applicationViewModel.UnrealProjectSync.RefreshDraftSources(CharacterDesk.CompletedCharacters);
+                if (directionChanged)
                 {
-                    await CharacterDesk.SynchronizeCurrentCharacterDisplayNameAsync(
-                        candidate.CharacterInfo.Name,
-                        GetGlobalProgressCancellationToken());
+                    AppendLog(LogKind.User, $"切换虚幻同步方向：{_applicationViewModel.UnrealProjectSync.DirectionTitle}");
                 }
-
-                MarkLastEditedModule("UnrealSync");
-                PersistCurrentCharacterSelection();
-                CompleteGlobalProgress("角色信息同步完成", $"St3 已同步：{CharacterDesk.CurrentCharacterName}");
-                ShowFloatingTip(InfoBarSeverity.Success, "同步到角色信息完成", CharacterDesk.CurrentCharacterName);
-                AppendLog(
-                    LogKind.User,
-                    $"同步 Unreal 角色信息到工具箱 St3：{candidate.Code}，Name={candidate.CharacterInfo.Name}，CreatedNew={ensureResult.CreatedNew}。");
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (OperationCanceledException ex)
-            {
-                CompleteGlobalProgress("角色信息同步已取消", candidate.Code);
-                AppendLog(LogKind.Warning, "角色信息同步已取消。", ex);
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (Exception ex)
-            {
-                CompleteGlobalProgress("角色信息同步失败", ex.Message);
-                ShowFloatingTip(InfoBarSeverity.Error, "同步到角色信息失败", ex.Message);
-                AppendLog(LogKind.Error, "同步到角色信息失败。", ex);
-                await HideGlobalProgressAfterDelayAsync();
             }
         }
 
-        private async void SyncUnrealMaterialBucketToToolboxButton_Click(object sender, RoutedEventArgs e)
+        private void UnrealSyncSourceListView_ItemClick(object sender, ItemClickEventArgs e)
         {
-            if (sender is not Button { DataContext: UnrealProjectSyncMaterialBucket bucket })
+            if (e.ClickedItem is not UnrealSyncSourceItem source)
             {
                 return;
             }
 
-            var candidate = _applicationViewModel.UnrealProjectSync.SelectedCharacterCandidate;
-            if (candidate is null)
+            if (!source.IsAvailable)
             {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择引擎角色", "请先点击一个引擎角色候选。");
+                ShowFloatingTip(InfoBarSeverity.Informational, "功能尚未开放", $"{source.DisplayName} 将在项目通用素材阶段接入。");
                 return;
             }
 
-            if (!await ConfirmSyncStaleUnrealCandidateAsync(candidate))
+            _applicationViewModel.UnrealProjectSync.SelectSource(source);
+            AppendLog(LogKind.User, $"选择虚幻同步来源：{source.DisplayName} / {source.SecondaryText}");
+        }
+
+        private async void DetectUnrealImportButton_Click(object sender, RoutedEventArgs e)
+        {
+            var source = _applicationViewModel.UnrealProjectSync.SelectedSource;
+            if (source is null)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择来源", "请先在左侧选择 Unreal 角色或项目通用素材。");
+                return;
+            }
+
+            if (source.IsSharedMaterial)
+            {
+                _applicationViewModel.UnrealProjectSync.SetSelectionTree([]);
+                ShowFloatingTip(InfoBarSeverity.Informational, "通用素材入口已保留", $"{source.DisplayName} 将在项目通用素材阶段实装。");
+                return;
+            }
+
+            var code = source.UnrealCandidate?.Code;
+            if (string.IsNullOrWhiteSpace(code))
             {
                 return;
             }
 
             try
             {
-                ShowGlobalProgress("同步对应项", $"{candidate.Code} / {bucket.DisplayName}");
-                UpdateGlobalProgress("正在准备工具箱素材卡...", 5, candidate.Code);
-                await Task.Yield();
-                var ensureResult = await CharacterDesk.EnsureCharacterByCodeAsync(
-                    candidate.Code,
-                    candidate.DisplayName,
+                ShowGlobalProgress("检测 Unreal 角色", code);
+                await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
+                    [code],
+                    new Progress<ProgressUpdate>(update =>
+                        UpdateGlobalProgress(update.Message, update.Percent, update.Detail, update.IsIndeterminate)),
                     GetGlobalProgressCancellationToken());
-                var character = ensureResult.Character;
-
-                UpdateGlobalProgress("正在导入 St2 基础素材...", 35, bucket.DisplayName);
-                _applicationViewModel.LineArt.Sections.Clear();
-                var importedCount = await Task.Run(
-                    () => _applicationViewModel.UnrealProjectSync.SyncMaterialBucketToToolbox(character, bucket),
-                    GetGlobalProgressCancellationToken());
-                UpdateGlobalProgress("正在刷新基础素材页面...", 90, character.StatusDisplayText);
-                _applicationViewModel.UnrealProjectSync.Detect();
-                await RefreshBaseMaterialsAsync();
-                MarkLastEditedModule("LineArt");
-                PersistCurrentCharacterSelection();
-                CompleteGlobalProgress("对应项同步完成", $"{bucket.DisplayName} 同步 {importedCount} 张。");
-                ShowFloatingTip(InfoBarSeverity.Success, "同步到对应项完成", $"{bucket.DisplayName}：{importedCount} 张");
-                AppendLog(LogKind.User, $"同步 Unreal 基础素材到工具箱：{candidate.Code}/{bucket.Kind}，Imported={importedCount}。");
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (OperationCanceledException ex)
-            {
-                CompleteGlobalProgress("对应项同步已取消", bucket.DisplayName);
-                AppendLog(LogKind.Warning, "对应项同步已取消。", ex);
+                var candidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.First(item =>
+                    string.Equals(item.Code, code, StringComparison.OrdinalIgnoreCase));
+                var refreshedSource = _applicationViewModel.UnrealProjectSync.CharacterSources.First(item =>
+                    item.UnrealCandidate is not null &&
+                    string.Equals(item.UnrealCandidate.Code, candidate.Code, StringComparison.OrdinalIgnoreCase));
+                _applicationViewModel.UnrealProjectSync.SelectSource(refreshedSource);
+                var snapshot = new UnrealBridgeSemanticSnapshotService().Build(candidate);
+                var draft = CharacterDesk.DraftCharacters.FirstOrDefault(character =>
+                    string.Equals(character.Code, candidate.Code, StringComparison.OrdinalIgnoreCase));
+                var baseline = draft is null
+                    ? null
+                    : new UnrealBridgeStateService().Load(
+                        draft,
+                        _applicationViewModel.UnrealProjectSync.ProjectPath);
+                var existingStableIds = baseline?.Entries.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase)
+                    ?? new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                _applicationViewModel.UnrealProjectSync.SetImportSelectionTree(
+                    UnrealSyncSelectionTreeBuilder.FromSnapshot(snapshot),
+                    existingStableIds,
+                    snapshot);
+                CompleteGlobalProgress("检测完成", "正常模块已默认勾选；展开中间树可查看具体条目。");
                 await HideGlobalProgressAfterDelayAsync();
             }
             catch (Exception ex)
             {
-                CompleteGlobalProgress("对应项同步失败", ex.Message);
-                ShowFloatingTip(InfoBarSeverity.Error, "同步到对应项失败", ex.Message);
-                AppendLog(LogKind.Error, "同步到对应项失败。", ex);
+                _applicationViewModel.UnrealProjectSync.FailImportDetection(ex.Message);
+                CompleteGlobalProgress("检测失败", ex.Message);
+                AppendLog(LogKind.Error, "检测 Unreal 导入内容失败。", ex);
                 await HideGlobalProgressAfterDelayAsync();
             }
         }
 
-        private async void SyncUnrealCandidateSkillsToToolboxButton_Click(object sender, RoutedEventArgs e)
+        private async void DetectUnrealPublishChangesButton_Click(object sender, RoutedEventArgs e)
         {
-            var candidate = _applicationViewModel.UnrealProjectSync.SelectedCharacterCandidate;
-            if (candidate is null)
+            var character = _applicationViewModel.UnrealProjectSync.SelectedSource?.DraftCharacter;
+            if (character is null)
             {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择引擎角色", "请先点击一个引擎角色候选。");
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
                 return;
             }
 
-            if (!await ConfirmSyncStaleUnrealCandidateAsync(candidate))
-            {
-                return;
-            }
+            var baseline = new UnrealBridgeStateService().Load(character, _applicationViewModel.UnrealProjectSync.ProjectPath);
 
-            await SyncUnrealSkillsAsync(
-                candidate,
-                "同步全部技能",
-                "正在写入 St4 全部技能...",
-                () => _applicationViewModel.UnrealProjectSync.SyncAllSkillsToToolbox(CharacterDesk.CurrentCharacter!, candidate),
-                count => $"St4 已同步 {count} 个技能阶段。",
-                "同步 Unreal 全部技能到工具箱 St4");
+            try
+            {
+                _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code);
+                ShowGlobalProgress("检测同步差异", character.Code);
+                await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
+                    [character.Code],
+                    new Progress<ProgressUpdate>(update =>
+                        UpdateGlobalProgress(update.Message, Math.Min(70, update.Percent * 0.7), update.Detail, update.IsIndeterminate)),
+                    GetGlobalProgressCancellationToken());
+                _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code, requireAssetTypes: true);
+                var candidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.FirstOrDefault(item =>
+                    string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase));
+                if (candidate is null || !candidate.CharacterInfo.HasData)
+                {
+                    throw new InvalidOperationException(
+                        $"未找到 Unreal 角色 Item 资产。\n" +
+                        $"正确名称示例：Item_{character.Code}\n" +
+                        $"期望路径：/Game/ITems/CharItemS/Item_{character.Code}.Item_{character.Code}\n" +
+                        $"请检查 Unreal 内容浏览器中的资产名称和路径是否正确。");
+                }
+                var changes = new UnrealBridgeDiffService().Compare(
+                    new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character),
+                    new UnrealBridgeSemanticSnapshotService().Build(candidate),
+                    UnrealBridgeDirection.PublishToUnreal,
+                    baseline)
+                    .Select(change => change with
+                    {
+                        IsSelected = change.IsSelected && UnrealBridgePublishSupportPolicy.CanExecute(change)
+                    })
+                    .ToArray();
+                changes = _applicationViewModel.UnrealProjectSync.FilterPublishChanges(changes).ToArray();
+                _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(1);
+                _applicationViewModel.UnrealProjectSync.SetPublishSelectionTree(
+                    UnrealSyncSelectionTreeBuilder.FromChanges(changes, UnrealBridgePublishSupportPolicy.CanExecute));
+                var changedCount = changes.Count(change => change.Kind != UnrealBridgeChangeKind.Unchanged);
+                CompleteGlobalProgress("差异检测完成", $"发现 {changedCount} 项变化；冲突和重定向项未默认勾选。");
+                var targetWorkflowStep = _workflowStepAfterPublishDetection;
+                _workflowStepAfterPublishDetection = 0;
+                if (targetWorkflowStep == 2)
+                {
+                    _applicationViewModel.UnrealProjectSync.AdvanceWorkflowStep();
+                }
+                else if (targetWorkflowStep == 3)
+                {
+                    _applicationViewModel.UnrealProjectSync.OpenNormalizationWorkspace();
+                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(3);
+                }
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            catch (Exception ex)
+            {
+                _workflowStepAfterPublishDetection = 0;
+                _applicationViewModel.UnrealProjectSync.FailImportDetection(ex.Message);
+                CompleteGlobalProgress("差异检测失败", ex.Message);
+                AppendLog(LogKind.Error, "检测工具箱到 Unreal 的同步差异失败。", ex);
+                await HideGlobalProgressAfterDelayAsync();
+            }
         }
 
-        private async void SyncUnrealSkillSlotToToolboxButton_Click(object sender, RoutedEventArgs e)
+        private void OpenUnrealNormalizationButton_Click(object sender, RoutedEventArgs e)
         {
-            var candidate = _applicationViewModel.UnrealProjectSync.SelectedCharacterCandidate;
-            var slot = sender switch
+            if (!_applicationViewModel.UnrealProjectSync.OpenNormalizationWorkspace())
             {
-                Button { DataContext: UnrealProjectSyncSkillSlotPreview dataContextSlot } => dataContextSlot,
-                Button { Tag: UnrealProjectSyncSkillSlotPreview taggedSlot } => taggedSlot,
-                _ => null
+                ShowFloatingTip(InfoBarSeverity.Warning, "无法打开素材规整", "请先选择已完成角色，并至少检测一次当前 Unreal 内容。");
+                return;
+            }
+
+            AppendLog(LogKind.User, "打开 Unreal 素材规整工作区。");
+        }
+
+        private async void ChooseUnrealNormalizationRedirectButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is not Button { Tag: UnrealAssetNormalizationItem item })
+            {
+                return;
+            }
+
+            var usedCandidateIds = _applicationViewModel.UnrealProjectSync.NormalizationItems
+                .Where(other => !ReferenceEquals(other, item))
+                .Select(other => other.SelectedCandidate?.StableId)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            var availableCandidates = item.Candidates
+                .Where(candidate => !usedCandidateIds.Contains(candidate.StableId) ||
+                    string.Equals(candidate.StableId, item.SelectedCandidate?.StableId, StringComparison.OrdinalIgnoreCase))
+                .ToArray();
+
+            if (availableCandidates.Length == 0)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "没有可用的工具箱素材", "请先在工具箱中补充该类型的合规素材，或标记为不需要重定向。");
+                return;
+            }
+
+            var list = new ListView
+            {
+                ItemsSource = availableCandidates,
+                SelectionMode = ListViewSelectionMode.Single,
+                MaxHeight = 420
             };
-            if (candidate is null || slot is null)
+            list.ItemTemplate = (DataTemplate)XamlReader.Load($@"
+                <DataTemplate xmlns='http://schemas.microsoft.com/winfx/2006/xaml/presentation'>
+                    <Grid MinHeight='82' Padding='6' ColumnSpacing='10'>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width='72'/>
+                            <ColumnDefinition Width='*'/>
+                        </Grid.ColumnDefinitions>
+                        <Border Width='64' Height='64' Background='{{ThemeResource CardBackgroundFillColorSecondaryBrush}}'>
+                            <Image Source='{{Binding FileUri}}' Stretch='Uniform'/>
+                        </Border>
+                        <StackPanel Grid.Column='1' Spacing='2' VerticalAlignment='Center'>
+                            <TextBlock FontWeight='SemiBold' Text='{{Binding DisplayName}}' TextTrimming='CharacterEllipsis'/>
+                            <TextBlock FontSize='12' Style='{{StaticResource SubtleTextStyle}}' Text='{{Binding RelativePath}}' TextTrimming='CharacterEllipsis'/>
+                        </StackPanel>
+                    </Grid>
+                </DataTemplate>");
+            if (item.SelectedCandidate is not null)
             {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择技能项", "请先选择引擎角色和需要同步的技能。");
-                return;
-            }
-
-            if (!await ConfirmSyncStaleUnrealCandidateAsync(candidate))
-            {
-                return;
-            }
-
-            await SyncUnrealSkillsAsync(
-                candidate,
-                $"同步{slot.DisplayName}",
-                $"正在写入 St4：{slot.DisplayName}...",
-                () => _applicationViewModel.UnrealProjectSync.SyncSkillSlotToToolbox(CharacterDesk.CurrentCharacter!, candidate, slot),
-                count => $"{slot.DisplayName} 已同步 {count} 个阶段。",
-                $"同步 Unreal 技能槽到工具箱 St4：{slot.SlotKey}/{slot.DisplayName}");
-        }
-
-        private async void SyncUnrealLinkSkillToToolboxButton_Click(object sender, RoutedEventArgs e)
-        {
-            var candidate = _applicationViewModel.UnrealProjectSync.SelectedCharacterCandidate;
-            if (candidate is null ||
-                sender is not Button { DataContext: UnrealProjectSyncLinkSkillPreview linkSkill })
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择连携技", "请先选择引擎角色和需要同步的连携技。");
-                return;
-            }
-
-            if (!await ConfirmSyncStaleUnrealCandidateAsync(candidate))
-            {
-                return;
-            }
-
-            await SyncUnrealSkillsAsync(
-                candidate,
-                "同步连携技",
-                $"正在写入 St4：{linkSkill.Title}...",
-                () => _applicationViewModel.UnrealProjectSync.SyncLinkSkillToToolbox(CharacterDesk.CurrentCharacter!, candidate, linkSkill),
-                count => $"{linkSkill.Title} 已同步 {count} 个阶段。",
-                $"同步 Unreal 连携技到工具箱 St4：{linkSkill.Title}");
-        }
-
-        private async void SyncUnrealCandidateSequenceFramesToToolboxButton_Click(object sender, RoutedEventArgs e)
-        {
-            var candidate = _applicationViewModel.UnrealProjectSync.SelectedCharacterCandidate;
-            if (candidate is null)
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择引擎角色", "请先点击一个引擎角色候选。");
-                return;
-            }
-
-            if (!await ConfirmSyncStaleUnrealCandidateAsync(candidate))
-            {
-                return;
-            }
-
-            await SyncUnrealSequenceFramesAsync(
-                candidate,
-                "同步全部序列",
-                "正在写入 St5 全部序列帧...",
-                () => _applicationViewModel.UnrealProjectSync.SyncAllSequenceFramesToToolbox(CharacterDesk.CurrentCharacter!, candidate),
-                count => $"St5 已同步 {count} 帧。",
-                "同步 Unreal 全部序列帧到工具箱 St5");
-        }
-
-        private async void SyncUnrealSequenceActionToToolboxButton_Click(object sender, RoutedEventArgs e)
-        {
-            var candidate = _applicationViewModel.UnrealProjectSync.SelectedCharacterCandidate;
-            if (candidate is null ||
-                sender is not Button { DataContext: UnrealProjectSyncSequenceActionPreview action })
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择序列项", "请先选择引擎角色和需要同步的序列。");
-                return;
-            }
-
-            if (!await ConfirmSyncStaleUnrealCandidateAsync(candidate))
-            {
-                return;
-            }
-
-            await SyncUnrealSequenceFramesAsync(
-                candidate,
-                $"同步{action.Title}",
-                $"正在写入 St5：{action.Title}...",
-                () => _applicationViewModel.UnrealProjectSync.SyncSequenceActionToToolbox(CharacterDesk.CurrentCharacter!, action),
-                count => $"{action.Title} 已同步 {count} 帧。",
-                $"同步 Unreal 序列帧到工具箱 St5：{action.ActionCode}/{action.Title}");
-        }
-
-        private async void SyncUnrealCandidateBuffsToToolboxButton_Click(object sender, RoutedEventArgs e)
-        {
-            var candidate = _applicationViewModel.UnrealProjectSync.SelectedCharacterCandidate;
-            if (candidate is null)
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择引擎角色", "请先点击一个引擎角色候选。");
-                return;
-            }
-
-            if (!await ConfirmSyncStaleUnrealCandidateAsync(candidate))
-            {
-                return;
-            }
-
-            await SyncUnrealBuffsAsync(
-                candidate,
-                "同步全部 BUFF",
-                "正在写入 St6 全部 BUFF...",
-                () => _applicationViewModel.UnrealProjectSync.SyncAllBuffsToToolbox(CharacterDesk.CurrentCharacter!, candidate),
-                count => $"St6 已同步 {count} 个 BUFF。",
-                "同步 Unreal 全部 BUFF 到工具箱 St6");
-        }
-
-        private async void SyncUnrealBuffToToolboxButton_Click(object sender, RoutedEventArgs e)
-        {
-            var candidate = _applicationViewModel.UnrealProjectSync.SelectedCharacterCandidate;
-            if (candidate is null ||
-                sender is not Button { DataContext: UnrealProjectSyncBuffPreview buff })
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择 BUFF", "请先选择引擎角色和需要同步的 BUFF。");
-                return;
-            }
-
-            if (!await ConfirmSyncStaleUnrealCandidateAsync(candidate))
-            {
-                return;
-            }
-
-            await SyncUnrealBuffsAsync(
-                candidate,
-                $"同步{buff.Title}",
-                $"正在写入 St6：{buff.Title}...",
-                () => _applicationViewModel.UnrealProjectSync.SyncBuffToToolbox(CharacterDesk.CurrentCharacter!, buff),
-                count => $"{buff.Title} 已同步。",
-                $"同步 Unreal BUFF 到工具箱 St6：{buff.AssetName}");
-        }
-
-        private async Task SyncUnrealSkillsAsync(
-            UnrealProjectSyncCharacterCandidate candidate,
-            string progressTitle,
-            string progressMessage,
-            Func<int> syncAction,
-            Func<int, string> completeMessage,
-            string logPrefix)
-        {
-            var scrollOffset = CaptureUnrealProjectSyncScrollOffset();
-            try
-            {
-                ShowGlobalProgress(progressTitle, candidate.Code);
-                UpdateGlobalProgress("正在准备工具箱角色卡...", 8, candidate.Code);
-                await Task.Yield();
-                var ensureResult = await CharacterDesk.EnsureCharacterByCodeAsync(
-                    candidate.Code,
-                    candidate.DisplayName,
-                    GetGlobalProgressCancellationToken());
-
-                UpdateGlobalProgress(progressMessage, 45, ensureResult.Character.StatusDisplayText);
-                var syncedCount = await Task.Run(syncAction, GetGlobalProgressCancellationToken());
-
-                UpdateGlobalProgress("正在刷新技能页面...", 88, ensureResult.Character.StatusDisplayText);
-                await RefreshSkillsAsync();
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
-                MarkLastEditedModule(ToolboxModuleKey.Skills);
-                PersistCurrentCharacterSelection();
-                CompleteGlobalProgress("技能同步完成", completeMessage(syncedCount));
-                ShowFloatingTip(InfoBarSeverity.Success, "同步到技能完成", completeMessage(syncedCount));
-                AppendLog(LogKind.User, $"{logPrefix}：{candidate.Code}，Synced={syncedCount}，CreatedNew={ensureResult.CreatedNew}。");
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (OperationCanceledException ex)
-            {
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
-                CompleteGlobalProgress("技能同步已取消", candidate.Code);
-                AppendLog(LogKind.Warning, "技能同步已取消。", ex);
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (Exception ex)
-            {
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
-                CompleteGlobalProgress("技能同步失败", ex.Message);
-                ShowFloatingTip(InfoBarSeverity.Error, "同步到技能失败", ex.Message);
-                AppendLog(LogKind.Error, "同步到技能失败。", ex);
-                await HideGlobalProgressAfterDelayAsync();
-            }
-        }
-
-        private async Task<bool> ConfirmSyncStaleUnrealCandidateAsync(UnrealProjectSyncCharacterCandidate candidate)
-        {
-            if (candidate.HasLatestData)
-            {
-                return true;
+                list.SelectedItem = item.SelectedCandidate;
             }
 
             var result = await _dialogService.ShowContentAsync(new ContentDialogRequest(
-                "同步旧数据",
-                new TextBlock
+                $"选择 {item.UnrealAssetName} 的重定向素材",
+                list,
+                PrimaryButtonText: "使用所选素材",
+                CloseButtonText: "取消",
+                ConfigureDialog: dialog =>
                 {
-                    Text = $"角色 {candidate.DisplayName} / {candidate.Code} 当前标记为“不是最新数据”。如果继续同步，可能会把旧的 Unreal 导出内容写入工具箱。\n\n建议先勾选这个角色，点击“获取选中角色信息”，确认最新后再同步。",
-                    TextWrapping = TextWrapping.Wrap,
-                    Width = 460
-                },
-                PrimaryButtonText: "继续同步",
-                CloseButtonText: string.Empty,
-                SecondaryButtonText: "取消",
-                DefaultButton: ContentDialogButton.Secondary,
-                PrimaryButtonStyle: (Style)Application.Current.Resources["DialogAccentButtonStyle"]));
-            if (result == DialogResultKind.Primary)
+                    dialog.IsPrimaryButtonEnabled = list.SelectedItem is not null;
+                    list.SelectionChanged += (_, _) => dialog.IsPrimaryButtonEnabled = list.SelectedItem is not null;
+                }));
+            if (result == DialogResultKind.Primary && list.SelectedItem is UnrealAssetNormalizationCandidate candidate)
             {
-                AppendLog(LogKind.Warning, $"用户确认使用旧 Unreal 数据同步：{candidate.Code}。");
-                return true;
-            }
-
-            AppendLog(LogKind.Warning, $"同步已取消：{candidate.Code} 当前不是最新数据。");
-            return false;
-        }
-
-        private async Task SyncUnrealBuffsAsync(
-            UnrealProjectSyncCharacterCandidate candidate,
-            string progressTitle,
-            string progressMessage,
-            Func<int> syncAction,
-            Func<int, string> completeMessage,
-            string logPrefix)
-        {
-            var scrollOffset = CaptureUnrealProjectSyncScrollOffset();
-            try
-            {
-                ShowGlobalProgress(progressTitle, candidate.Code);
-                UpdateGlobalProgress("正在准备工具箱角色卡...", 8, candidate.Code);
-                await Task.Yield();
-                var ensureResult = await CharacterDesk.EnsureCharacterByCodeAsync(
-                    candidate.Code,
-                    candidate.DisplayName,
-                    GetGlobalProgressCancellationToken());
-
-                UpdateGlobalProgress(progressMessage, 45, ensureResult.Character.StatusDisplayText);
-                var syncedCount = await Task.Run(syncAction, GetGlobalProgressCancellationToken());
-
-                UpdateGlobalProgress("正在刷新 BUFF 页面...", 88, ensureResult.Character.StatusDisplayText);
-                await RefreshBuffsAsync();
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
-                MarkLastEditedModule(ToolboxModuleKey.Buffs);
-                PersistCurrentCharacterSelection();
-                CompleteGlobalProgress("BUFF 同步完成", completeMessage(syncedCount));
-                ShowFloatingTip(InfoBarSeverity.Success, "同步到 BUFF 完成", completeMessage(syncedCount));
-                AppendLog(LogKind.User, $"{logPrefix}：{candidate.Code}，SyncedBuffs={syncedCount}，CreatedNew={ensureResult.CreatedNew}。");
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (OperationCanceledException ex)
-            {
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
-                CompleteGlobalProgress("BUFF 同步已取消", candidate.Code);
-                AppendLog(LogKind.Warning, "BUFF 同步已取消。", ex);
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (Exception ex)
-            {
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
-                CompleteGlobalProgress("BUFF 同步失败", ex.Message);
-                ShowFloatingTip(InfoBarSeverity.Error, "同步到 BUFF 失败", ex.Message);
-                AppendLog(LogKind.Error, "同步到 BUFF 失败。", ex);
-                await HideGlobalProgressAfterDelayAsync();
+                _applicationViewModel.UnrealProjectSync.SelectNormalizationRedirect(item, candidate);
             }
         }
 
-        private async Task SyncUnrealSequenceFramesAsync(
-            UnrealProjectSyncCharacterCandidate candidate,
-            string progressTitle,
-            string progressMessage,
-            Func<int> syncAction,
-            Func<int, string> completeMessage,
-            string logPrefix)
+        private void SkipUnrealNormalizationButton_Click(object sender, RoutedEventArgs e)
         {
-            var scrollOffset = CaptureUnrealProjectSyncScrollOffset();
-            try
+            if (sender is Button { Tag: UnrealAssetNormalizationItem item })
             {
-                ShowGlobalProgress(progressTitle, candidate.Code);
-                UpdateGlobalProgress("正在准备工具箱角色卡...", 8, candidate.Code);
-                await Task.Yield();
-                var ensureResult = await CharacterDesk.EnsureCharacterByCodeAsync(
-                    candidate.Code,
-                    candidate.DisplayName,
-                    GetGlobalProgressCancellationToken());
-
-                UpdateGlobalProgress(progressMessage, 45, ensureResult.Character.StatusDisplayText);
-                var syncedCount = await Task.Run(syncAction, GetGlobalProgressCancellationToken());
-
-                UpdateGlobalProgress("正在刷新序列帧页面...", 88, ensureResult.Character.StatusDisplayText);
-                await RefreshSequenceFramesAsync();
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
-                MarkLastEditedModule(ToolboxModuleKey.SequenceFrames);
-                PersistCurrentCharacterSelection();
-                CompleteGlobalProgress("序列帧同步完成", completeMessage(syncedCount));
-                ShowFloatingTip(InfoBarSeverity.Success, "同步到序列帧完成", completeMessage(syncedCount));
-                AppendLog(LogKind.User, $"{logPrefix}：{candidate.Code}，SyncedFrames={syncedCount}，CreatedNew={ensureResult.CreatedNew}。");
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (OperationCanceledException ex)
-            {
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
-                CompleteGlobalProgress("序列帧同步已取消", candidate.Code);
-                AppendLog(LogKind.Warning, "序列帧同步已取消。", ex);
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (Exception ex)
-            {
-                RestoreUnrealProjectSyncScrollOffset(scrollOffset);
-                CompleteGlobalProgress("序列帧同步失败", ex.Message);
-                ShowFloatingTip(InfoBarSeverity.Error, "同步到序列帧失败", ex.Message);
-                AppendLog(LogKind.Error, "同步到序列帧失败。", ex);
-                await HideGlobalProgressAfterDelayAsync();
+                _applicationViewModel.UnrealProjectSync.MarkNormalizationNotRequired(item);
             }
         }
 
-        private async void OpenUnrealSequenceFramesButton_Click(object sender, RoutedEventArgs e)
+        private void ClearUnrealNormalizationRedirectButton_Click(object sender, RoutedEventArgs e)
         {
-            if (sender is not Button { DataContext: UnrealProjectSyncSequenceActionPreview action })
+            if (sender is Button { Tag: UnrealAssetNormalizationItem item })
+            {
+                _applicationViewModel.UnrealProjectSync.ClearNormalizationRedirect(item);
+            }
+        }
+
+        private void PreviewUnrealNormalizationAudioButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (sender is Button { Tag: UnrealAssetNormalizationItem { IsAudio: true, HasPreview: true } item } button)
+            {
+                PlayVoiceFile(item.PreviewFilePath, button);
+            }
+        }
+
+        private void UnrealSyncPreviousStepButton_Click(object sender, RoutedEventArgs e)
+        {
+            var step = _applicationViewModel.UnrealProjectSync.WorkflowStep;
+            _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(Math.Max(1, step - 1));
+        }
+
+        private void UnrealFoundationCheckItem_Tapped(object sender, TappedRoutedEventArgs e)
+        {
+            if (sender is not FrameworkElement { Tag: UnrealPublishFoundationCheckItem item } ||
+                string.IsNullOrWhiteSpace(item.CorrectName))
             {
                 return;
             }
 
-            var frames = action.OrderedFrames.Count > 0 ? action.OrderedFrames : action.PreviewFrames;
-            if (frames.Count == 0)
+            CopyTextToClipboard(item.CorrectName);
+            ShowFloatingTip(InfoBarSeverity.Success, "已复制正确名称", item.CorrectName);
+        }
+
+        private void UnrealSyncNextStepButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_applicationViewModel.UnrealProjectSync.WorkflowStep == 1 &&
+                !_applicationViewModel.UnrealProjectSync.HasContentDetection)
             {
-                ShowFloatingTip(InfoBarSeverity.Warning, "暂无序列帧", action.Title);
+                _workflowStepAfterPublishDetection = 2;
+                DetectUnrealPublishChangesButton_Click(sender, e);
                 return;
             }
 
-            await ShowUnrealSequencePreviewDialogAsync(action, frames);
-        }
-
-        private async Task ShowUnrealSequencePreviewDialogAsync(
-            UnrealProjectSyncSequenceActionPreview action,
-            IReadOnlyList<UnrealProjectSyncExportAssetView> frames)
-        {
-            CloseUnrealSequencePreviewOverlay();
-            StopUnrealSequencePreview();
-            _unrealSequencePreviewCache.Clear();
-            _unrealSequencePreviewFrames = frames
-                .Select(CreateExternalSequenceFrameItem)
-                .ToArray();
-            _unrealSequencePreviewIndex = 0;
-            _unrealSequencePreviewFps = Math.Clamp((int)Math.Round(action.FramesPerSecond <= 0 ? 12 : action.FramesPerSecond), 1, 60);
-            _unrealSequencePreviewScale = 1;
-
-            _unrealSequencePreviewImage = new Image
+            if (_applicationViewModel.UnrealProjectSync.WorkflowStep == 3)
             {
-                Width = UnrealSequencePreviewWidth,
-                Height = UnrealSequencePreviewHeight,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                Stretch = Stretch.Uniform,
-                Opacity = 1,
-                RenderTransformOrigin = new Point(0.5, 0.5)
-            };
-            _unrealSequencePreviewBackImage = new Image
-            {
-                Width = UnrealSequencePreviewWidth,
-                Height = UnrealSequencePreviewHeight,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                Stretch = Stretch.Uniform,
-                Opacity = 0,
-                RenderTransformOrigin = new Point(0.5, 0.5)
-            };
-            _unrealSequencePreviewTransform = new CompositeTransform();
-            _unrealSequencePreviewImageLayer = new Grid
-            {
-                Width = UnrealSequencePreviewWidth,
-                Height = UnrealSequencePreviewHeight,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                RenderTransformOrigin = new Point(0.5, 0.5),
-                RenderTransform = _unrealSequencePreviewTransform
-            };
-            _unrealSequencePreviewImageLayer.Children.Add(_unrealSequencePreviewBackImage);
-            _unrealSequencePreviewImageLayer.Children.Add(_unrealSequencePreviewImage);
-            _isUnrealSequencePreviewFrontActive = true;
-
-            _unrealSequencePreviewCanvas = new Grid
-            {
-                Width = UnrealSequencePreviewWidth,
-                Height = UnrealSequencePreviewHeight,
-                Background = UnrealSequencePreviewCanvasBrush,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            _unrealSequencePreviewCanvas.Children.Add(_unrealSequencePreviewImageLayer);
-            _unrealSequencePreviewCanvas.PointerWheelChanged += UnrealSequencePreviewCanvas_PointerWheelChanged;
-            _unrealSequencePreviewCanvas.PointerPressed += UnrealSequencePreviewCanvas_PointerPressed;
-            _unrealSequencePreviewCanvas.PointerMoved += UnrealSequencePreviewCanvas_PointerMoved;
-            _unrealSequencePreviewCanvas.PointerReleased += UnrealSequencePreviewCanvas_PointerReleased;
-            _unrealSequencePreviewCanvas.PointerCanceled += UnrealSequencePreviewCanvas_PointerCanceled;
-            _unrealSequencePreviewCanvas.PointerCaptureLost += UnrealSequencePreviewCanvas_PointerCaptureLost;
-            _unrealSequencePreviewCanvas.DoubleTapped += UnrealSequencePreviewCanvas_DoubleTapped;
-
-            _unrealSequencePreviewFrameText = new TextBlock
-            {
-                Foreground = UnrealSequencePreviewSubtleTextBrush,
-                FontSize = 16,
-                TextWrapping = TextWrapping.Wrap
-            };
-
-            _unrealSequencePreviewPlayPauseIcon = new FontIcon { Glyph = "\uE769" };
-            var playPauseButton = new Button
-            {
-                Style = (Style)Application.Current.Resources["IconToolButtonStyle"],
-                Content = _unrealSequencePreviewPlayPauseIcon
-            };
-            ToolTipService.SetToolTip(playPauseButton, "播放/暂停");
-            playPauseButton.Click += UnrealSequencePreviewPlayPauseButton_Click;
-
-            var controls = new Grid
-            {
-                ColumnSpacing = 8,
-                HorizontalAlignment = HorizontalAlignment.Left
-            };
-            controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            controls.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-
-            controls.Children.Add(new TextBlock
-            {
-                Text = $"帧率 {_unrealSequencePreviewFps}",
-                Foreground = UnrealSequencePreviewTextBrush,
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold,
-                VerticalAlignment = VerticalAlignment.Center
-            });
-
-            var previousButton = new Button
-            {
-                Style = (Style)Application.Current.Resources["IconToolButtonStyle"],
-                Content = new FontIcon { Glyph = "\uE892" }
-            };
-            ToolTipService.SetToolTip(previousButton, "上一帧");
-            previousButton.Click += UnrealSequencePreviewPreviousButton_Click;
-            Grid.SetColumn(previousButton, 1);
-            controls.Children.Add(previousButton);
-
-            Grid.SetColumn(playPauseButton, 2);
-            controls.Children.Add(playPauseButton);
-
-            var nextButton = new Button
-            {
-                Style = (Style)Application.Current.Resources["IconToolButtonStyle"],
-                Content = new FontIcon { Glyph = "\uE893" }
-            };
-            ToolTipService.SetToolTip(nextButton, "下一帧");
-            nextButton.Click += UnrealSequencePreviewNextButton_Click;
-            Grid.SetColumn(nextButton, 3);
-            controls.Children.Add(nextButton);
-
-            var hintText = new TextBlock
-            {
-                Text = "滚轮缩放，拖动查看，双击归位",
-                Foreground = UnrealSequencePreviewSubtleTextBrush,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            Grid.SetColumn(hintText, 4);
-            controls.Children.Add(hintText);
-
-            var content = new Grid
-            {
-                RowSpacing = 12,
-                Width = UnrealSequencePreviewWidth,
-                Background = UnrealSequencePreviewDialogBrush
-            };
-            content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            content.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-            content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-
-            var header = new StackPanel { Spacing = 4 };
-            header.Children.Add(new TextBlock
-            {
-                Text = "序列帧预览器",
-                Foreground = UnrealSequencePreviewTextBrush,
-                FontSize = 22,
-                FontWeight = Microsoft.UI.Text.FontWeights.SemiBold
-            });
-            header.Children.Add(new TextBlock
-            {
-                Text = action.Title,
-                Foreground = UnrealSequencePreviewSubtleTextBrush,
-                FontSize = 16
-            });
-            header.Children.Add(new TextBlock
-            {
-                Text = $"{action.DetailLine1} / {action.DetailLine2}",
-                Foreground = UnrealSequencePreviewSubtleTextBrush,
-                FontSize = 16
-            });
-            content.Children.Add(header);
-
-            Grid.SetRow(_unrealSequencePreviewCanvas, 1);
-            content.Children.Add(_unrealSequencePreviewCanvas);
-            Grid.SetRow(_unrealSequencePreviewFrameText, 2);
-            content.Children.Add(_unrealSequencePreviewFrameText);
-            Grid.SetRow(controls, 3);
-            content.Children.Add(controls);
-
-            var card = new Border
-            {
-                Width = UnrealSequencePreviewWidth + 48,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                Padding = new Thickness(24),
-                Background = UnrealSequencePreviewDialogBrush,
-                BorderBrush = new SolidColorBrush(Color.FromArgb(255, 68, 68, 68)),
-                BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(8),
-                Child = content
-            };
-            card.Tapped += (_, e) => e.Handled = true;
-            card.RightTapped += (_, e) => e.Handled = true;
-
-            var closeButton = new Button
-            {
-                Content = "关闭",
-                Width = 306,
-                HorizontalAlignment = HorizontalAlignment.Center
-            };
-            closeButton.Click += (_, _) => CloseUnrealSequencePreviewOverlay();
-            var footer = new Border
-            {
-                Padding = new Thickness(0, 18, 0, 0),
-                Child = closeButton
-            };
-            Grid.SetRow(footer, 4);
-            content.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
-            content.Children.Add(footer);
-
-            _unrealSequencePreviewOverlay = new Grid
-            {
-                Background = new SolidColorBrush(Color.FromArgb(210, 0, 0, 0)),
-                IsTabStop = true,
-                Visibility = Visibility.Visible
-            };
-            Canvas.SetZIndex(_unrealSequencePreviewOverlay, 181);
-            Grid.SetRowSpan(_unrealSequencePreviewOverlay, Math.Max(1, RootGrid.RowDefinitions.Count));
-            _unrealSequencePreviewOverlay.Children.Add(card);
-            _unrealSequencePreviewOverlay.KeyDown += UnrealSequencePreviewOverlay_KeyDown;
-            _unrealSequencePreviewOverlay.RightTapped += UnrealSequencePreviewOverlay_RightTapped;
-            RootGrid.Children.Add(_unrealSequencePreviewOverlay);
-
-            ResetUnrealSequencePreviewTransform();
-            var failures = await _unrealSequencePreviewCache.PreloadDecodedAsync(_unrealSequencePreviewFrames);
-            if (failures.Count > 0)
-            {
-                ShowFloatingTip(
-                    InfoBarSeverity.Warning,
-                    "部分序列帧读取失败",
-                    failures.Count == 1 ? failures[0].FileName : $"{failures[0].FileName} 等 {failures.Count} 张图片无法读取。");
-                AppendLog(
-                    LogKind.Warning,
-                    "同步台序列帧预加载部分失败：" +
-                    string.Join(
-                        Environment.NewLine,
-                        failures
-                            .Take(8)
-                            .Select(failure => $"{failure.FileName} | {failure.ExceptionType ?? "LoadError"} | {failure.Message} | {failure.FilePath}")) +
-                    (failures.Count > 8 ? $"{Environment.NewLine}... 还有 {failures.Count - 8} 张失败。" : string.Empty));
-            }
-
-            UpdateUnrealSequencePreviewFrame();
-            StartUnrealSequencePreview();
-            _unrealSequencePreviewOverlay.Focus(FocusState.Programmatic);
-        }
-
-        private static SequenceFrameItem CreateExternalSequenceFrameItem(UnrealProjectSyncExportAssetView frame, int index)
-        {
-            return new SequenceFrameItem(
-                frame.IsBlank ? string.Empty : frame.ExportedFilePath,
-                frame.IsBlank ? string.Empty : frame.FileUri,
-                frame.IsBlank ? "空白帧" : frame.AssetName,
-                frame.IsBlank ? $"blank-{index}" : frame.FileUri,
-                index,
-                0,
-                0,
-                frame.IsBlank || !string.IsNullOrWhiteSpace(frame.FileUri),
-                DateTime.Now,
-                frame.IsBlank);
-        }
-
-        private void StartUnrealSequencePreview()
-        {
-            if (_unrealSequencePreviewFrames.Count == 0)
-            {
+                PublishCurrentCharacterAssetsToUnrealButton_Click(sender, e);
                 return;
             }
 
-            _unrealSequencePreviewTimer ??= DispatcherQueue.CreateTimer();
-            _unrealSequencePreviewTimer.Tick -= UnrealSequencePreviewTimer_Tick;
-            _unrealSequencePreviewTimer.Tick += UnrealSequencePreviewTimer_Tick;
-            _unrealSequencePreviewTimer.Interval = TimeSpan.FromMilliseconds(1000d / Math.Clamp(_unrealSequencePreviewFps, 1, 60));
-            _isUnrealSequencePreviewPlaying = true;
-            UpdateUnrealSequencePreviewPlayPauseVisual();
-            _unrealSequencePreviewTimer.Start();
-        }
-
-        private void StopUnrealSequencePreview()
-        {
-            _unrealSequencePreviewTimer?.Stop();
-            _isUnrealSequencePreviewPlaying = false;
-            UpdateUnrealSequencePreviewPlayPauseVisual();
-        }
-
-        private void UnrealSequencePreviewTimer_Tick(DispatcherQueueTimer sender, object args)
-        {
-            StepUnrealSequencePreview(1, keepPlaying: true);
-        }
-
-        private void UnrealSequencePreviewPlayPauseButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (_isUnrealSequencePreviewPlaying)
+            if (!_applicationViewModel.UnrealProjectSync.AdvanceWorkflowStep())
             {
-                StopUnrealSequencePreview();
+                var message = _applicationViewModel.UnrealProjectSync.WorkflowStep == 2
+                    ? $"还有 {_applicationViewModel.UnrealProjectSync.NormalizationItems.Count(item => !item.IsResolved)} 项 Unreal 素材没有选择处理方式。"
+                    : "选择角色后会自动检测，请等待检测完成。";
+                ShowFloatingTip(InfoBarSeverity.Informational, "当前步骤尚未完成", message);
+            }
+        }
+
+        private void ReloadUnrealWorkflowStepButton_Click(object sender, RoutedEventArgs e)
+        {
+            var sync = _applicationViewModel.UnrealProjectSync;
+            var characterCode = sync.SelectedSource?.DraftCharacter?.Code;
+            if (string.IsNullOrWhiteSpace(characterCode))
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
                 return;
             }
 
-            StartUnrealSequencePreview();
-        }
-
-        private void UnrealSequencePreviewPreviousButton_Click(object sender, RoutedEventArgs e)
-        {
-            StopUnrealSequencePreview();
-            StepUnrealSequencePreview(-1, keepPlaying: false);
-        }
-
-        private void UnrealSequencePreviewNextButton_Click(object sender, RoutedEventArgs e)
-        {
-            StopUnrealSequencePreview();
-            StepUnrealSequencePreview(1, keepPlaying: false);
-        }
-
-        private void StepUnrealSequencePreview(int direction, bool keepPlaying)
-        {
-            if (_unrealSequencePreviewFrames.Count == 0)
+            if (sync.WorkflowStep == 1)
             {
-                StopUnrealSequencePreview();
+                sync.RefreshFoundationChecks(characterCode);
+                ShowFloatingTip(InfoBarSeverity.Informational, "底层检测已重新加载", sync.FoundationSummaryText);
                 return;
             }
 
-            _unrealSequencePreviewIndex = (_unrealSequencePreviewIndex + direction + _unrealSequencePreviewFrames.Count) % _unrealSequencePreviewFrames.Count;
-            if (!UpdateUnrealSequencePreviewFrame() && keepPlaying)
+            if (sync.WorkflowStep is 2 or 3)
             {
-                for (var attempt = 0; attempt < _unrealSequencePreviewFrames.Count; attempt++)
-                {
-                    _unrealSequencePreviewIndex = (_unrealSequencePreviewIndex + 1) % _unrealSequencePreviewFrames.Count;
-                    if (UpdateUnrealSequencePreviewFrame())
-                    {
-                        return;
-                    }
-                }
-
-                StopUnrealSequencePreview();
-            }
-        }
-
-        private bool UpdateUnrealSequencePreviewFrame()
-        {
-            if (_unrealSequencePreviewImage is null ||
-                _unrealSequencePreviewBackImage is null ||
-                _unrealSequencePreviewFrameText is null)
-            {
-                return false;
-            }
-
-            if (_unrealSequencePreviewFrames.Count == 0)
-            {
-                ClearUnrealSequencePreviewImages();
-                _unrealSequencePreviewFrameText.Text = "暂无预览帧";
-                return false;
-            }
-
-            _unrealSequencePreviewIndex = Math.Clamp(_unrealSequencePreviewIndex, 0, _unrealSequencePreviewFrames.Count - 1);
-            var frame = _unrealSequencePreviewFrames[_unrealSequencePreviewIndex];
-            var frameIndexText = $"{_unrealSequencePreviewIndex + 1:D3}/{_unrealSequencePreviewFrames.Count:D3}";
-            if (frame.IsBlank)
-            {
-                ClearUnrealSequencePreviewImages();
-                _unrealSequencePreviewFrameText.Text = $"{frameIndexText}  空白帧";
-                return true;
-            }
-
-            if (_unrealSequencePreviewCache.IsFailed(frame.FilePath))
-            {
-                ClearUnrealSequencePreviewImages();
-                _unrealSequencePreviewFrameText.Text = $"{frameIndexText}  {frame.FileName} 读取失败";
-                return false;
-            }
-
-            if (_unrealSequencePreviewCache.TryGet(frame.CacheKey, out var bitmap))
-            {
-                SwapUnrealSequencePreviewImage(bitmap);
-                _unrealSequencePreviewFrameText.Text = $"{frameIndexText}  {frame.FileName}";
-                return true;
-            }
-
-            if (!File.Exists(frame.FilePath))
-            {
-                _unrealSequencePreviewCache.MarkFailed(frame.FilePath);
-                ClearUnrealSequencePreviewImages();
-                _unrealSequencePreviewFrameText.Text = $"{frameIndexText}  {frame.FileName} 不存在";
-                return false;
-            }
-
-            _unrealSequencePreviewFrameText.Text = $"{frameIndexText}  {frame.FileName} 等待预加载";
-            return false;
-        }
-
-        private void SwapUnrealSequencePreviewImage(ImageSource bitmap)
-        {
-            if (_unrealSequencePreviewImage is null || _unrealSequencePreviewBackImage is null)
-            {
+                _workflowStepAfterPublishDetection = sync.WorkflowStep;
+                DetectUnrealPublishChangesButton_Click(sender, e);
                 return;
             }
 
-            var nextImage = _isUnrealSequencePreviewFrontActive
-                ? _unrealSequencePreviewBackImage
-                : _unrealSequencePreviewImage;
-            var previousImage = _isUnrealSequencePreviewFrontActive
-                ? _unrealSequencePreviewImage
-                : _unrealSequencePreviewBackImage;
-
-            if (ReferenceEquals(previousImage.Source, bitmap))
-            {
-                previousImage.Opacity = 1;
-                nextImage.Opacity = 0;
-                return;
-            }
-
-            nextImage.Source = bitmap;
-            nextImage.Opacity = 1;
-            previousImage.Opacity = 0;
-            _isUnrealSequencePreviewFrontActive = !_isUnrealSequencePreviewFrontActive;
-        }
-
-        private void ClearUnrealSequencePreviewImages()
-        {
-            if (_unrealSequencePreviewImage is not null)
-            {
-                _unrealSequencePreviewImage.Opacity = 0;
-            }
-
-            if (_unrealSequencePreviewBackImage is not null)
-            {
-                _unrealSequencePreviewBackImage.Opacity = 0;
-            }
-        }
-
-        private void UpdateUnrealSequencePreviewPlayPauseVisual()
-        {
-            if (_unrealSequencePreviewPlayPauseIcon is not null)
-            {
-                _unrealSequencePreviewPlayPauseIcon.Glyph = _isUnrealSequencePreviewPlaying ? "\uE769" : "\uE768";
-            }
-        }
-
-        private void UnrealSequencePreviewCanvas_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
-        {
-            if (_unrealSequencePreviewCanvas is null || _unrealSequencePreviewTransform is null)
-            {
-                return;
-            }
-
-            var point = e.GetCurrentPoint(_unrealSequencePreviewCanvas);
-            var previousScale = _unrealSequencePreviewScale;
-            _unrealSequencePreviewScale = Math.Clamp(
-                _unrealSequencePreviewScale * (point.Properties.MouseWheelDelta > 0 ? 1.1 : 0.9),
-                0.35,
-                6);
-            var actualZoomFactor = _unrealSequencePreviewScale / previousScale;
-            var canvasCenterX = _unrealSequencePreviewCanvas.ActualWidth / 2;
-            var canvasCenterY = _unrealSequencePreviewCanvas.ActualHeight / 2;
-            var pointerOffsetX = point.Position.X - canvasCenterX - _unrealSequencePreviewTransform.TranslateX;
-            var pointerOffsetY = point.Position.Y - canvasCenterY - _unrealSequencePreviewTransform.TranslateY;
-            _unrealSequencePreviewTransform.TranslateX -= pointerOffsetX * (actualZoomFactor - 1);
-            _unrealSequencePreviewTransform.TranslateY -= pointerOffsetY * (actualZoomFactor - 1);
-            _unrealSequencePreviewTransform.ScaleX = _unrealSequencePreviewScale;
-            _unrealSequencePreviewTransform.ScaleY = _unrealSequencePreviewScale;
-        }
-
-        private void UnrealSequencePreviewCanvas_PointerPressed(object sender, PointerRoutedEventArgs e)
-        {
-            if (_unrealSequencePreviewCanvas is null)
-            {
-                return;
-            }
-
-            var point = e.GetCurrentPoint(_unrealSequencePreviewCanvas);
-            if (point.Properties.PointerUpdateKind is not PointerUpdateKind.LeftButtonPressed)
-            {
-                return;
-            }
-
-            _isPanningUnrealSequencePreview = true;
-            _lastUnrealSequencePreviewPointerPosition = point.Position;
-            _unrealSequencePreviewCanvas.CapturePointer(e.Pointer);
-        }
-
-        private void UnrealSequencePreviewCanvas_PointerMoved(object sender, PointerRoutedEventArgs e)
-        {
-            if (!_isPanningUnrealSequencePreview ||
-                _unrealSequencePreviewCanvas is null ||
-                _unrealSequencePreviewTransform is null)
-            {
-                return;
-            }
-
-            var point = e.GetCurrentPoint(_unrealSequencePreviewCanvas);
-            _unrealSequencePreviewTransform.TranslateX += point.Position.X - _lastUnrealSequencePreviewPointerPosition.X;
-            _unrealSequencePreviewTransform.TranslateY += point.Position.Y - _lastUnrealSequencePreviewPointerPosition.Y;
-            _lastUnrealSequencePreviewPointerPosition = point.Position;
-        }
-
-        private void UnrealSequencePreviewCanvas_PointerReleased(object sender, PointerRoutedEventArgs e)
-        {
-            EndUnrealSequencePreviewPan(e);
-        }
-
-        private void UnrealSequencePreviewCanvas_PointerCanceled(object sender, PointerRoutedEventArgs e)
-        {
-            EndUnrealSequencePreviewPan(e);
-        }
-
-        private void UnrealSequencePreviewCanvas_PointerCaptureLost(object sender, PointerRoutedEventArgs e)
-        {
-            _isPanningUnrealSequencePreview = false;
-        }
-
-        private void UnrealSequencePreviewCanvas_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
-        {
-            ResetUnrealSequencePreviewTransform();
-        }
-
-        private void EndUnrealSequencePreviewPan(PointerRoutedEventArgs e)
-        {
-            _isPanningUnrealSequencePreview = false;
-            _unrealSequencePreviewCanvas?.ReleasePointerCapture(e.Pointer);
-        }
-
-        private void ResetUnrealSequencePreviewTransform()
-        {
-            _unrealSequencePreviewScale = 1;
-            if (_unrealSequencePreviewTransform is null)
-            {
-                return;
-            }
-
-            _unrealSequencePreviewTransform.ScaleX = 1;
-            _unrealSequencePreviewTransform.ScaleY = 1;
-            _unrealSequencePreviewTransform.TranslateX = 0;
-            _unrealSequencePreviewTransform.TranslateY = 0;
-        }
-
-        private void CloseUnrealSequencePreviewOverlay()
-        {
-            StopUnrealSequencePreview();
-            if (_unrealSequencePreviewOverlay is not null)
-            {
-                RootGrid.Children.Remove(_unrealSequencePreviewOverlay);
-                _unrealSequencePreviewOverlay = null;
-            }
-
-            _isPanningUnrealSequencePreview = false;
-            ClearUnrealSequencePreviewImages();
-            _unrealSequencePreviewImage?.ClearValue(Image.SourceProperty);
-            _unrealSequencePreviewBackImage?.ClearValue(Image.SourceProperty);
-            _unrealSequencePreviewCache.Clear();
-            _unrealSequencePreviewImage = null;
-            _unrealSequencePreviewBackImage = null;
-            _unrealSequencePreviewImageLayer = null;
-            _unrealSequencePreviewCanvas = null;
-            _unrealSequencePreviewFrameText = null;
-            _unrealSequencePreviewPlayPauseIcon = null;
-            _unrealSequencePreviewTransform = null;
-        }
-
-        private void UnrealSequencePreviewOverlay_KeyDown(object sender, KeyRoutedEventArgs e)
-        {
-            if (e.Key == Windows.System.VirtualKey.Escape)
-            {
-                CloseUnrealSequencePreviewOverlay();
-                e.Handled = true;
-            }
-        }
-
-        private void UnrealSequencePreviewOverlay_RightTapped(object sender, RightTappedRoutedEventArgs e)
-        {
-            CloseUnrealSequencePreviewOverlay();
-            e.Handled = true;
+            ShowFloatingTip(
+                sync.ReloadPublishResult() ? InfoBarSeverity.Success : InfoBarSeverity.Warning,
+                "同步结果已重新加载",
+                sync.ImportResultMessage);
         }
 
         private double CaptureUnrealProjectSyncScrollOffset()

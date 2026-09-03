@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
@@ -53,7 +54,17 @@ internal sealed class BuffService
             }
         }
 
-        return NormalizeCore(character, data, syncFolders: false, resolvePaths: true);
+        data.Buffs = new ObservableCollection<BuffEntry>(data.Buffs
+            .OrderBy(buff => buff.Index > 0 ? buff.Index : ResolveGeneratedIndex(character.Code, buff.GeneratedCode))
+            .ThenBy(buff => buff.GeneratedCode, StringComparer.OrdinalIgnoreCase));
+
+        var normalized = NormalizeCore(character, data, syncFolders: true, resolvePaths: true);
+        foreach (var buff in normalized.Buffs)
+        {
+            WriteBuffFile(character, buff, normalized.UpdatedAt);
+        }
+
+        return normalized;
     }
 
     public void Save(CharacterCard character, BuffData data)
@@ -63,24 +74,17 @@ internal sealed class BuffService
         Directory.CreateDirectory(GetBuffRootPath(character));
         var normalized = NormalizeCore(character, Clone(data), syncFolders: true, resolvePaths: true);
         normalized.UpdatedAt = DateTime.Now;
-        var activeCodes = normalized.Buffs
-            .Select(buff => buff.GeneratedCode)
-            .Where(code => !string.IsNullOrWhiteSpace(code))
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
         foreach (var buff in normalized.Buffs)
         {
             WriteBuffFile(character, buff, normalized.UpdatedAt);
         }
-
-        DeleteStaleBuffFolders(character, activeCodes);
     }
 
     public void ImportIcon(CharacterCard character, BuffEntry buff, string sourcePath)
     {
         var targetPath = ImportIconFile(character, buff.GeneratedCode, sourcePath);
         buff.IconPath = targetPath;
-        buff.IconUri = new Uri(targetPath).AbsoluteUri;
+        buff.IconUri = CreateIconUri(targetPath);
     }
 
     public string ImportIconFile(CharacterCard character, string generatedCode, string sourcePath)
@@ -115,7 +119,7 @@ internal sealed class BuffService
         }
 
         buff.IconPath = targetPath;
-        buff.IconUri = new Uri(targetPath).AbsoluteUri;
+        buff.IconUri = CreateIconUri(targetPath);
         return true;
     }
 
@@ -177,10 +181,10 @@ internal sealed class BuffService
             GainType = "增益",
             DamageType = "发送方-属性",
             TaskPriority = "正常",
-            Stacks = "0",
-            CompleteStacks = "3",
-            Strength = "1",
-            CompleteStrength = "10",
+            Stacks = 0,
+            CompleteStacks = 3,
+            Strength = 1,
+            CompleteStrength = 10,
             ReadStatus = "手动创建"
         };
     }
@@ -195,17 +199,21 @@ internal sealed class BuffService
         CharacterCard character,
         IEnumerable<BuffEntry> buffs,
         bool syncFolders = false,
-        bool resolvePaths = false)
+        bool resolvePaths = false,
+        int? totalCountOverride = null)
     {
+        var entries = buffs.ToList();
+        var totalCount = Math.Max(entries.Count, totalCountOverride ?? entries.Count);
         var index = 1;
-        foreach (var buff in buffs)
+        foreach (var buff in entries)
         {
             var previousGeneratedCode = buff.GeneratedCode;
             buff.Index = index;
             var suffix = SanitizeCode(buff.UserCode);
+            var formattedIndex = MaterialSequenceNaming.FormatIndex(index, totalCount);
             buff.GeneratedCode = string.IsNullOrWhiteSpace(suffix)
-                ? $"{character.Code}_BUFF-{index}"
-                : $"{character.Code}_BUFF-{index}-{suffix}";
+                ? $"{character.Code}_BUFF-{formattedIndex}"
+                : $"{character.Code}_BUFF-{formattedIndex}-{suffix}";
             if (syncFolders &&
                 !string.IsNullOrWhiteSpace(previousGeneratedCode) &&
                 !string.Equals(previousGeneratedCode, buff.GeneratedCode, StringComparison.OrdinalIgnoreCase))
@@ -315,6 +323,7 @@ internal sealed class BuffService
     {
         return new BuffEntry
         {
+            SyncId = buff.SyncId,
             Index = buff.Index,
             UserCode = buff.UserCode,
             GeneratedCode = buff.GeneratedCode,
@@ -328,13 +337,34 @@ internal sealed class BuffService
             CompleteStacks = buff.CompleteStacks,
             Strength = buff.Strength,
             CompleteStrength = buff.CompleteStrength,
+            CompletedCount = buff.CompletedCount,
+            EndsWhenStacksReachZero = buff.EndsWhenStacksReachZero,
             OwnerText = buff.OwnerText,
             TaskPriority = buff.TaskPriority,
             TriggerTiming = buff.TriggerTiming,
             ConditionSummary = buff.ConditionSummary,
             ReadStatus = buff.ReadStatus,
             SourceAssetPath = buff.SourceAssetPath,
-            Draft = buff.Draft
+            Draft = buff.Draft,
+            InitializationNotes = buff.InitializationNotes,
+            ConditionUpdateNotes = buff.ConditionUpdateNotes,
+            CompletionNotes = buff.CompletionNotes,
+            RemovalNotes = buff.RemovalNotes,
+            Effects = new ObservableCollection<BuffEffectModule>(buff.Effects.Select(Clone))
+        };
+    }
+
+    private static BuffEffectModule Clone(BuffEffectModule effect)
+    {
+        return new BuffEffectModule
+        {
+            EffectType = effect.EffectType,
+            Target = effect.Target,
+            Attribute = effect.Attribute,
+            Operation = effect.Operation,
+            Value = effect.Value,
+            PerStackValue = effect.PerStackValue,
+            ImplementationNotes = effect.ImplementationNotes
         };
     }
 
@@ -348,13 +378,18 @@ internal sealed class BuffService
         data.Buffs ??= [];
         foreach (var buff in data.Buffs)
         {
+            buff.SyncId = string.IsNullOrWhiteSpace(buff.SyncId)
+                ? Guid.NewGuid().ToString("N")
+                : buff.SyncId.Trim();
             buff.GainType = string.IsNullOrWhiteSpace(buff.GainType) ? "增益" : buff.GainType;
             buff.DamageType = NormalizeDamageType(buff.DamageType);
             buff.TaskPriority = NormalizeTaskPriority(buff.TaskPriority);
-            buff.Stacks = NormalizeIntegerText(buff.Stacks, "0");
-            buff.CompleteStacks = NormalizeIntegerText(buff.CompleteStacks, "3");
-            buff.Strength = NormalizeIntegerText(buff.Strength, "1");
-            buff.CompleteStrength = NormalizeIntegerText(buff.CompleteStrength, "10");
+            buff.Stacks = Math.Max(0, buff.Stacks);
+            buff.CompleteStacks = Math.Max(0, buff.CompleteStacks);
+            buff.Strength = Math.Max(0, buff.Strength);
+            buff.CompleteStrength = Math.Max(0, buff.CompleteStrength);
+            buff.CompletedCount = Math.Max(0, buff.CompletedCount);
+            buff.Effects ??= [];
             buff.ReadStatus = string.IsNullOrWhiteSpace(buff.ReadStatus) ? "工具箱数据" : buff.ReadStatus;
             if (resolvePaths)
             {
@@ -364,8 +399,27 @@ internal sealed class BuffService
             RefreshIconUri(character, buff);
         }
 
-        RefreshNamingCore(character, data.Buffs, syncFolders, resolvePaths);
+        var totalCount = syncFolders
+            ? Math.Max(data.Buffs.Count, EnumerateBuffFilePaths(character).Count())
+            : data.Buffs.Count;
+        RefreshNamingCore(character, data.Buffs, syncFolders, resolvePaths, totalCount);
         return data;
+    }
+
+    private static int ResolveGeneratedIndex(string characterCode, string generatedCode)
+    {
+        var prefix = $"{characterCode}_BUFF-";
+        if (!generatedCode.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return int.MaxValue;
+        }
+
+        var remainder = generatedCode[prefix.Length..];
+        var separatorIndex = remainder.IndexOf('-');
+        var indexText = separatorIndex >= 0 ? remainder[..separatorIndex] : remainder;
+        return int.TryParse(indexText, out var index) && index > 0
+            ? index
+            : int.MaxValue;
     }
 
     private void MigrateLegacyBuffsIfNeeded(CharacterCard character)
@@ -448,30 +502,6 @@ internal sealed class BuffService
         PruneBackups(folderPath);
     }
 
-    private static void DeleteStaleBuffFolders(CharacterCard character, ISet<string> activeCodes)
-    {
-        var rootPath = Path.Combine(character.FolderPath, BuffFolderName);
-        if (!Directory.Exists(rootPath))
-        {
-            return;
-        }
-
-        foreach (var directoryPath in Directory.EnumerateDirectories(rootPath))
-        {
-            var folderName = Path.GetFileName(directoryPath);
-            if (activeCodes.Contains(folderName))
-            {
-                continue;
-            }
-
-            var buffFilePath = Path.Combine(directoryPath, BuffFileName);
-            if (File.Exists(buffFilePath))
-            {
-                Directory.Delete(directoryPath, recursive: true);
-            }
-        }
-    }
-
     private static void BackupLegacyToolboxData(CharacterCard character, string legacyPath)
     {
         var backupFolderPath = Path.Combine(character.ToolFolderPath, LegacyBackupsFolderName);
@@ -542,9 +572,19 @@ internal sealed class BuffService
     private static void RefreshIconUri(CharacterCard character, BuffEntry buff)
     {
         var resolvedPath = ResolveCharacterPath(character, buff.IconPath);
-        buff.IconUri = File.Exists(resolvedPath)
-            ? new Uri(resolvedPath).AbsoluteUri
-            : string.Empty;
+        buff.IconUri = CreateIconUri(resolvedPath);
+    }
+
+    internal static string CreateIconUri(string filePath)
+    {
+        if (string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+        {
+            return string.Empty;
+        }
+
+        var info = new FileInfo(filePath);
+        var version = $"{info.LastWriteTimeUtc.Ticks}-{info.Length}";
+        return $"{new Uri(info.FullName).AbsoluteUri}?v={Uri.EscapeDataString(version)}";
     }
 
     private static string ResolveCharacterPath(CharacterCard character, string value)
@@ -589,6 +629,11 @@ internal sealed class BuffService
 
     private static string NormalizeDamageType(string value)
     {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
         return value switch
         {
             "属性-打击方" => "发送方-属性",
@@ -611,13 +656,6 @@ internal sealed class BuffService
             "Urgent" => "紧急",
             _ => "正常"
         };
-    }
-
-    private static string NormalizeIntegerText(string value, string fallback)
-    {
-        return int.TryParse(value, out var parsed)
-            ? parsed.ToString()
-            : fallback;
     }
 
     private static void CropCenterToPng(string sourcePath, string targetPath, int targetWidth, int targetHeight)

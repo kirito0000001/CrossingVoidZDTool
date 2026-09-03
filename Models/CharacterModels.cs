@@ -41,15 +41,6 @@ internal sealed record CharacterReferenceImage(
     string FileUri,
     DateTime UpdatedAt);
 
-internal sealed record CharacterPortraitEntry(string Name, string Code, string CoverUri)
-{
-    public string EffectiveDisplayName => string.IsNullOrWhiteSpace(Name) ? Code : Name;
-
-    public string EffectiveCoverUri => string.IsNullOrWhiteSpace(CoverUri)
-        ? "ms-appx:///Assets/DefaultPortrait.png"
-        : CoverUri;
-}
-
 internal sealed record CharacterCreationResult(CharacterCard Character, bool CreatedNewFolder);
 
 internal sealed record CharacterBackupEntry(

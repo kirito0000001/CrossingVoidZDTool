@@ -1,6 +1,8 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using CrossingVoidZDTool.Services;
@@ -25,6 +27,43 @@ namespace CrossingVoidZDTool
 {
     public sealed partial class MainWindow
     {
+        private void ShellNavigation_Loaded(object sender, RoutedEventArgs e)
+        {
+            var menuScrollViewer = FindNamedDescendant<ScrollViewer>(
+                ShellNavigation,
+                "MenuItemsScrollViewer");
+            if (menuScrollViewer is null)
+            {
+                return;
+            }
+
+            menuScrollViewer.VerticalScrollMode = ScrollMode.Enabled;
+            menuScrollViewer.VerticalScrollBarVisibility = ScrollBarVisibility.Auto;
+            menuScrollViewer.IsVerticalRailEnabled = true;
+        }
+
+        private static T? FindNamedDescendant<T>(DependencyObject root, string name)
+            where T : FrameworkElement
+        {
+            var childCount = VisualTreeHelper.GetChildrenCount(root);
+            for (var index = 0; index < childCount; index++)
+            {
+                var child = VisualTreeHelper.GetChild(root, index);
+                if (child is T element && string.Equals(element.Name, name, StringComparison.Ordinal))
+                {
+                    return element;
+                }
+
+                var match = FindNamedDescendant<T>(child, name);
+                if (match is not null)
+                {
+                    return match;
+                }
+            }
+
+            return null;
+        }
+
         private void ShellNavigation_SelectionChanged(NavigationView sender, NavigationViewSelectionChangedEventArgs args)
         {
             if (args.SelectedItem is not NavigationViewItem item || item.Tag is not string tag)
@@ -108,40 +147,82 @@ namespace CrossingVoidZDTool
 
         private void ShowSt2MaterialPage()
         {
+            if (!TryEnterCharacterEditingPage())
+            {
+                return;
+            }
+
             ShowOnlyPage(LineArtPage);
             SelectShellNavigationItem(St2MaterialNavItem);
             StartBaseMaterialWatcher();
-            _ = RefreshBaseMaterialsWithFeedbackAsync();
+            _ = RestorePageScrollPositionAfterAsync(LineArtPage, RefreshBaseMaterialsWithFeedbackAsync());
         }
 
         private void ShowSt3CharacterInfoPage()
         {
+            if (!TryEnterCharacterEditingPage())
+            {
+                return;
+            }
+
             ShowOnlyPage(UnrealSyncPage);
             SelectShellNavigationItem(St3CharacterInfoNavItem);
-            _ = RefreshCharacterInfoWithFeedbackAsync();
+            _ = RestorePageScrollPositionAfterAsync(UnrealSyncPage, RefreshCharacterInfoWithFeedbackAsync());
         }
 
         private void ShowSt4SkillsPage()
         {
+            if (!TryEnterCharacterEditingPage())
+            {
+                return;
+            }
+
             ShowOnlyPage(SkillsPage);
             SelectShellNavigationItem(St4SkillsNavItem);
-            _ = RefreshSkillsWithFeedbackAsync();
+            _ = RestorePageScrollPositionAfterAsync(SkillsPage, RefreshSkillsWithFeedbackAsync());
         }
 
         private void ShowSt5SequenceFramesPage()
         {
+            if (!TryEnterCharacterEditingPage())
+            {
+                return;
+            }
+
             ShowOnlyPage(SequenceFramesPage);
             SelectShellNavigationItem(St5SequenceFramesNavItem);
             MarkLastEditedModule("SequenceFrames");
-            _ = RefreshSequenceFramesWithFeedbackAsync();
+            _ = RestorePageScrollPositionAfterAsync(SequenceFramesPage, RefreshSequenceFramesWithFeedbackAsync());
         }
 
         private void ShowSt6BuffsPage()
         {
+            if (!TryEnterCharacterEditingPage())
+            {
+                return;
+            }
+
             ShowOnlyPage(BuffsPage);
             SelectShellNavigationItem(St6BuffsNavItem);
-            _ = RefreshBuffsWithFeedbackAsync();
+            _ = RestorePageScrollPositionAfterAsync(BuffsPage, RefreshBuffsWithFeedbackAsync());
             RefreshProductionStatusWithFeedback();
+        }
+
+        private bool TryEnterCharacterEditingPage()
+        {
+            if (CharacterDesk.CurrentCharacter?.IsCompleted != true)
+            {
+                return true;
+            }
+
+            var character = CharacterDesk.CurrentCharacter;
+            ShowCharacterDeskPage();
+            ShowFloatingTip(
+                InfoBarSeverity.Warning,
+                "角色已完成并锁定",
+                $"请在 {character.EffectiveDisplayName} 的详情中点击“继续编辑”，恢复为草稿后再进入制作步骤。");
+            AppendLog(LogKind.Warning, $"阻止编辑已完成角色：{character.Name} / {character.Code}");
+            return false;
         }
 
         private void ShowUnrealProjectSyncPage()
@@ -149,12 +230,37 @@ namespace CrossingVoidZDTool
             ShowOnlyPage(UnrealProjectSyncPage);
             SelectShellNavigationItem(UnrealProjectSyncNavItem);
             _applicationViewModel.UnrealProjectSync.Load(Settings.UnrealEnginePath, Settings.UnrealProjectPath);
+            var preferredCode = CharacterDesk.CurrentCharacter?.IsCompleted == true
+                ? CharacterDesk.CurrentCharacter.Code
+                : CharacterDesk.LastEditedCharacter?.IsCompleted == true
+                    ? CharacterDesk.LastEditedCharacter.Code
+                    : null;
+            var restoreResult = _applicationViewModel.UnrealProjectSync.RefreshDraftSources(
+                CharacterDesk.CompletedCharacters,
+                preferredCode);
+            if (restoreResult.Status == UnrealSyncSessionCacheLoadStatus.Invalid)
+            {
+                var exception = new InvalidDataException(restoreResult.ErrorMessage);
+                AppendLog(LogKind.Error, "无法恢复虚幻同步进度，将忽略旧状态并返回底层检测。", exception);
+                ShowFloatingTip(InfoBarSeverity.Warning, "无法恢复同步进度", restoreResult.ErrorMessage);
+            }
+
+            if (!_applicationViewModel.UnrealProjectSync.IsEngineToToolbox &&
+                _applicationViewModel.UnrealProjectSync.SelectedSource?.DraftCharacter is { Code: var characterCode })
+            {
+                _applicationViewModel.UnrealProjectSync.RefreshFoundationChecks(characterCode);
+            }
             AppendLog(LogKind.Info, "已检测虚幻同步台关联状态。");
         }
 
-        private void ShowLastEditedPage()
+        private string? GetLastEditedModuleTag()
         {
-            var tag = _applicationViewModel.UserOperations.LastOperationModuleTag ?? Settings.LastEditedModuleTag;
+            return _applicationViewModel.UserOperations.LastOperationModuleTag ?? Settings.LastEditedModuleTag;
+        }
+
+        private void ShowLastEditedPage(string? tag = null)
+        {
+            tag ??= GetLastEditedModuleTag();
             if (string.Equals(tag, "LineArt", StringComparison.Ordinal))
             {
                 ShowSt2MaterialPage();
@@ -207,6 +313,11 @@ namespace CrossingVoidZDTool
 
         private void ShowOnlyPage(FrameworkElement visiblePage)
         {
+            if (!ReferenceEquals(visiblePage, LineArtPage))
+            {
+                StopVoicePlayback();
+            }
+
             FrameworkElement[] pages =
             [
                 CharacterDeskPage,
@@ -219,6 +330,8 @@ namespace CrossingVoidZDTool
                 UnrealProjectSyncPage,
                 SettingsPage
             ];
+
+            SaveVisiblePageScrollPosition(pages);
 
             foreach (var page in pages)
             {
@@ -237,6 +350,121 @@ namespace CrossingVoidZDTool
             }
 
             PlayPageEntrance(visiblePage);
+            QueuePageScrollPositionRestore(visiblePage);
+        }
+
+        private void SaveVisiblePageScrollPosition(IReadOnlyList<FrameworkElement> pages)
+        {
+            var visiblePage = pages.FirstOrDefault(page => page.Visibility == Visibility.Visible);
+            var scrollContext = visiblePage is null ? null : GetPageScrollContext(visiblePage);
+            if (scrollContext is not null)
+            {
+                _pageScrollPositions.Save(scrollContext.Value.PageKey, scrollContext.Value.ScrollViewer.VerticalOffset);
+            }
+        }
+
+        private async Task RestorePageScrollPositionAfterAsync(FrameworkElement page, Task refreshTask)
+        {
+            await refreshTask;
+            if (page.Visibility == Visibility.Visible)
+            {
+                QueuePageScrollPositionRestore(page);
+            }
+        }
+
+        private async Task RunWithPageScrollPositionPreservedAsync(FrameworkElement page, Func<Task> operation)
+        {
+            var scrollContext = GetPageScrollContext(page);
+            if (scrollContext is null)
+            {
+                await operation();
+                return;
+            }
+
+            _pageScrollPositions.Save(
+                scrollContext.Value.PageKey,
+                scrollContext.Value.ScrollViewer.VerticalOffset);
+
+            try
+            {
+                await operation();
+            }
+            finally
+            {
+                if (page.Visibility == Visibility.Visible)
+                {
+                    QueuePageScrollPositionRestore(page);
+                }
+            }
+        }
+
+        private void QueuePageScrollPositionRestore(FrameworkElement page)
+        {
+            var scrollContext = GetPageScrollContext(page);
+            if (scrollContext is null)
+            {
+                return;
+            }
+
+            DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, () =>
+            {
+                if (page.Visibility != Visibility.Visible)
+                {
+                    return;
+                }
+
+                var context = GetPageScrollContext(page);
+                if (context is null)
+                {
+                    return;
+                }
+
+                context.Value.ScrollViewer.UpdateLayout();
+                var targetOffset = Math.Min(
+                    _pageScrollPositions.Get(context.Value.PageKey),
+                    context.Value.ScrollViewer.ScrollableHeight);
+                context.Value.ScrollViewer.ChangeView(null, targetOffset, null, disableAnimation: true);
+            });
+        }
+
+        private (string PageKey, ScrollViewer ScrollViewer)? GetPageScrollContext(FrameworkElement page)
+        {
+            if (ReferenceEquals(page, LineArtPage))
+            {
+                return ("LineArt", LineArtScrollViewer);
+            }
+
+            if (ReferenceEquals(page, UnrealSyncPage))
+            {
+                return ("UnrealSync", UnrealSyncScrollViewer);
+            }
+
+            if (ReferenceEquals(page, SkillsPage))
+            {
+                return ("Skills", SkillsScrollViewer);
+            }
+
+            if (ReferenceEquals(page, SequenceFramesPage))
+            {
+                return ("SequenceFrames", SequenceFramesScrollViewer);
+            }
+
+            if (ReferenceEquals(page, BuffsPage))
+            {
+                return ("Buffs", BuffsScrollViewer);
+            }
+
+            if (ReferenceEquals(page, UnrealProjectSyncPage))
+            {
+                return ("UnrealProjectSync", UnrealProjectSyncPage);
+            }
+
+            if (ReferenceEquals(page, SettingsPage))
+            {
+                return ("Settings", SettingsPage);
+            }
+
+            return null;
         }
 
         private void PageBlankArea_RightTapped(object sender, RightTappedRoutedEventArgs e)
@@ -262,6 +490,12 @@ namespace CrossingVoidZDTool
 
         private bool CloseTopTransientLayer()
         {
+            if (CharacterDetailHost.Visibility == Visibility.Visible)
+            {
+                HideCharacterDetail();
+                return true;
+            }
+
             if (BaseMaterialCropHost.Visibility == Visibility.Visible)
             {
                 CompleteBaseMaterialCrop(null);

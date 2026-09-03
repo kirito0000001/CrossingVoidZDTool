@@ -6,6 +6,8 @@ namespace CrossingVoidZDTool;
 
 internal sealed class CharacterSkillsData
 {
+    public int SchemaVersion { get; set; }
+
     public ObservableCollection<CharacterSkillEntry> FirstSkill { get; set; } = [];
 
     public ObservableCollection<CharacterSkillEntry> SecondSkill { get; set; } = [];
@@ -37,6 +39,8 @@ internal sealed class CharacterSkillEntry : CrossingVoidZDTool.ViewModels.Observ
     private string _comboCharacterName = string.Empty;
     private bool _isExpanded;
     private bool _canDelete = true;
+
+    public string SyncId { get; set; } = Guid.NewGuid().ToString("N");
 
     public ObservableCollection<SkillMultiplierLevel> LevelMultipliers { get; set; } = [];
 

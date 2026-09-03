@@ -39,6 +39,8 @@ namespace CrossingVoidZDTool
                 CharacterDesk.ReplaceCharacter(completed);
                 PersistCurrentCharacterSelection();
                 RefreshProductionStatusWithFeedback();
+                ShowCharacterDeskPage();
+                ShowCharacterDetail(completed);
                 ShowFloatingTip(InfoBarSeverity.Success, "角色制作已完成", completed.Name);
                 AppendLog(LogKind.User, $"完成角色制作：{completed.Name} / {completed.Code}");
             }

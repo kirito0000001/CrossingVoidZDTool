@@ -25,6 +25,8 @@ internal sealed class AppSettings
     public string? UnrealEnginePath { get; set; }
 
     public string? UnrealProjectPath { get; set; }
+
+    public bool BackupBeforeUnrealSync { get; set; } = true;
 }
 
 internal sealed record MigrationResult(int FileCount, int DirectoryCount);
