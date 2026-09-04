@@ -18,6 +18,7 @@ namespace CrossingVoidZDTool.Services;
 [JsonSerializable(typeof(CharacterToolboxData))]
 [JsonSerializable(typeof(CharacterBackupMeta))]
 [JsonSerializable(typeof(UnrealProjectExportManifest))]
+[JsonSerializable(typeof(UnrealProjectExportTeamSelect))]
 [JsonSerializable(typeof(UnrealExportProgressState))]
 [JsonSerializable(typeof(UnrealProjectExportCharacterBuffSet))]
 [JsonSerializable(typeof(UnrealProjectExportBuff))]
@@ -34,6 +35,9 @@ namespace CrossingVoidZDTool.Services;
 [JsonSerializable(typeof(UnrealSyncNormalizationCacheItem))]
 [JsonSerializable(typeof(UnrealAssetNormalizationCandidate))]
 [JsonSerializable(typeof(UnrealRemotePythonJob))]
+[JsonSerializable(typeof(UnrealLightConfigurationRequest))]
+[JsonSerializable(typeof(UnrealLightConfigurationResult))]
+[JsonSerializable(typeof(UnrealLightConfigurationResultItem))]
 internal sealed partial class AppJsonSerializerContext : JsonSerializerContext
 {
 }

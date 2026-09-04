@@ -113,6 +113,7 @@ internal sealed class UnrealSyncSessionCacheService
                 File.ReadAllText(path, Encoding.UTF8),
                 AppJsonSerializerContext.Default.UnrealSyncSessionCache);
             if (cache is null || cache.ProtocolVersion != 3 || cache.PublishChanges is null || cache.SelectedStableIds is null || cache.NormalizationDecisions is null || cache.NormalizationItems is null ||
+                cache.LightConfigurationItems is null || cache.SelectedLightConfigurationIds is null ||
                 cache.NormalizationItems.Any(item => item is null || item.Candidates is null) ||
                 !string.Equals(Normalize(cache.ProjectPath), Normalize(projectPath), StringComparison.OrdinalIgnoreCase))
             {

@@ -117,6 +117,8 @@ var tests = new (string Name, Action Run)[]
     ("无旧基线时已有配对素材先迁移为未修改", UnrealBridgeDiffMigratesMatchedItemsWithoutBaseline),
     ("特殊字符清洗后的语音仍按规范路径配对", UnrealBridgeDiffPairsSanitizedVoiceNames),
     ("规范连字符语音不会误报改名", UnrealBridgeDiffKeepsCanonicalVoiceNameUnchanged),
+    ("虚幻基础配置使用独立第四步工作区", UnrealLightConfigurationUsesDedicatedFourthStep),
+    ("虚幻基础配置脚本遵守确认字段白名单", UnrealLightConfigurationScriptUsesConfirmedWhitelist),
     ("新基线按源文件哈希识别工具箱更新", UnrealBridgeDiffDetectsSourceFileChangeAfterMigration),
     ("虚幻执行计划只包含选中项且删除排最后", UnrealBridgeExecutionPlanUsesSelectedChangesAndDeletesLast),
     ("虚幻语音发布计划创建分类目录并规范名称", UnrealBridgeVoicePublishCreatesCategoryFolder),
@@ -5046,6 +5048,81 @@ static void UnrealBridgeDiffKeepsCanonicalVoiceNameUnchanged()
 
     AssertEqual(UnrealBridgeChangeKind.Unchanged, change.Kind);
     AssertEqual(false, change.IsSelected);
+}
+
+static void UnrealLightConfigurationUsesDedicatedFourthStep()
+{
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService())
+    {
+        IsEngineToToolbox = false
+    };
+    viewModel.ReturnToWorkflowStep(4);
+    viewModel.SetLightConfigurationResult(new UnrealLightConfigurationResult
+    {
+        Succeeded = true,
+        CharacterCode = "Misaka",
+        Items =
+        {
+            new UnrealLightConfigurationResultItem
+            {
+                StableId = "item.speed",
+                GroupName = "Item 配置",
+                DisplayName = "速度",
+                TargetPath = "/Game/ITems/CharItemS/Item_Misaka.Item_Misaka",
+                TargetField = "ItemData.CharData.Speed",
+                SourceSummary = "CharacterInfo.Speed",
+                CurrentSummary = "550",
+                TargetSummary = "720",
+                Status = UnrealLightConfigurationStatus.Pending
+            },
+            new UnrealLightConfigurationResultItem
+            {
+                StableId = "item.health",
+                GroupName = "Item 配置",
+                DisplayName = "生命值",
+                Status = UnrealLightConfigurationStatus.Unchanged
+            }
+        }
+    });
+
+    AssertEqual("基础配置", viewModel.WorkspaceTitle);
+    AssertEqual(1, viewModel.LightConfigurationItems.Count);
+    AssertEqual(1, viewModel.LightConfigurationSelectedCount);
+    AssertEqual(1, viewModel.LightConfigurationPendingCount);
+    AssertEqual(1, viewModel.LightConfigurationUnchangedCount);
+    AssertEqual(true, viewModel.CanApplyLightConfiguration);
+}
+
+static void UnrealLightConfigurationScriptUsesConfirmedWhitelist()
+{
+    var scriptPath = Path.Combine(
+        Directory.GetCurrentDirectory(),
+        "Tools",
+        "UnrealBridge",
+        "configure_unreal_light_settings.py");
+    var source = File.ReadAllText(scriptPath);
+
+    AssertEqual(true, source.Contains("team.voice", StringComparison.Ordinal));
+    AssertEqual(true, source.Contains("item.passive", StringComparison.Ordinal));
+    AssertEqual(true, source.Contains("meta.waves", StringComparison.Ordinal));
+    AssertEqual(true, source.Contains("voice.talk-concurrency", StringComparison.Ordinal));
+    AssertEqual(false, source.Contains("CharShapeNow", StringComparison.Ordinal));
+    AssertEqual(false, source.Contains("SkillNow", StringComparison.Ordinal));
+    AssertEqual(false, source.Contains("SkillHave", StringComparison.Ordinal));
+    AssertEqual(false, source.Contains("SkillLevel", StringComparison.Ordinal));
+    AssertEqual(false, source.Contains("Synchronize", StringComparison.Ordinal));
+
+    var exportSource = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(),
+        "Tools",
+        "Unreal",
+        "export_zd_assets.py"));
+    AssertEqual(true, exportSource.Contains("UI_TeamSelect", StringComparison.Ordinal));
+    AssertEqual(true, exportSource.Contains("CharVoice", StringComparison.Ordinal));
+
+    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    AssertEqual(true, xaml.Contains("LightConfigurationItems", StringComparison.Ordinal));
+    AssertEqual(true, xaml.Contains("ApplyUnrealLightConfigurationButton_Click", StringComparison.Ordinal));
 }
 
 static void UnrealBridgeDiffDetectsSourceFileChangeAfterMigration()

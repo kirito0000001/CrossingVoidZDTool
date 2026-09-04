@@ -486,37 +486,65 @@ namespace CrossingVoidZDTool
 
         private static string FormatExceptionForLog(Exception exception, int? stackTraceLineLimit = null)
         {
-            var lines = new List<string>();
-            for (Exception? current = exception; current is not null; current = current.InnerException)
+            try
             {
-                var message = string.IsNullOrWhiteSpace(current.Message) ? "<empty message>" : current.Message;
-                var hResult = current.HResult == 0 ? string.Empty : $" HRESULT=0x{current.HResult:X8}";
-                lines.Add($"    Exception={current.GetType().FullName}{hResult} Message={message}");
-                if (current is COMException comException)
+                var lines = new List<string>();
+                for (Exception? current = exception; current is not null; current = current.InnerException)
                 {
-                    lines.Add($"    COMErrorCode=0x{comException.ErrorCode:X8}");
-                }
-            }
+                    var typeName = current.GetType().FullName ?? current.GetType().Name;
+                    var message = string.IsNullOrWhiteSpace(current.Message) ? "<empty message>" : current.Message;
+                    var hResult = current.HResult == 0 ? string.Empty : $" HRESULT=0x{current.HResult:X8}";
+                    lines.Add($"    Exception={typeName}{hResult}");
+                    foreach (var messageLine in message.Split(["\r\n", "\n", "\r"], StringSplitOptions.None))
+                    {
+                        lines.Add($"    Message={messageLine}");
+                    }
 
-            if (!string.IsNullOrWhiteSpace(exception.StackTrace))
+                    if (current is COMException comException)
+                    {
+                        lines.Add($"    COMErrorCode=0x{comException.ErrorCode:X8}");
+                    }
+
+                    try
+                    {
+                        foreach (var key in current.Data.Keys)
+                        {
+                            lines.Add($"    Data[{key}]={current.Data[key]}");
+                        }
+                    }
+                    catch (Exception dataException)
+                    {
+                        lines.Add($"    DataReadError={dataException.GetType().Name}: {dataException.Message}");
+                    }
+                }
+
+                if (!string.IsNullOrWhiteSpace(exception.StackTrace))
+                {
+                    lines.Add("    StackTrace:");
+                    var stackTraceLines = exception.StackTrace
+                        .Split(["\r\n", "\n", "\r"], StringSplitOptions.RemoveEmptyEntries)
+                        .Select(line => $"        {line.Trim()}")
+                        .ToList();
+                    var emittedStackTraceLines = stackTraceLineLimit is null
+                        ? stackTraceLines
+                        : stackTraceLines.Take(stackTraceLineLimit.Value).ToList();
+                    lines.AddRange(emittedStackTraceLines);
+                    if (stackTraceLineLimit is not null && stackTraceLines.Count > stackTraceLineLimit.Value)
+                    {
+                        lines.Add($"        ... stack trace trimmed for clipboard ({stackTraceLines.Count - stackTraceLineLimit.Value} more lines in UI)");
+                    }
+                }
+
+                return string.Join(Environment.NewLine, lines);
+            }
+            catch (Exception formattingException)
             {
-                lines.Add("    StackTrace:");
-                var stackTraceLines = exception.StackTrace
-                    .Split(Environment.NewLine)
-                    .Where(line => !string.IsNullOrWhiteSpace(line))
-                    .Select(line => $"        {line.Trim()}")
-                    .ToList();
-                var emittedStackTraceLines = stackTraceLineLimit is null
-                    ? stackTraceLines
-                    : stackTraceLines.Take(stackTraceLineLimit.Value).ToList();
-                lines.AddRange(emittedStackTraceLines);
-                if (stackTraceLineLimit is not null && stackTraceLines.Count > stackTraceLineLimit.Value)
-                {
-                    lines.Add($"        ... stack trace trimmed for clipboard ({stackTraceLines.Count - stackTraceLineLimit.Value} more lines in UI)");
-                }
+                // 日志格式化不能遮蔽原始异常；任何异常对象都至少要留下类型和消息。
+                var typeName = exception.GetType().FullName ?? exception.GetType().Name;
+                var message = exception.Message ?? "<empty message>";
+                return $"    Exception={typeName}\n    Message={message}\n" +
+                    $"    LogFormattingError={formattingException.GetType().Name}: {formattingException.Message}";
             }
-
-            return string.Join(Environment.NewLine, lines);
         }
 
         private static Style GetLogTextStyle(LogKind kind)

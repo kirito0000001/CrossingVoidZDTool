@@ -18,6 +18,37 @@
         x:Name="RootGrid"
         KeyboardAcceleratorPlacementMode="Hidden">
         <Grid.Resources>
+            <Style x:Key="UnrealLightConfigurationValuesControlStyle" TargetType="ItemsControl">
+                <Setter Property="HorizontalAlignment" Value="Stretch" />
+                <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+            </Style>
+            <ItemsPanelTemplate x:Key="UnrealLightConfigurationValuesPanelTemplate">
+                <StackPanel Orientation="Vertical" />
+            </ItemsPanelTemplate>
+            <DataTemplate x:Key="UnrealLightConfigurationErrorValueTemplate">
+                <Border
+                    Margin="0,0,0,4"
+                    Padding="6,3"
+                    HorizontalAlignment="Stretch"
+                    Style="{StaticResource LogErrorBlockStyle}">
+                    <TextBlock
+                        Style="{StaticResource LogErrorTextStyle}"
+                        Text="{Binding}"
+                        TextWrapping="Wrap" />
+                </Border>
+            </DataTemplate>
+            <DataTemplate x:Key="UnrealLightConfigurationDefaultValueTemplate">
+                <Border
+                    Margin="0,0,0,4"
+                    Padding="6,3"
+                    HorizontalAlignment="Stretch"
+                    Style="{StaticResource LogDefaultBlockStyle}">
+                    <TextBlock
+                        Style="{StaticResource LogDefaultTextStyle}"
+                        Text="{Binding}"
+                        TextWrapping="Wrap" />
+                </Border>
+            </DataTemplate>
             <DataTemplate x:Key="VoiceMaterialPrimaryItemTemplate">
                 <Grid MinHeight="40" Margin="0,2,0,2" ColumnSpacing="8">
                     <Grid.ColumnDefinitions>
@@ -753,6 +784,7 @@
                                     FontSize="18"
                                     Header="草稿本"
                                     IsEnabled="{Binding CharacterDesk.HasCurrentCharacter, Mode=OneWay}"
+                                    IsReadOnly="{Binding CharacterDesk.IsViewOnly, Mode=OneWay}"
                                     PlaceholderText="在这里记录设计理念、灵感、动作想法和临时草稿。"
                                     Text="{Binding CharacterDesk.DraftText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                     TextWrapping="Wrap"
@@ -775,7 +807,7 @@
                                             <Button
                                                 Grid.Column="1"
                                                 Click="ImportReferenceImagesButton_Click"
-                                                IsEnabled="{Binding CharacterDesk.HasCurrentCharacter, Mode=OneWay}"
+                                                IsEnabled="{Binding CharacterDesk.CanEditCurrentCharacter, Mode=OneWay}"
                                                 Style="{StaticResource IconToolButtonStyle}"
                                                 >
                                                 <SymbolIcon Symbol="Import" />
@@ -790,10 +822,10 @@
                                             </Button>
                                         </Grid>
                                     </Expander.Header>
-                                    <Border
-                                        MinHeight="260"
-                                        Padding="12"
-                                        AllowDrop="True"
+                                        <Border
+                                            MinHeight="260"
+                                            Padding="12"
+                                            AllowDrop="{Binding CharacterDesk.CanEditCurrentCharacter, Mode=OneWay}"
                                         Background="{ThemeResource LayerFillColorDefaultBrush}"
                                         BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                         BorderThickness="1"
@@ -875,6 +907,12 @@
                         <StackPanel Spacing="6">
                             <TextBlock Style="{StaticResource PageTitleStyle}" Text="St2-基础素材" />
                             <TextBlock Style="{StaticResource SubtleTextStyle}" Text="{Binding CharacterDesk.CurrentCharacterStatusText, Mode=OneWay}" />
+                            <InfoBar
+                                IsClosable="False"
+                                IsOpen="{Binding CharacterDesk.IsViewOnly, Mode=OneWay}"
+                                Message="当前页面仅供查看，不能修改角色内容。"
+                                Severity="Informational"
+                                Title="查看角色中" />
                         </StackPanel>
                         <InfoBar
                             Grid.Row="1"
@@ -886,7 +924,7 @@
                             x:Name="LineArtScrollViewer"
                             Grid.Row="2"
                             VerticalScrollBarVisibility="Auto">
-                            <StackPanel Spacing="16">
+                            <StackPanel Spacing="16" IsHitTestVisible="{Binding CharacterDesk.CanEditCurrentCharacter, Mode=OneWay}">
                             <ItemsControl ItemsSource="{Binding LineArt.Sections, Mode=OneWay}">
                                 <ItemsControl.ItemTemplate>
                                     <DataTemplate                                       >
@@ -1130,6 +1168,12 @@
                             <StackPanel Spacing="6">
                                 <TextBlock Style="{StaticResource PageTitleStyle}" Text="St3-角色信息" />
                                 <TextBlock Style="{StaticResource SubtleTextStyle}" Text="{Binding CharacterDesk.CurrentCharacterStatusText, Mode=OneWay}" />
+                                <InfoBar
+                                    IsClosable="False"
+                                    IsOpen="{Binding CharacterDesk.IsViewOnly, Mode=OneWay}"
+                                    Message="当前页面仅供查看，不能修改角色内容。"
+                                    Severity="Informational"
+                                    Title="查看角色中" />
                             </StackPanel>
                             <TextBlock
                                 Grid.Column="1"
@@ -1533,6 +1577,12 @@
                             <StackPanel Spacing="6">
                                 <TextBlock Style="{StaticResource PageTitleStyle}" Text="St4-技能" />
                                 <TextBlock Style="{StaticResource SubtleTextStyle}" Text="{Binding CharacterDesk.CurrentCharacterStatusText, Mode=OneWay}" />
+                                <InfoBar
+                                    IsClosable="False"
+                                    IsOpen="{Binding CharacterDesk.IsViewOnly, Mode=OneWay}"
+                                    Message="当前页面仅供查看，不能修改角色内容。"
+                                    Severity="Informational"
+                                    Title="查看角色中" />
                             </StackPanel>
                             <TextBlock
                                 Grid.Column="1"
@@ -1552,6 +1602,7 @@
                             VerticalScrollBarVisibility="Auto">
                             <StackPanel
                                 Background="Transparent"
+                                IsHitTestVisible="{Binding CharacterDesk.CanEditCurrentCharacter, Mode=OneWay}"
                                 Spacing="12"
                                 Tapped="SkillsBlankArea_Tapped">
                                 <Grid ColumnSpacing="12">
@@ -1751,6 +1802,12 @@
                             <StackPanel Spacing="6">
                                 <TextBlock Style="{StaticResource PageTitleStyle}" Text="St5-序列帧" />
                                 <TextBlock Style="{StaticResource SubtleTextStyle}" Text="{Binding CharacterDesk.CurrentCharacterStatusText, Mode=OneWay}" />
+                                <InfoBar
+                                    IsClosable="False"
+                                    IsOpen="{Binding CharacterDesk.IsViewOnly, Mode=OneWay}"
+                                    Message="当前页面仅供查看，不能修改角色内容。"
+                                    Severity="Informational"
+                                    Title="查看角色中" />
                             </StackPanel>
                             <TextBlock
                                 Grid.Column="1"
@@ -1775,7 +1832,7 @@
                             <ScrollViewer
                                 x:Name="SequenceFramesScrollViewer"
                                 VerticalScrollBarVisibility="Auto">
-                                <StackPanel Spacing="12">
+                                <StackPanel Spacing="12" IsHitTestVisible="{Binding CharacterDesk.CanEditCurrentCharacter, Mode=OneWay}">
                                     <ItemsControl
                                         ItemTemplate="{StaticResource SequenceFrameSectionGroupTemplate}"
                                         ItemsSource="{Binding SequenceFrames.BaseSectionGroups, Mode=OneWay}" />
@@ -1929,6 +1986,12 @@
                             <StackPanel Spacing="6">
                                 <TextBlock Style="{StaticResource PageTitleStyle}" Text="St6-BUFF" />
                                 <TextBlock Style="{StaticResource SubtleTextStyle}" Text="{Binding CharacterDesk.CurrentCharacterStatusText, Mode=OneWay}" />
+                                <InfoBar
+                                    IsClosable="False"
+                                    IsOpen="{Binding CharacterDesk.IsViewOnly, Mode=OneWay}"
+                                    Message="当前页面仅供查看，不能修改角色内容。"
+                                    Severity="Informational"
+                                    Title="查看角色中" />
                             </StackPanel>
                             <TextBlock
                                 Grid.Column="1"
@@ -1946,7 +2009,7 @@
                             x:Name="BuffsScrollViewer"
                             Grid.Row="2"
                             VerticalScrollBarVisibility="Auto">
-                            <StackPanel Spacing="12">
+                            <StackPanel Spacing="12" IsHitTestVisible="{Binding CharacterDesk.CanEditCurrentCharacter, Mode=OneWay}">
                                 <Border Style="{StaticResource PanelBorderStyle}">
                                     <Grid Padding="16" ColumnSpacing="12">
                                         <Grid.ColumnDefinitions>
@@ -2056,7 +2119,7 @@
                     RightTapped="PageBlankArea_RightTapped"
                     Visibility="Collapsed"
                     VerticalScrollBarVisibility="Auto">
-                    <Grid Margin="0,0,12,0" RowSpacing="12">
+                    <Grid Margin="0,0,12,0" RowSpacing="12" IsHitTestVisible="{Binding CharacterDesk.CanEditCurrentCharacter, Mode=OneWay}">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
@@ -2248,6 +2311,131 @@
                                             Text="当前没有需要处理的素材。"
                                             TextAlignment="Center" />
                                     </StackPanel>
+                                    <StackPanel
+                                        Grid.Row="1"
+                                        MaxWidth="620"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        Spacing="10"
+                                        Visibility="{Binding UnrealProjectSync.LightConfigurationEmptyVisibility, Mode=OneWay}">
+                                        <FontIcon
+                                            HorizontalAlignment="Center"
+                                            FontSize="30"
+                                            Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                            Glyph="&#xE73E;" />
+                                        <TextBlock
+                                            HorizontalAlignment="Center"
+                                            FontSize="20"
+                                            FontWeight="SemiBold"
+                                            Text="{Binding UnrealProjectSync.LightConfigurationEmptyTitle, Mode=OneWay}" />
+                                        <TextBlock
+                                            HorizontalAlignment="Center"
+                                            Style="{StaticResource SubtleTextStyle}"
+                                            Text="{Binding UnrealProjectSync.LightConfigurationSummaryText, Mode=OneWay}"
+                                            TextAlignment="Center"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <ScrollViewer
+                                        Grid.Row="1"
+                                        HorizontalScrollBarVisibility="Disabled"
+                                        VerticalScrollBarVisibility="Auto"
+                                        Visibility="{Binding UnrealProjectSync.LightConfigurationWorkspaceVisibility, Mode=OneWay}">
+                                         <StackPanel Spacing="10">
+                                             <ItemsControl ItemsSource="{Binding UnrealProjectSync.LightConfigurationItems, Mode=OneWay}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Border
+                                                            Margin="0,0,0,12"
+                                                            Padding="10"
+                                                            Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                            BorderThickness="1"
+                                                            CornerRadius="6">
+                                                            <StackPanel Spacing="8">
+                                                                <Grid ColumnSpacing="8">
+                                                                    <Grid.ColumnDefinitions>
+                                                                        <ColumnDefinition Width="Auto" />
+                                                                        <ColumnDefinition Width="*" />
+                                                                        <ColumnDefinition Width="Auto" />
+                                                                    </Grid.ColumnDefinitions>
+                                                                    <CheckBox
+                                                                        VerticalAlignment="Center"
+                                                                        IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                                                        IsEnabled="{Binding IsSelectable}" />
+                                                                    <TextBlock
+                                                                        Grid.Column="1"
+                                                                        VerticalAlignment="Center"
+                                                                        HorizontalAlignment="Center"
+                                                                        FontSize="18"
+                                                                        FontWeight="SemiBold"
+                                                                        Text="{Binding DisplayName}" />
+                                                                    <TextBlock
+                                                                        Grid.Column="2"
+                                                                        VerticalAlignment="Center"
+                                                                        MinWidth="56"
+                                                                        Style="{StaticResource SubtleTextStyle}"
+                                                                        Text="{Binding StatusText}"
+                                                                        TextAlignment="Right" />
+                                                                </Grid>
+                                                                <Border
+                                                                    Margin="0,0,18,4"
+                                                                    Padding="8,6"
+                                                                    HorizontalAlignment="Stretch"
+                                                                    Style="{StaticResource LogErrorBlockStyle}"
+                                                                    Visibility="{Binding IsError, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert, Mode=OneWay}">
+                                                                    <StackPanel>
+                                                                        <TextBlock
+                                                                            Style="{StaticResource LogErrorTextStyle}"
+                                                                            Text="{Binding CurrentValueText}"
+                                                                            TextWrapping="Wrap"
+                                                                            Visibility="{Binding IsTagList, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert, Mode=OneWay}" />
+                                                                        <ItemsControl
+                                                                            Style="{StaticResource UnrealLightConfigurationValuesControlStyle}"
+                                                                            ItemsSource="{Binding CurrentValueItems, Mode=OneWay}"
+                                                                            ItemTemplate="{StaticResource UnrealLightConfigurationErrorValueTemplate}"
+                                                                            ItemsPanel="{StaticResource UnrealLightConfigurationValuesPanelTemplate}"
+                                                                            Visibility="{Binding IsTagList, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}">
+                                                                        </ItemsControl>
+                                                                    </StackPanel>
+                                                                </Border>
+                                                                <Border
+                                                                    Margin="0,0,18,0"
+                                                                    Padding="8,6"
+                                                                    HorizontalAlignment="Stretch"
+                                                                    Style="{StaticResource LogDefaultBlockStyle}"
+                                                                    Visibility="{Binding IsError, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert, Mode=OneWay}">
+                                                                    <StackPanel>
+                                                                        <TextBlock
+                                                                            Style="{StaticResource LogDefaultTextStyle}"
+                                                                            Text="{Binding TargetValueText}"
+                                                                            TextWrapping="Wrap"
+                                                                            Visibility="{Binding IsTagList, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert, Mode=OneWay}" />
+                                                                        <ItemsControl
+                                                                            Style="{StaticResource UnrealLightConfigurationValuesControlStyle}"
+                                                                            ItemsSource="{Binding TargetValueItems, Mode=OneWay}"
+                                                                            ItemTemplate="{StaticResource UnrealLightConfigurationDefaultValueTemplate}"
+                                                                            ItemsPanel="{StaticResource UnrealLightConfigurationValuesPanelTemplate}"
+                                                                            Visibility="{Binding IsTagList, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}">
+                                                                        </ItemsControl>
+                                                                    </StackPanel>
+                                                                </Border>
+                                                                <Border
+                                                                    Margin="0,0,18,0"
+                                                                    Padding="8,6"
+                                                                    Style="{StaticResource LogErrorBlockStyle}"
+                                                                    Visibility="{Binding IsError, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}">
+                                                                    <TextBlock
+                                                                        Style="{StaticResource LogErrorTextStyle}"
+                                                                        Text="{Binding ErrorText}"
+                                                                        TextWrapping="Wrap" />
+                                                                </Border>
+                                                            </StackPanel>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </StackPanel>
+                                    </ScrollViewer>
                                     <ScrollViewer
                                         Grid.Row="1"
                                         HorizontalScrollBarVisibility="Disabled"
@@ -2400,11 +2588,33 @@
                                             </ItemsControl>
                                         </StackPanel>
                                     </ScrollViewer>
-                                    <Grid
-                                        Grid.Row="1"
-                                        Visibility="{Binding UnrealProjectSync.IsNormalizationWorkspace, Mode=OneWay}">
-                                        <ListView
-                                            ItemsSource="{Binding UnrealProjectSync.VisibleNormalizationItems, Mode=OneWay}"
+                                     <Grid
+                                         Grid.Row="1"
+                                         Visibility="{Binding UnrealProjectSync.IsNormalizationWorkspace, Mode=OneWay}">
+                                         <StackPanel
+                                             HorizontalAlignment="Center"
+                                             VerticalAlignment="Center"
+                                             Spacing="8"
+                                             Visibility="{Binding UnrealProjectSync.NormalizationEmptyVisibility, Mode=OneWay}">
+                                             <FontIcon
+                                                 HorizontalAlignment="Center"
+                                                 FontSize="30"
+                                                 Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                                 Glyph="&#xE73E;" />
+                                             <TextBlock
+                                                 HorizontalAlignment="Center"
+                                                 FontSize="20"
+                                                 FontWeight="SemiBold"
+                                                 Text="素材规整已完成" />
+                                             <TextBlock
+                                                 HorizontalAlignment="Center"
+                                                 Style="{StaticResource SubtleTextStyle}"
+                                                 Text="当前角色没有需要继续处理的素材，可以点击“同步素材”。"
+                                                 TextAlignment="Center"
+                                                 TextWrapping="Wrap" />
+                                         </StackPanel>
+                                         <ListView
+                                             ItemsSource="{Binding UnrealProjectSync.VisibleNormalizationItems, Mode=OneWay}"
                                             SelectionMode="None"
                                             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                             ScrollViewer.VerticalScrollBarVisibility="Auto">
@@ -2533,7 +2743,7 @@
                                                         <ColumnDefinition Width="Auto" />
                                                     </Grid.ColumnDefinitions>
                                                     <TextBlock FontSize="16" Text="4" />
-                                                    <TextBlock Grid.Column="1" Text="执行同步" />
+                                                    <TextBlock Grid.Column="1" Text="基础配置" />
                                                     <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep4StatusText, Mode=OneWay}" />
                                                 </Grid>
                                                 <Grid ColumnSpacing="10">
@@ -2639,9 +2849,22 @@
                                                          MinHeight="44"
                                                          HorizontalAlignment="Stretch"
                                                          Click="PublishCurrentCharacterAssetsToUnrealButton_Click"
-                                                         Content="同步到虚幻"
+                                                          Content="同步到虚幻"
                                                           IsEnabled="{Binding UnrealProjectSync.CanStartPublish, Mode=OneWay}"
                                                          Style="{StaticResource AccentButtonStyle}" />
+                                                 </StackPanel>
+                                                 <StackPanel Spacing="8" Visibility="{Binding UnrealProjectSync.LightConfigurationDetailsVisibility, Mode=OneWay}">
+                                                     <TextBlock FontWeight="SemiBold" Text="基础配置" />
+                                                     <TextBlock Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.LightConfigurationSummaryText, Mode=OneWay}" TextWrapping="Wrap" />
+                                                     <TextBlock FontSize="16" FontWeight="SemiBold" Text="{Binding UnrealProjectSync.LightConfigurationSelectionText, Mode=OneWay}" />
+                                                     <Button
+                                                         MinHeight="44"
+                                                         HorizontalAlignment="Stretch"
+                                                         Click="ApplyUnrealLightConfigurationButton_Click"
+                                                         Content="应用基础配置"
+                                                         IsEnabled="{Binding UnrealProjectSync.CanApplyLightConfiguration, Mode=OneWay}"
+                                                         Style="{StaticResource AccentButtonStyle}" />
+                                                     <TextBlock Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.LightConfigurationResultMessage, Mode=OneWay}" TextWrapping="Wrap" />
                                                  </StackPanel>
                                                 <StackPanel Spacing="4" Visibility="{Binding UnrealProjectSync.ImportResultVisibility, Mode=OneWay}">
                                                     <Rectangle Height="1" Fill="{ThemeResource DividerStrokeColorDefaultBrush}" />
@@ -3762,6 +3985,7 @@
                                     <Grid.RowDefinitions>
                                         <RowDefinition Height="Auto" />
                                         <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
                                     </Grid.RowDefinitions>
                                     <Button
                                         x:Name="CharacterDetailContinueButton"
@@ -3788,6 +4012,14 @@
                                         HorizontalAlignment="Stretch"
                                         Click="CharacterDetailUnrealSyncButton_Click"
                                         Content="前往虚幻同步台" />
+                                    <Button
+                                        x:Name="CharacterDetailViewButton"
+                                        Grid.Row="2"
+                                        Grid.ColumnSpan="2"
+                                        HorizontalAlignment="Stretch"
+                                        Click="CharacterDetailViewButton_Click"
+                                        Content="查看角色"
+                                        Visibility="{Binding IsCompleted, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}" />
                                 </Grid>
                             </StackPanel>
                         </Grid>

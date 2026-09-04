@@ -16,6 +16,8 @@ DEFAULT_TARGET_PATHS = [
 BASE_MATERIAL_ROOT = "/Game/AssetMaterial/ImageS/CharaterS"
 CHAR_ITEM_ROOT = "/Game/ITems/CharItemS"
 CHARACTER_ACTOR_ROOT = "/Game/GameActor2D"
+TEAM_SELECT_ROOT = "/Game/UIWidget/2DPvpUI"
+TEAM_SELECT_OBJECT_PATH = TEAM_SELECT_ROOT + "/UI_TeamSelect.UI_TeamSelect"
 LINK_SKILL_LIBRARY_PATH = "/Game/BaseC/ExCordLibrary/LB_Fucs.LB_Fucs"
 DEFAULT_BUFF_ICON_PATH = r"D:\BUFFatk.PNG"
 PROGRESS_PATH = os.environ.get("ZD_TOOLBOX_EXPORT_PROGRESS", "")
@@ -149,6 +151,8 @@ def _material_scope_kind(package_path, asset_name, asset_class, selected_codes):
     normalized_package = _to_text(package_path).strip().rstrip("/").lower()
     normalized_name = _to_text(asset_name).strip().lower()
     normalized_class = _to_text(asset_class).lower()
+    if normalized_package == TEAM_SELECT_ROOT.lower() and normalized_name == "ui_teamselect":
+        return "shared-foundation"
     for code in selected_codes:
         base_root = "{}/{}".format(BASE_MATERIAL_ROOT, code).lower()
         actor_root = "{}/{}".format(CHARACTER_ACTOR_ROOT, code).lower()
@@ -241,7 +245,16 @@ def _merge_selected_manifest(previous_manifest, current_manifest, selected_codes
         kept.extend(new_values)
         return kept
 
-    current_manifest["assets"] = merge_list("assets", _asset_character_code)
+    new_assets = current_manifest.get("assets", [])
+    new_asset_paths = {
+        _to_text(item.get("objectPath", "")).strip().lower()
+        for item in new_assets
+    }
+    current_manifest["assets"] = [
+        item for item in previous_manifest.get("assets", [])
+        if (_to_text(_asset_character_code(item)).strip().lower() not in selected and
+            _to_text(item.get("objectPath", "")).strip().lower() not in new_asset_paths)
+    ] + new_assets
     current_manifest["characterSummaries"] = merge_list("characterSummaries", _entry_character_code)
     current_manifest["characterItems"] = merge_list("characterItems", _entry_character_code)
     current_manifest["characterActors"] = merge_list("characterActors", _entry_character_code)
@@ -1076,6 +1089,7 @@ def _export_item_data_from_asset(asset, object_path=""):
         skill_data_count = 0
 
     return {
+        "hasCharData": char_data is not None,
         "name": _to_text(_get_editor_property(item_data, "Name")),
         "description": _to_text(_get_editor_property(item_data, "Description")),
         "keywords": _text_array(_get_editor_property(item_data, "KeyWords", [])),
@@ -1103,6 +1117,42 @@ def _export_item_data_from_asset(asset, object_path=""):
 
 def _export_item_data(asset_data):
     return _export_item_data_from_asset(_load_asset_object(asset_data), _object_path(asset_data))
+
+
+def _export_team_select():
+    try:
+        asset = unreal.load_asset(TEAM_SELECT_OBJECT_PATH)
+        if asset is None:
+            return {
+                "objectPath": TEAM_SELECT_OBJECT_PATH,
+                "assetClass": "",
+                "hasCharVoice": False,
+                "readMessage": "asset load returned None",
+            }
+        obj = _default_object(asset, TEAM_SELECT_OBJECT_PATH)
+        char_voice = _get_editor_property(obj, "CharVoice") if obj is not None else None
+        return {
+            "objectPath": TEAM_SELECT_OBJECT_PATH,
+            "assetClass": _loaded_asset_class(asset),
+            "hasCharVoice": char_voice is not None,
+            "readMessage": "" if char_voice is not None else "CharVoice property was not found",
+        }
+    except Exception as error:
+        return {
+            "objectPath": TEAM_SELECT_OBJECT_PATH,
+            "assetClass": "",
+            "hasCharVoice": False,
+            "readMessage": str(error),
+        }
+
+
+def _blueprint_parent_class(asset):
+    try:
+        generated_class = asset.generated_class()
+        parent_class = generated_class.get_super_class() if generated_class is not None else None
+        return _object_path(parent_class) if parent_class is not None else ""
+    except Exception:
+        return ""
 
 
 def _content_path_to_disk(project_path, content_path):
@@ -1158,6 +1208,7 @@ def _export_character_items_from_disk(project_path):
             "assetName": asset_name,
             "objectPath": object_path,
             "assetClass": _loaded_asset_class(asset),
+            "parentClass": _blueprint_parent_class(asset),
             "hasItemData": item_data is not None,
             "readMessage": read_message,
             "itemData": item_data or {},
@@ -1197,6 +1248,7 @@ def _export_character_items(registry, project_path):
             "assetName": asset_name,
             "objectPath": _object_path(asset),
             "assetClass": _asset_class(asset),
+            "parentClass": _blueprint_parent_class(_load_asset_object(asset)),
             "hasItemData": item_data is not None,
             "readMessage": read_message,
             "itemData": item_data or {},
@@ -3294,9 +3346,10 @@ def _export():
                 (actor_root, False),
             ])
         asset_scan_entries.append((CHAR_ITEM_ROOT, False))
+        asset_scan_entries.append((TEAM_SELECT_ROOT, False))
         scan_paths = [
             path for path, recursive in asset_scan_entries
-            if recursive or path == CHAR_ITEM_ROOT
+            if recursive or path in (CHAR_ITEM_ROOT, TEAM_SELECT_ROOT)
         ]
     else:
         asset_scan_entries = [(path, True) for path in target_paths]
@@ -3318,9 +3371,9 @@ def _export():
         except TypeError:
             found = registry.get_assets_by_path(unreal.Name(target_path), recursive)
         found = [asset for asset in found if _is_top_level_asset(asset)]
-        if material_scope:
+        if material_scope and target_path != TEAM_SELECT_ROOT:
             found = [asset for asset in found if _include_material_scope_asset(asset, selected_codes)]
-        elif selected_codes and target_path not in (SHARED_BUFF_ICON_ROOT, SHARED_BATTLE_EFFECT_ROOT):
+        elif selected_codes and target_path not in (SHARED_BUFF_ICON_ROOT, SHARED_BATTLE_EFFECT_ROOT, TEAM_SELECT_ROOT):
             found = [
                 asset for asset in found
                 if _character_code_from_package_path(_to_text(asset.package_path), target_path).lower() in selected_code_keys
@@ -3414,7 +3467,8 @@ def _export():
         "characterSequences": character_sequences,
         "characterBuffs": character_buffs,
         "linkSkillLibrary": link_skill_library,
-        "supportSkillLibrary": support_skill_library
+        "supportSkillLibrary": support_skill_library,
+        "teamSelect": _export_team_select(),
     }
     manifest = (_merge_material_scope_manifest(previous_manifest, manifest, selected_codes)
                 if material_scope

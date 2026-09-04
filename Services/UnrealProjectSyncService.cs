@@ -27,6 +27,8 @@ internal sealed class UnrealProjectSyncService
     public const string TargetSharedBuffIconContentPath = "/Game/AssetMaterial/ImageS/BUFF";
     public const string TargetZdContentPath = "/Game/GameActor2D";
     public const string TargetCharacterItemContentPath = "/Game/ITems/CharItemS";
+    public const string TeamSelectContentPath = "/Game/UIWidget/2DPvpUI";
+    public const string TeamSelectObjectPath = "/Game/UIWidget/2DPvpUI/UI_TeamSelect.UI_TeamSelect";
     public const string LinkSkillLibraryObjectPath = "/Game/BaseC/ExCordLibrary/LB_Fucs.LB_Fucs";
     public const string ExportFolderName = "ZDToolboxExport";
     public const string ExportManifestFileName = "characters.json";
@@ -36,7 +38,8 @@ internal sealed class UnrealProjectSyncService
     [
         TargetBaseMaterialContentPath,
         TargetSharedBuffIconContentPath,
-        TargetZdContentPath
+        TargetZdContentPath,
+        TeamSelectContentPath
     ];
 
     private static readonly UnrealSequenceActionDefinition[] StandardSequenceActions =
@@ -228,10 +231,12 @@ internal sealed class UnrealProjectSyncService
         var manifest = requireAssetTypes
             ? LoadExportManifest(Path.Combine(GetExportDirectoryPath(projectPath), ExportManifestFileName))
             : null;
-        return new List<UnrealPublishFoundationCheckItem>
+        var checks = new List<UnrealPublishFoundationCheckItem>
         {
             CheckExactAsset(contentPath, CombineContentPath(contentPath, TargetCharacterItemContentPath), TargetCharacterItemContentPath,
                 $"Item_{characterCode}", "角色 Item", "Blueprint", manifest, requireAssetTypes),
+            CheckExactAsset(contentPath, CombineContentPath(contentPath, TeamSelectContentPath), TeamSelectContentPath,
+                "UI_TeamSelect", "角色入队语音映射 UI", "WidgetBlueprint", manifest, requireAssetTypes),
             baseFolder,
             actorFolder,
             CheckExactAsset(contentPath, actorRootPath, actorObjectPath, characterCode, "角色蓝图", "Blueprint", manifest, requireAssetTypes, name =>
@@ -254,6 +259,45 @@ internal sealed class UnrealProjectSyncService
             CheckChildFolder(actorRootPath, actorObjectPath, "AnimSequences", "动画序列"),
             CheckChildFolder(actorRootPath, actorObjectPath, "ExAsset", "其他素材")
         };
+        if (requireAssetTypes)
+        {
+            var itemIndex = checks.FindIndex(item => item.DisplayName == "角色 Item");
+            var exportedItem = manifest?.CharacterItems.FirstOrDefault(item =>
+                string.Equals(item.ObjectPath, itemObjectPath, StringComparison.OrdinalIgnoreCase));
+            var parentClass = exportedItem?.ParentClass ?? string.Empty;
+            var itemStructureMatches = exportedItem?.HasItemData == true &&
+                exportedItem?.ItemData.HasCharData == true &&
+                parentClass.Contains("InventoryBaseItem", StringComparison.OrdinalIgnoreCase);
+            if (itemIndex >= 0 && checks[itemIndex].IsCompliant && !itemStructureMatches)
+            {
+                checks[itemIndex] = checks[itemIndex] with
+                {
+                    IsCompliant = false,
+                    Problem = exportedItem?.HasItemData != true || exportedItem?.ItemData.HasCharData != true
+                        ? "缺少 ItemData/CharData"
+                        : "父类错误",
+                    ActualType = string.IsNullOrWhiteSpace(parentClass)
+                        ? checks[itemIndex].ActualType
+                        : $"{checks[itemIndex].ActualType}；父类 {parentClass}"
+                };
+            }
+
+            var index = checks.FindIndex(item => item.DisplayName == "角色入队语音映射 UI");
+            if (index >= 0 && checks[index].IsCompliant && manifest?.TeamSelect.HasCharVoice != true)
+            {
+                var readMessage = manifest?.TeamSelect.ReadMessage ?? string.Empty;
+                checks[index] = checks[index] with
+                {
+                    IsCompliant = false,
+                    Problem = "缺少 CharVoice",
+                    ActualType = string.IsNullOrWhiteSpace(readMessage)
+                        ? checks[index].ActualType
+                        : $"{checks[index].ActualType}；{readMessage}"
+                };
+            }
+        }
+
+        return checks;
     }
 
     private static UnrealPublishFoundationCheckItem CheckExactCharacterFolder(

@@ -318,6 +318,8 @@ namespace CrossingVoidZDTool
                 return;
             }
 
+            CharacterDesk.SetViewOnly(false);
+
             if (character.IsCompleted)
             {
                 try
@@ -360,6 +362,27 @@ namespace CrossingVoidZDTool
             }
 
             ShowLastEditedPage(lastEditedModuleTag);
+        }
+
+        private async void CharacterDetailViewButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_characterDetailCharacter is not { IsCompleted: true } character)
+            {
+                return;
+            }
+
+            try
+            {
+                await CharacterDesk.OpenCompletedCharacterViewAsync(character);
+                HideCharacterDetail();
+                ShowSt1DesignPage();
+                AppendLog(LogKind.User, $"只读查看角色：{character.Name} / {character.Code}");
+            }
+            catch (Exception ex)
+            {
+                ShowFloatingTip(InfoBarSeverity.Error, "打开角色查看失败", ex.Message);
+                AppendLog(LogKind.Error, "打开角色只读查看失败。", ex);
+            }
         }
 
         private async void CharacterDetailExportButton_Click(object sender, RoutedEventArgs e)
@@ -1702,6 +1725,12 @@ namespace CrossingVoidZDTool
 
         private void ReferenceImageCard_RightTapped(object sender, RightTappedRoutedEventArgs e)
         {
+            if (CharacterDesk.IsViewOnly)
+            {
+                e.Handled = true;
+                return;
+            }
+
             if ((sender as FrameworkElement)?.DataContext is not CharacterReferenceImage image ||
                 sender is not FrameworkElement element)
             {
@@ -1729,6 +1758,11 @@ namespace CrossingVoidZDTool
 
         private async void RenameReferenceImageMenuItem_Click(object sender, RoutedEventArgs e)
         {
+            if (CharacterDesk.IsViewOnly)
+            {
+                return;
+            }
+
             if (sender is not MenuFlyoutItem { CommandParameter: CharacterReferenceImage image })
             {
                 return;
@@ -1777,6 +1811,11 @@ namespace CrossingVoidZDTool
 
         private async void DeleteReferenceImageMenuItem_Click(object sender, RoutedEventArgs e)
         {
+            if (CharacterDesk.IsViewOnly)
+            {
+                return;
+            }
+
             if (sender is not MenuFlyoutItem { CommandParameter: CharacterReferenceImage image })
             {
                 return;
@@ -2019,7 +2058,7 @@ namespace CrossingVoidZDTool
 
         private async void ImportReferenceImagesButton_Click(object sender, RoutedEventArgs e)
         {
-            if (CharacterDesk.CurrentCharacter is null)
+            if (CharacterDesk.CurrentCharacter is null || CharacterDesk.IsViewOnly)
             {
                 return;
             }
@@ -2042,6 +2081,13 @@ namespace CrossingVoidZDTool
 
         private void ReferenceImages_DragOver(object sender, DragEventArgs e)
         {
+            if (CharacterDesk.IsViewOnly)
+            {
+                e.AcceptedOperation = DataPackageOperation.None;
+                e.Handled = true;
+                return;
+            }
+
             e.AcceptedOperation = DataPackageOperation.Copy;
             e.Handled = true;
         }
@@ -2049,7 +2095,7 @@ namespace CrossingVoidZDTool
         private async void ReferenceImages_Drop(object sender, DragEventArgs e)
         {
             e.Handled = true;
-            if (CharacterDesk.CurrentCharacter is null ||
+            if (CharacterDesk.CurrentCharacter is null || CharacterDesk.IsViewOnly ||
                 !e.DataView.Contains(StandardDataFormats.StorageItems))
             {
                 return;

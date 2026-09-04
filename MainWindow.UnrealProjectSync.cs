@@ -314,6 +314,20 @@ namespace CrossingVoidZDTool
                     .ToArray();
                 if (changes.Length == 0)
                 {
+                    if (_applicationViewModel.UnrealProjectSync.HasNoPublishChanges)
+                    {
+                        _applicationViewModel.UnrealProjectSync.CompletePublishOperation(0, 0);
+                        if (!_applicationViewModel.UnrealProjectSync.IsLightConfigurationLoaded)
+                        {
+                            UpdateGlobalProgress("正在检测基础配置...", 90, character.Code, true);
+                            var configurationResult = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
+                            _applicationViewModel.UnrealProjectSync.SetLightConfigurationResult(configurationResult);
+                        }
+                        CompleteGlobalProgress("素材无需同步", "全部素材无差异，已进入基础配置。");
+                        await HideGlobalProgressAfterDelayAsync();
+                        return;
+                    }
+
                     ShowFloatingTip(InfoBarSeverity.Warning, "尚未检测差异", "请先检测差异，再勾选需要同步的内容。");
                     return;
                 }
@@ -332,9 +346,23 @@ namespace CrossingVoidZDTool
                     change.Kind != UnrealBridgeChangeKind.Unchanged && !change.IsSelected);
                 if (executableCount == 0)
                 {
+                    if (deferredCount > 0)
+                    {
+                        CompleteGlobalProgress("尚有未同步素材", $"还有 {deferredCount} 项未执行，请完成第三步后再进入基础配置。");
+                        ShowFloatingTip(InfoBarSeverity.Warning, "第三步尚未完成", $"还有 {deferredCount} 项素材未同步。");
+                        await HideGlobalProgressAfterDelayAsync();
+                        return;
+                    }
+
                     _applicationViewModel.UnrealProjectSync.CompletePublishOperation(0, deferredCount);
+                    if (!_applicationViewModel.UnrealProjectSync.IsLightConfigurationLoaded)
+                    {
+                        UpdateGlobalProgress("正在检测基础配置...", 90, character.Code, true);
+                        var configurationResult = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
+                        _applicationViewModel.UnrealProjectSync.SetLightConfigurationResult(configurationResult);
+                    }
                     CompleteGlobalProgress("没有可自动同步的素材改动", deferredCount == 0
-                        ? "两端已有素材一致。"
+                        ? "两端已有素材一致，已进入基础配置。"
                         : $"还有 {deferredCount} 项属于新增、删除、冲突或语义结构，需要在差异树中明确处理。");
                     await HideGlobalProgressAfterDelayAsync();
                     return;
@@ -424,7 +452,37 @@ namespace CrossingVoidZDTool
                     baseline);
                 stateService.Save(character, projectPath, verifiedState);
                 _applicationViewModel.UnrealProjectSync.OpenNormalizationWorkspace(activateWorkspace: false);
+                if (deferredCount > 0)
+                {
+                    var remainingChanges = new UnrealBridgeDiffService().Compare(
+                            new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character),
+                            rescanned,
+                            UnrealBridgeDirection.PublishToUnreal,
+                            verifiedState)
+                        .Select(change => change with
+                        {
+                            IsSelected = change.IsSelected && UnrealBridgePublishSupportPolicy.CanExecute(change)
+                        })
+                        .ToArray();
+                    remainingChanges = _applicationViewModel.UnrealProjectSync.FilterPublishChanges(remainingChanges).ToArray();
+                    await _applicationViewModel.UnrealProjectSync.SetPublishSelectionTreeAsync(
+                        remainingChanges,
+                        UnrealBridgePublishSupportPolicy.CanExecute,
+                        GetGlobalProgressCancellationToken());
+                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(3);
+                    CompleteGlobalProgress("本次素材同步完成", $"已验证 {executableCount} 项；仍有 {deferredCount} 项需要处理。");
+                    ShowFloatingTip(InfoBarSeverity.Success, "本次素材已同步", $"仍有 {deferredCount} 项，完成后才能进入基础配置。");
+                    await HideGlobalProgressAfterDelayAsync();
+                    return;
+                }
+
                 _applicationViewModel.UnrealProjectSync.CompletePublishOperation(executableCount, deferredCount);
+                if (!_applicationViewModel.UnrealProjectSync.IsLightConfigurationLoaded)
+                {
+                    UpdateGlobalProgress("正在检测基础配置...", 94, character.Code, true);
+                    var configurationResult = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
+                    _applicationViewModel.UnrealProjectSync.SetLightConfigurationResult(configurationResult);
+                }
                 CompleteGlobalProgress("同步到虚幻完成", $"已验证 {executableCount} 项；另有 {deferredCount} 项未执行。");
                 ShowFloatingTip(InfoBarSeverity.Success, "同步到虚幻完成", $"已验证 {executableCount} 项。");
                 AppendLog(LogKind.User, $"同步所选内容到 Unreal：{character.Code}，Executed={executableCount}，Deferred={deferredCount}。");
@@ -856,7 +914,27 @@ namespace CrossingVoidZDTool
 
             if (sync.WorkflowStep == 3)
             {
-                PublishCurrentCharacterAssetsToUnrealButton_Click(sender, e);
+                if (!sync.HasNoPublishChanges)
+                {
+                    ShowFloatingTip(
+                        InfoBarSeverity.Informational,
+                        "第三步尚未完成",
+                        "请先同步已勾选素材；确认没有待同步内容后，才能进入基础配置。");
+                    return;
+                }
+
+                // 第三步已经确认没有待同步内容时，只进入第四步；这里不能再次调用
+                // 素材同步事件，否则会重复执行同步前检测和同步操作。
+                sync.CompletePublishOperation(0, 0);
+                if (!sync.IsLightConfigurationLoaded)
+                {
+                    await ReloadUnrealLightConfigurationStepAsync(sync);
+                }
+                return;
+            }
+
+            if (sync.WorkflowStep == 4)
+            {
                 return;
             }
 
@@ -896,6 +974,12 @@ namespace CrossingVoidZDTool
                 return;
             }
 
+            if (sync.WorkflowStep == 4)
+            {
+                await ReloadUnrealLightConfigurationStepAsync(sync);
+                return;
+            }
+
             ShowFloatingTip(
                 sync.ReloadPublishResult() ? InfoBarSeverity.Success : InfoBarSeverity.Warning,
                 "同步结果已重新加载",
@@ -916,7 +1000,6 @@ namespace CrossingVoidZDTool
             }
 
             ShowGlobalProgress("重新加载规整素材", characterCode);
-            sync.BeginNormalizationStepLoad();
             try
             {
                 await sync.ExportProjectCharactersAsync(
@@ -947,6 +1030,221 @@ namespace CrossingVoidZDTool
             finally
             {
                 EndUnrealWorkflowOperation();
+            }
+        }
+
+        private async void ApplyUnrealLightConfigurationButton_Click(object sender, RoutedEventArgs e)
+        {
+            var sync = _applicationViewModel.UnrealProjectSync;
+            var character = sync.SelectedSource?.DraftCharacter;
+            var selectedIds = sync.GetSelectedLightConfigurationIds();
+            if (character is null)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
+                return;
+            }
+            if (selectedIds.Count == 0)
+            {
+                ShowFloatingTip(InfoBarSeverity.Informational, "没有选择配置", "请至少勾选一项待设置内容。");
+                return;
+            }
+            if (!TryBeginUnrealWorkflowOperation())
+            {
+                return;
+            }
+
+            sync.SetApplyingLightConfiguration(true);
+            ShowGlobalProgress("应用基础配置", character.Code);
+            try
+            {
+                try
+                {
+                    sync.ValidatePublishCharacterFolders(character.Code);
+                }
+                catch
+                {
+                    sync.ReturnToWorkflowStep(1);
+                    throw;
+                }
+                if (sync.NormalizationItems.Any(item => !item.IsResolved))
+                {
+                    sync.ReturnToWorkflowStep(2);
+                    throw new InvalidOperationException("第二步仍有未完成的素材规整项目。");
+                }
+
+                if (Settings.BackupBeforeUnrealSync)
+                {
+                    await CreateUnrealProjectBackupAsync(character.Code, sync.EnginePath, sync.ProjectPath);
+                }
+
+                UpdateGlobalProgress("正在写入并验证基础配置...", 45, $"{selectedIds.Count} 项", true);
+                var result = await ExecuteUnrealLightConfigurationAsync(character, apply: true, selectedIds);
+                sync.SetLightConfigurationResult(
+                    result,
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                    selectPendingByDefault: false);
+                var foundationError = result.Items.FirstOrDefault(item =>
+                    item.StableId == "foundation.assets" &&
+                    item.Status == UnrealLightConfigurationStatus.Error);
+                if (foundationError is not null)
+                {
+                    sync.SetFoundationConfigurationError(foundationError);
+                    sync.ReturnToWorkflowStep(1);
+                }
+                if (!result.Succeeded)
+                {
+                    throw new InvalidOperationException(result.ErrorMessage);
+                }
+
+                var remaining = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Pending);
+                var errors = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Error);
+                CompleteGlobalProgress("基础配置已应用", $"已验证 {result.AppliedStableIds.Count} 项；剩余 {remaining} 项，错误 {errors} 项。");
+                ShowFloatingTip(InfoBarSeverity.Success, "基础配置已应用", $"已验证 {result.AppliedStableIds.Count} 项配置。");
+                AppendLog(LogKind.User, $"应用 Unreal 基础配置：{character.Code}，Applied={result.AppliedStableIds.Count}，Remaining={remaining}，Errors={errors}。");
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            catch (OperationCanceledException ex)
+            {
+                sync.FailLightConfiguration("基础配置已取消，当前选择仍保留。");
+                CompleteGlobalProgress("基础配置已取消", character.Code);
+                AppendLog(LogKind.Warning, "应用 Unreal 基础配置已取消。", ex);
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            catch (Exception ex)
+            {
+                sync.FailLightConfiguration(ex.Message);
+                CompleteGlobalProgress("基础配置失败", ex.Message);
+                ShowFloatingTip(InfoBarSeverity.Error, "基础配置失败", ex.Message);
+                AppendLog(LogKind.Error, "应用 Unreal 基础配置失败。", ex);
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            finally
+            {
+                sync.SetApplyingLightConfiguration(false);
+                EndUnrealWorkflowOperation();
+            }
+        }
+
+        private async Task ReloadUnrealLightConfigurationStepAsync(UnrealProjectSyncViewModel sync)
+        {
+            var character = sync.SelectedSource?.DraftCharacter;
+            if (character is null)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
+                return;
+            }
+            if (!TryBeginUnrealWorkflowOperation())
+            {
+                return;
+            }
+
+            ShowGlobalProgress("检测基础配置", character.Code);
+            try
+            {
+                try
+                {
+                    sync.ValidatePublishCharacterFolders(character.Code);
+                }
+                catch
+                {
+                    sync.ReturnToWorkflowStep(1);
+                    throw;
+                }
+                sync.ReturnToWorkflowStep(4);
+                var result = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
+                sync.SetLightConfigurationResult(result);
+                var foundationError = result.Items.FirstOrDefault(item =>
+                    item.StableId == "foundation.assets" &&
+                    item.Status == UnrealLightConfigurationStatus.Error);
+                if (foundationError is not null)
+                {
+                    sync.SetFoundationConfigurationError(foundationError);
+                    sync.ReturnToWorkflowStep(1);
+                }
+                var pending = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Pending);
+                var errors = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Error);
+                CompleteGlobalProgress("基础配置检测完成", $"待设置 {pending} 项，错误 {errors} 项。");
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            catch (OperationCanceledException ex)
+            {
+                CompleteGlobalProgress("基础配置检测已取消", character.Code);
+                AppendLog(LogKind.Warning, "检测 Unreal 基础配置已取消。", ex);
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            catch (Exception ex)
+            {
+                sync.FailLightConfiguration(ex.Message);
+                CompleteGlobalProgress("基础配置检测失败", ex.Message);
+                ShowFloatingTip(InfoBarSeverity.Error, "基础配置检测失败", ex.Message);
+                AppendLog(LogKind.Error, "检测 Unreal 基础配置失败。", ex);
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            finally
+            {
+                EndUnrealWorkflowOperation();
+            }
+        }
+
+        private async Task<UnrealLightConfigurationResult> ExecuteUnrealLightConfigurationAsync(
+            CharacterCard character,
+            bool apply,
+            IReadOnlyCollection<string> selectedStableIds)
+        {
+            var sync = _applicationViewModel.UnrealProjectSync;
+            var service = new UnrealLightConfigurationService();
+            var workFolder = Path.Combine(
+                Path.GetDirectoryName(sync.ProjectPath)!,
+                "Intermediate",
+                "ZDToolboxBridge",
+                character.Code,
+                "LightConfiguration");
+            Directory.CreateDirectory(workFolder);
+            var requestPath = Path.Combine(workFolder, apply ? "apply.request.json" : "scan.request.json");
+            var resultPath = Path.Combine(workFolder, apply ? "apply.result.json" : "scan.result.json");
+            var request = service.BuildRequest(character, apply, selectedStableIds);
+            service.SaveRequest(requestPath, request);
+            var offlineStartInfo = service.BuildProcessStartInfo(
+                sync.EnginePath,
+                sync.ProjectPath,
+                requestPath,
+                resultPath);
+            var launch = new UnrealPythonTaskExecutionService().BuildLaunch(
+                sync.EnginePath,
+                sync.ProjectPath,
+                service.GetScriptPath(),
+                Path.Combine(workFolder, apply ? "apply.remote-job.json" : "scan.remote-job.json"),
+                offlineStartInfo);
+            return await service.ExecuteAsync(
+                launch.StartInfo,
+                resultPath,
+                GetGlobalProgressCancellationToken());
+        }
+
+        private async Task CreateUnrealProjectBackupAsync(
+            string characterCode,
+            string enginePath,
+            string projectPath)
+        {
+            UpdateGlobalProgress("正在压缩备份 Unreal 项目...", 20, projectPath, true);
+            var backupPath = Path.Combine(
+                Path.GetDirectoryName(projectPath)!,
+                "Saved",
+                "ZDToolboxBackups",
+                $"{characterCode}-基础配置-{DateTime.Now:yyyyMMdd-HHmmss}.zip");
+            var backupInfo = new UnrealBridgeBackupService().BuildZipProjectStartInfo(
+                enginePath,
+                projectPath,
+                backupPath);
+            using var backupProcess = Process.Start(backupInfo)
+                ?? throw new InvalidOperationException("无法启动 Unreal 项目备份进程。");
+            var backupOutput = backupProcess.StandardOutput.ReadToEndAsync();
+            var backupError = backupProcess.StandardError.ReadToEndAsync();
+            await backupProcess.WaitForExitAsync(GetGlobalProgressCancellationToken());
+            if (backupProcess.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Unreal 项目备份失败，退出码 {backupProcess.ExitCode}。\n{await backupOutput}\n{await backupError}");
             }
         }
 

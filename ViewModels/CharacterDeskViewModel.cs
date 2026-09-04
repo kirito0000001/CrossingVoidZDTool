@@ -21,6 +21,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
     private bool _isDraftOpen;
     private bool _isReferencePanelExpanded;
     private bool _isLoadingDraft;
+    private bool _isViewOnly;
 
     public CharacterDeskViewModel(CharacterWorkspaceService characterWorkspaceService)
     {
@@ -50,6 +51,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
                 OnPropertyChanged(nameof(HasCurrentCharacter));
                 OnPropertyChanged(nameof(CanOpenCurrentDraft));
                 OnPropertyChanged(nameof(IsCurrentCharacterCompleted));
+                OnPropertyChanged(nameof(CanEditCurrentCharacter));
             }
         }
     }
@@ -73,13 +75,30 @@ internal sealed class CharacterDeskViewModel : ObservableObject
 
     public string CurrentCharacterStatusText => CurrentCharacter is null
         ? "当前制作角色：未选择"
-        : $"当前制作角色：{CurrentCharacter.StatusDisplayText}";
+        : IsViewOnly
+            ? $"当前查看角色：{CurrentCharacter.StatusDisplayText}（只读）"
+            : $"当前制作角色：{CurrentCharacter.StatusDisplayText}";
 
     public bool HasCurrentCharacter => CurrentCharacter is not null;
 
     public bool CanOpenCurrentDraft => CurrentCharacter is not null && !CurrentCharacter.IsCompleted;
 
     public bool IsCurrentCharacterCompleted => CurrentCharacter?.IsCompleted == true;
+
+    public bool IsViewOnly
+    {
+        get => _isViewOnly;
+        private set
+        {
+            if (SetProperty(ref _isViewOnly, value))
+            {
+                OnPropertyChanged(nameof(CanEditCurrentCharacter));
+                OnPropertyChanged(nameof(CurrentCharacterStatusText));
+            }
+        }
+    }
+
+    public bool CanEditCurrentCharacter => HasCurrentCharacter && !IsViewOnly;
 
     public bool HasLastEditedCharacter => LastEditedCharacter is not null;
 
@@ -218,6 +237,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
 
     public async Task SetCurrentCharacterAsync(CharacterCard character, CancellationToken cancellationToken = default)
     {
+        IsViewOnly = false;
         var ensuredCharacter = await Task.Run(
             () => _characterWorkspaceService.EnsureCharacterStructure(character),
             cancellationToken);
@@ -230,6 +250,37 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         StatusText = CurrentCharacterStatusText;
     }
 
+    public async Task OpenCompletedCharacterViewAsync(
+        CharacterCard character,
+        CancellationToken cancellationToken = default)
+    {
+        if (!character.IsCompleted)
+        {
+            throw new InvalidOperationException("只有已完成角色可以使用只读查看。");
+        }
+
+        IsViewOnly = true;
+        CurrentCharacter = character;
+        LastEditedCharacter = character;
+        ReferenceImages.Clear();
+        _isLoadingDraft = true;
+        try
+        {
+            DraftText = await Task.Run(() => _characterWorkspaceService.LoadDraft(character), cancellationToken);
+        }
+        finally
+        {
+            _isLoadingDraft = false;
+        }
+
+        IsDraftOpen = true;
+        DraftSaveStatusText = "只读查看模式。";
+        StatusText = CurrentCharacterStatusText;
+        await RefreshReferenceImagesAsync(cancellationToken);
+    }
+
+    public void SetViewOnly(bool value) => IsViewOnly = value;
+
     public async Task RefreshCharacterCardAsync(CharacterCard character, CancellationToken cancellationToken = default)
     {
         var refreshedCharacter = await Task.Run(
@@ -240,7 +291,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
 
     public async Task SynchronizeCurrentCharacterDisplayNameAsync(string displayName, CancellationToken cancellationToken = default)
     {
-        if (CurrentCharacter is null)
+        if (CurrentCharacter is null || IsViewOnly)
         {
             return;
         }
@@ -254,7 +305,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
 
     public async Task OpenCurrentCharacterDraftAsync(CancellationToken cancellationToken = default)
     {
-        if (CurrentCharacter is null)
+        if (CurrentCharacter is null || IsViewOnly)
         {
             return;
         }
@@ -312,7 +363,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
 
     public async Task SaveDraftNowAsync(CancellationToken cancellationToken = default)
     {
-        if (CurrentCharacter is null)
+        if (CurrentCharacter is null || IsViewOnly)
         {
             return;
         }
@@ -326,7 +377,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
 
     public async Task ImportReferenceImagesAsync(IReadOnlyList<string> sourceFilePaths, CancellationToken cancellationToken = default)
     {
-        if (CurrentCharacter is null || sourceFilePaths.Count == 0)
+        if (CurrentCharacter is null || IsViewOnly || sourceFilePaths.Count == 0)
         {
             return;
         }
@@ -355,7 +406,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
 
     public async Task RenameReferenceImageAsync(CharacterReferenceImage image, string newFileName, CancellationToken cancellationToken = default)
     {
-        if (CurrentCharacter is null)
+        if (CurrentCharacter is null || IsViewOnly)
         {
             return;
         }
@@ -368,7 +419,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
 
     public async Task DeleteReferenceImageAsync(CharacterReferenceImage image, CancellationToken cancellationToken = default)
     {
-        if (CurrentCharacter is null)
+        if (CurrentCharacter is null || IsViewOnly)
         {
             return;
         }

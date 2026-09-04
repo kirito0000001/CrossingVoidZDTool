@@ -651,6 +651,24 @@ internal sealed class UnrealProjectExportManifest
 
     [JsonPropertyName("supportSkillLibrary")]
     public UnrealProjectExportSupportSkillLibrary SupportSkillLibrary { get; set; } = new();
+
+    [JsonPropertyName("teamSelect")]
+    public UnrealProjectExportTeamSelect TeamSelect { get; set; } = new();
+}
+
+internal sealed class UnrealProjectExportTeamSelect
+{
+    [JsonPropertyName("objectPath")]
+    public string ObjectPath { get; set; } = string.Empty;
+
+    [JsonPropertyName("assetClass")]
+    public string AssetClass { get; set; } = string.Empty;
+
+    [JsonPropertyName("hasCharVoice")]
+    public bool HasCharVoice { get; set; }
+
+    [JsonPropertyName("readMessage")]
+    public string ReadMessage { get; set; } = string.Empty;
 }
 
 internal sealed class UnrealProjectExportCharacterSummary
@@ -706,6 +724,9 @@ internal sealed class UnrealProjectExportCharacterItem
     [JsonPropertyName("hasItemData")]
     public bool HasItemData { get; set; }
 
+    [JsonPropertyName("parentClass")]
+    public string ParentClass { get; set; } = string.Empty;
+
     [JsonPropertyName("readMessage")]
     public string ReadMessage { get; set; } = string.Empty;
 
@@ -715,6 +736,9 @@ internal sealed class UnrealProjectExportCharacterItem
 
 internal sealed class UnrealProjectExportItemData
 {
+    [JsonPropertyName("hasCharData")]
+    public bool HasCharData { get; set; }
+
     [JsonPropertyName("name")]
     public string Name { get; set; } = string.Empty;
 

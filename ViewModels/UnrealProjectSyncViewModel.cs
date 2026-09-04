@@ -84,6 +84,10 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     private int _detectionRenamedCount;
     private int _detectionConflictCount;
     private int _detectionDeletedCount;
+    private List<UnrealLightConfigurationResultItem> _lastLightConfigurationItems = [];
+    private bool _isLightConfigurationLoaded;
+    private bool _isApplyingLightConfiguration;
+    private string _lightConfigurationResultMessage = string.Empty;
     private string _publishFilter = "全部";
     private int _workflowStep = 1;
 
@@ -118,6 +122,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     ];
 
     public ObservableCollection<UnrealSyncSelectionTreeItem> SelectionTreeRoots { get; } = [];
+    public ObservableCollection<UnrealLightConfigurationViewItem> LightConfigurationItems { get; } = [];
     public ObservableCollection<UnrealPublishFoundationCheckItem> FoundationChecks { get; } = [];
     private IReadOnlyList<UnrealPublishFoundationCheckItem> _visibleFoundationChecks = [];
     public IReadOnlyList<UnrealPublishFoundationCheckItem> VisibleFoundationChecks
@@ -199,6 +204,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             if (SetProperty(ref _isNormalizationWorkspace, value))
             {
                 OnPropertyChanged(nameof(IsDetectionWorkspace));
+                OnPropertyChanged(nameof(NormalizationEmptyVisibility));
                 OnPropertyChanged(nameof(SelectionEmptyVisibility));
                 OnPropertyChanged(nameof(SelectionContentVisibility));
                 OnPropertyChanged(nameof(DetectionResultVisibility));
@@ -207,14 +213,30 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     }
 
     public bool IsDetectionWorkspace => !IsNormalizationWorkspace;
+    public Visibility NormalizationEmptyVisibility => IsNormalizationWorkspace &&
+        _isNormalizationStepLoaded && VisibleNormalizationItems.Count == 0
+        ? Visibility.Visible
+        : Visibility.Collapsed;
     public bool IsFoundationWorkspace => !IsEngineToToolbox && WorkflowStep == 1;
+    public bool IsLightConfigurationWorkspace => !IsEngineToToolbox && WorkflowStep == 4;
     public Visibility FoundationWorkspaceVisibility => IsFoundationWorkspace ? Visibility.Visible : Visibility.Collapsed;
     public Visibility FoundationDetailsVisibility => IsFoundationWorkspace ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility LightConfigurationWorkspaceVisibility => IsLightConfigurationWorkspace && LightConfigurationItems.Count > 0
+        ? Visibility.Visible
+        : Visibility.Collapsed;
+    public Visibility LightConfigurationEmptyVisibility => IsLightConfigurationWorkspace &&
+        _isLightConfigurationLoaded && LightConfigurationItems.Count == 0
+        ? Visibility.Visible
+        : Visibility.Collapsed;
+    public Visibility LightConfigurationDetailsVisibility => IsLightConfigurationWorkspace
+        ? Visibility.Visible
+        : Visibility.Collapsed;
     public string WorkspaceTitle => IsEngineToToolbox ? "检测与选择" : WorkflowStep switch
     {
         1 => "底层检测",
         2 => "素材规整",
         3 => "同步素材",
+        4 => "基础配置",
         _ => "同步结果"
     };
     public string WorkspaceDescription => IsEngineToToolbox
@@ -224,8 +246,31 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             1 => "检查 Unreal 目录和角色 Item 是否符合规范。",
             2 => "确认 Unreal 旧素材与工具箱规范素材的对应关系。",
             3 => "勾选本次需要同步到 Unreal 的素材。",
+            4 => "检查并应用角色入队语音、Item、MetaSound 和语音并发设置。",
             _ => "查看最近一次同步执行结果。"
         };
+
+    public int LightConfigurationPendingCount => _lastLightConfigurationItems.Count(item =>
+        item.Status == UnrealLightConfigurationStatus.Pending);
+    public int LightConfigurationErrorCount => _lastLightConfigurationItems.Count(item =>
+        item.Status == UnrealLightConfigurationStatus.Error);
+    public int LightConfigurationUnchangedCount => _lastLightConfigurationItems.Count(item =>
+        item.Status == UnrealLightConfigurationStatus.Unchanged);
+    public int LightConfigurationSelectedCount => LightConfigurationItems.Count(item => item.IsSelected);
+    public string LightConfigurationSummaryText => !_isLightConfigurationLoaded
+        ? "尚未检测基础配置"
+        : $"共检查 {_lastLightConfigurationItems.Count} 项：无差异 {LightConfigurationUnchangedCount}，待设置 {LightConfigurationPendingCount}，错误 {LightConfigurationErrorCount}";
+    public string LightConfigurationEmptyTitle => LightConfigurationErrorCount > 0
+        ? "基础配置存在错误"
+        : "基础配置没有改动";
+    public string LightConfigurationSelectionText => $"已选择 {LightConfigurationSelectedCount} / {LightConfigurationPendingCount} 项";
+    public string LightConfigurationResultMessage => _lightConfigurationResultMessage;
+    public bool IsLightConfigurationLoaded => _isLightConfigurationLoaded;
+    public bool CanApplyLightConfiguration => IsLightConfigurationWorkspace &&
+        _isLightConfigurationLoaded &&
+        LightConfigurationSelectedCount > 0 &&
+        !_isApplyingLightConfiguration &&
+        IsWorkflowOperationIdle;
 
     public string NormalizationSummaryText
     {
@@ -245,13 +290,21 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         2 => SelectedSource?.DraftCharacter is not null &&
             _isNormalizationStepLoaded && NormalizationItems.All(item => item.IsResolved),
         3 => IsPublishSelectionReady,
+        4 => _isLightConfigurationLoaded &&
+            LightConfigurationPendingCount == 0 &&
+            LightConfigurationErrorCount == 0,
         _ => false
     };
 
     public bool IsNormalizationStepLoaded => _isNormalizationStepLoaded;
 
     public bool HasPublishSelection => !IsEngineToToolbox && _importSelectedCount > 0;
-    public bool CanStartPublish => HasPublishSelection && !IsPublishRunning && IsWorkflowOperationIdle;
+    public bool HasNoPublishChanges => !IsEngineToToolbox && WorkflowStep == 3 &&
+        _hasImportDetection &&
+        _lastPublishChanges.All(change => change.Kind == UnrealBridgeChangeKind.Unchanged);
+    public bool CanStartPublish => HasPublishSelection &&
+        !IsPublishRunning && IsWorkflowOperationIdle;
+    public string PublishActionText => "同步到虚幻";
 
     public bool IsWorkflowOperationIdle => !_isWorkflowOperationRunning;
 
@@ -277,6 +330,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             OnPropertyChanged(nameof(CanStartPublish));
             OnPropertyChanged(nameof(CanDetectSelectedSource));
             OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
+            OnPropertyChanged(nameof(CanApplyLightConfiguration));
         }
     }
 
@@ -285,7 +339,8 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         : "尚未检测内容";
 
     public Visibility DetectionResultVisibility =>
-        !IsNormalizationWorkspace && !IsFoundationWorkspace && HasContentDetection && SelectionTreeRoots.Count == 0
+        !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
+        HasContentDetection && SelectionTreeRoots.Count == 0
             ? Visibility.Visible
             : Visibility.Collapsed;
 
@@ -387,14 +442,22 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 OnPropertyChanged(nameof(WorkflowNextButtonVisibility));
                 OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
                 OnPropertyChanged(nameof(IsFoundationWorkspace));
+                OnPropertyChanged(nameof(IsLightConfigurationWorkspace));
                 OnPropertyChanged(nameof(FoundationWorkspaceVisibility));
                 OnPropertyChanged(nameof(FoundationDetailsVisibility));
+                OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
+                OnPropertyChanged(nameof(LightConfigurationEmptyVisibility));
+                OnPropertyChanged(nameof(LightConfigurationDetailsVisibility));
                 OnPropertyChanged(nameof(WorkspaceTitle));
                 OnPropertyChanged(nameof(WorkspaceDescription));
                 OnPropertyChanged(nameof(SelectionEmptyVisibility));
                 OnPropertyChanged(nameof(SelectionContentVisibility));
                 OnPropertyChanged(nameof(DetectionResultVisibility));
                 OnPropertyChanged(nameof(CanAdvanceWorkflow));
+                OnPropertyChanged(nameof(CanApplyLightConfiguration));
+                OnPropertyChanged(nameof(HasNoPublishChanges));
+                OnPropertyChanged(nameof(CanStartPublish));
+                OnPropertyChanged(nameof(PublishActionText));
                 SaveSessionCache();
             }
         }
@@ -403,12 +466,20 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     public string WorkflowStep1StatusText => WorkflowStep > 1 ? "已完成" : WorkflowStep == 1 ? "进行中" : "待处理";
     public string WorkflowStep2StatusText => WorkflowStep > 2 ? "已完成" : WorkflowStep == 2 ? "进行中" : "待处理";
     public string WorkflowStep3StatusText => WorkflowStep > 3 ? "已完成" : WorkflowStep == 3 ? "进行中" : "待处理";
-    public string WorkflowStep4StatusText => WorkflowStep == 4 ? "已完成" : "待处理";
+    public string WorkflowStep4StatusText => WorkflowStep < 4
+        ? "待处理"
+        : !_isLightConfigurationLoaded
+            ? "进行中"
+            : LightConfigurationErrorCount > 0
+                ? "有错误"
+                : LightConfigurationPendingCount > 0
+                    ? "待设置"
+                    : "已完成";
     public string WorkflowNextText => WorkflowStep switch
     {
         1 => "规整素材",
         2 => "同步素材",
-        3 => "执行同步",
+        3 => "基础配置",
         _ => "已完成"
     };
     public string WorkflowReloadText => WorkflowStep switch
@@ -416,13 +487,18 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         1 => "重新加载底层检测",
         2 => "重新加载规整素材",
         3 => "重新加载同步素材",
+        4 => "重新加载基础配置",
         _ => "重新加载同步结果"
     };
 
     public Visibility WorkflowConfirmationVisibility => WorkflowStep == 3 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility NormalizationDetailsVisibility => WorkflowStep == 2 ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility WorkflowNextButtonVisibility => WorkflowStep == 3 ? Visibility.Collapsed : Visibility.Visible;
-    public bool WorkflowNextButtonEnabled => WorkflowStep != 3 && CanAdvanceWorkflow && IsWorkflowOperationIdle;
+    public Visibility WorkflowNextButtonVisibility => Visibility.Visible;
+    public bool WorkflowNextButtonEnabled => WorkflowStep switch
+    {
+        3 => HasNoPublishChanges && IsWorkflowOperationIdle,
+        _ => WorkflowStep < 3 && CanAdvanceWorkflow && IsWorkflowOperationIdle
+    };
 
     public bool IsPublishSelectionReady
     {
@@ -597,6 +673,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 OnPropertyChanged(nameof(WorkspaceDescription));
                 OnPropertyChanged(nameof(DetectionResultVisibility));
                 NotifyDetectionSummaryChanged();
+                ClearLightConfigurationState();
                 SetSelectionTree([]);
                 SelectedSource = null;
                 ResetImportOperation();
@@ -690,12 +767,12 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         private set => SetProperty(ref _canImportSelection, value);
     }
 
-    public Visibility SelectionEmptyVisibility => !IsNormalizationWorkspace && !IsFoundationWorkspace &&
+    public Visibility SelectionEmptyVisibility => !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
         SelectionTreeRoots.Count == 0 && !HasContentDetection
         ? Visibility.Visible
         : Visibility.Collapsed;
 
-    public Visibility SelectionContentVisibility => !IsNormalizationWorkspace && !IsFoundationWorkspace &&
+    public Visibility SelectionContentVisibility => !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
         SelectionTreeRoots.Count > 0
         ? Visibility.Visible
         : Visibility.Collapsed;
@@ -787,6 +864,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             _lastImportSnapshot = null;
             _lastPublishChanges.Clear();
             ResetDetectionSummary();
+            ClearLightConfigurationState();
             _isNormalizationStepLoaded = false;
             NormalizationItems.Clear();
             VisibleNormalizationItems = [];
@@ -926,6 +1004,27 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
     }
 
+    public void SetFoundationConfigurationError(UnrealLightConfigurationResultItem error)
+    {
+        ArgumentNullException.ThrowIfNull(error);
+        var previous = FoundationChecks.FirstOrDefault(item => item.DisplayName == error.DisplayName);
+        if (previous is not null)
+        {
+            FoundationChecks.Remove(previous);
+        }
+        FoundationChecks.Add(new UnrealPublishFoundationCheckItem(
+            error.DisplayName,
+            string.IsNullOrWhiteSpace(error.TargetPath) ? "基础配置依赖" : error.TargetPath,
+            string.Empty,
+            false,
+            "配置错误",
+            ActualType: error.ErrorMessage));
+        RefreshVisibleFoundationChecks();
+        OnPropertyChanged(nameof(FoundationSummaryText));
+        OnPropertyChanged(nameof(CanAdvanceWorkflow));
+        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
+    }
+
     public UnrealSyncSessionCacheLoadResult RefreshDraftSources(IEnumerable<CharacterCard> characters, string? preferredCharacterCode = null)
     {
         _draftSources.Clear();
@@ -944,13 +1043,15 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     {
         var previousCode = SelectedSource?.UnrealCandidate?.Code ?? SelectedSource?.DraftCharacter?.Code;
         var nextCode = source?.UnrealCandidate?.Code ?? source?.DraftCharacter?.Code;
-        var sameDetectedSource = _hasImportDetection && string.Equals(previousCode, nextCode, StringComparison.OrdinalIgnoreCase);
+        var sameDetectedSource = (_hasImportDetection || _isLightConfigurationLoaded) &&
+            string.Equals(previousCode, nextCode, StringComparison.OrdinalIgnoreCase);
         var sameSource = string.Equals(previousCode, nextCode, StringComparison.OrdinalIgnoreCase);
         SelectedSource = source;
         if (!sameDetectedSource)
         {
             SetSelectionTree([]);
             ResetImportOperation();
+            ClearLightConfigurationState();
             CloseNormalizationWorkspace();
             SetNormalizationStepLoaded(false);
             NormalizationItems.Clear();
@@ -1129,6 +1230,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
         _isNormalizationStepLoaded = value;
         OnPropertyChanged(nameof(IsNormalizationStepLoaded));
+        OnPropertyChanged(nameof(NormalizationEmptyVisibility));
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
         OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
         SaveSessionCache();
@@ -1140,6 +1242,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 !item.IsAlreadyNormalized &&
                 (!HideResolvedNormalizationItems || !item.IsResolved))
             .ToArray();
+        OnPropertyChanged(nameof(NormalizationEmptyVisibility));
         OnPropertyChanged(nameof(NormalizationSummaryText));
     }
 
@@ -1319,10 +1422,13 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         }
         ApplyPublishDisplay(rootList);
         SetSelectionTree(rootList);
-        _lastPublishChanges = SelectionTreeRoots.SelectMany(root => root.Children)
+        _lastPublishChanges = changes?.ToList() ?? SelectionTreeRoots.SelectMany(root => root.Children)
             .Where(item => item.Change is not null)
             .Select(item => item.Change!)
             .ToList();
+        OnPropertyChanged(nameof(HasNoPublishChanges));
+        OnPropertyChanged(nameof(CanStartPublish));
+        OnPropertyChanged(nameof(PublishActionText));
         _lastContentDetectionAt = DateTimeOffset.Now;
         OnPropertyChanged(nameof(ContentDetectionStatusText));
         OnPropertyChanged(nameof(DetectionResultVisibility));
@@ -1503,12 +1609,124 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         ResetDetectionSummary();
         OnPropertyChanged(nameof(IsPublishSelectionReady));
         OnPropertyChanged(nameof(HasPublishSelection));
+        OnPropertyChanged(nameof(HasNoPublishChanges));
         OnPropertyChanged(nameof(CanStartPublish));
+        OnPropertyChanged(nameof(PublishActionText));
         WorkflowStep = 4;
-        ImportOperationTitle = "同步完成";
-        ImportOperationMessage = "执行结果已保留，可以继续调整选择后重新检测。";
+        ImportOperationTitle = "素材同步完成";
+        ImportOperationMessage = "正在进入第四步基础配置。";
         ImportResultMessage = $"已验证 {executedCount} 项，保留未执行 {deferredCount} 项。";
-        ImportResultVisibility = Visibility.Visible;
+        ImportResultVisibility = Visibility.Collapsed;
+    }
+
+    public void SetLightConfigurationResult(
+        UnrealLightConfigurationResult result,
+        IReadOnlySet<string>? selectedStableIds = null,
+        bool selectPendingByDefault = true)
+    {
+        ArgumentNullException.ThrowIfNull(result);
+        foreach (var item in LightConfigurationItems)
+        {
+            item.SelectionChanged -= LightConfigurationItem_SelectionChanged;
+        }
+
+        LightConfigurationItems.Clear();
+        _lastLightConfigurationItems = result.Items.Count == 0 && !result.Succeeded
+            ?
+            [
+                new UnrealLightConfigurationResultItem
+                {
+                    StableId = "configuration.execution",
+                    GroupName = "基础配置",
+                    DisplayName = "无法读取基础配置",
+                    TargetField = "Unreal Python 执行结果",
+                    SourceSummary = "第四步配置协议",
+                    Status = UnrealLightConfigurationStatus.Error,
+                    ErrorMessage = result.ErrorMessage
+                }
+            ]
+            : result.Items.ToList();
+        foreach (var source in _lastLightConfigurationItems.Where(item => item.Status != UnrealLightConfigurationStatus.Unchanged))
+        {
+            var isSelected = source.Status == UnrealLightConfigurationStatus.Pending &&
+                (selectedStableIds?.Contains(source.StableId) ?? selectPendingByDefault);
+            var item = new UnrealLightConfigurationViewItem(source, isSelected);
+            item.SelectionChanged += LightConfigurationItem_SelectionChanged;
+            LightConfigurationItems.Add(item);
+        }
+
+        _isLightConfigurationLoaded = true;
+        _lightConfigurationResultMessage = result.Succeeded
+            ? result.AppliedStableIds.Count > 0
+                ? $"已应用并验证 {result.AppliedStableIds.Count} 项配置。"
+                : "基础配置检测完成。"
+            : string.IsNullOrWhiteSpace(result.ErrorMessage)
+                ? "基础配置存在未完成项目。"
+                : result.ErrorMessage;
+        NotifyLightConfigurationChanged();
+        SaveSessionCache();
+    }
+
+    public IReadOnlySet<string> GetSelectedLightConfigurationIds() =>
+        LightConfigurationItems
+            .Where(item => item.IsSelected && item.IsSelectable)
+            .Select(item => item.StableId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    public void SetApplyingLightConfiguration(bool value)
+    {
+        if (_isApplyingLightConfiguration == value)
+        {
+            return;
+        }
+
+        _isApplyingLightConfiguration = value;
+        OnPropertyChanged(nameof(CanApplyLightConfiguration));
+    }
+
+    public void FailLightConfiguration(string message)
+    {
+        _lightConfigurationResultMessage = message;
+        OnPropertyChanged(nameof(LightConfigurationResultMessage));
+    }
+
+    private void LightConfigurationItem_SelectionChanged(object? sender, EventArgs e)
+    {
+        NotifyLightConfigurationChanged();
+        SaveSessionCache();
+    }
+
+    private void ClearLightConfigurationState()
+    {
+        foreach (var item in LightConfigurationItems)
+        {
+            item.SelectionChanged -= LightConfigurationItem_SelectionChanged;
+        }
+
+        LightConfigurationItems.Clear();
+        _lastLightConfigurationItems.Clear();
+        _isLightConfigurationLoaded = false;
+        _isApplyingLightConfiguration = false;
+        _lightConfigurationResultMessage = string.Empty;
+        NotifyLightConfigurationChanged();
+    }
+
+    private void NotifyLightConfigurationChanged()
+    {
+        OnPropertyChanged(nameof(IsLightConfigurationLoaded));
+        OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
+        OnPropertyChanged(nameof(LightConfigurationEmptyVisibility));
+        OnPropertyChanged(nameof(LightConfigurationSummaryText));
+        OnPropertyChanged(nameof(LightConfigurationEmptyTitle));
+        OnPropertyChanged(nameof(LightConfigurationSelectionText));
+        OnPropertyChanged(nameof(LightConfigurationResultMessage));
+        OnPropertyChanged(nameof(LightConfigurationPendingCount));
+        OnPropertyChanged(nameof(LightConfigurationErrorCount));
+        OnPropertyChanged(nameof(LightConfigurationUnchangedCount));
+        OnPropertyChanged(nameof(LightConfigurationSelectedCount));
+        OnPropertyChanged(nameof(CanApplyLightConfiguration));
+        OnPropertyChanged(nameof(CanAdvanceWorkflow));
+        OnPropertyChanged(nameof(WorkflowStep4StatusText));
     }
 
     public void FailPublishOperation(string message)
@@ -1606,7 +1824,12 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             return new(UnrealSyncSessionCacheLoadStatus.Invalid, ErrorMessage: "同步进度使用的 Unreal 引擎路径与当前设置不一致。");
         }
 
-        var hasProgress = cache.IsPublishDetection || cache.ImportSnapshot is not null;
+        // 第四步会在进入时清理第三步的差异树标记，因此不能只靠
+        // IsPublishDetection 判断是否存在可恢复的同步进度。
+        var hasProgress = cache.IsPublishDetection ||
+            cache.ImportSnapshot is not null ||
+            cache.IsLightConfigurationLoaded ||
+            cache.WorkflowStep >= 4;
         if (string.IsNullOrWhiteSpace(cache.SelectedCharacterCode) || !hasProgress)
         {
             return new(UnrealSyncSessionCacheLoadStatus.Missing);
@@ -1644,6 +1867,21 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             _isNormalizationStepLoaded = cache.IsNormalizationStepLoaded ||
                 cache.WorkflowStep >= 3 || cache.NormalizationItems.Count > 0;
             OnPropertyChanged(nameof(IsNormalizationStepLoaded));
+            if (cache.IsLightConfigurationLoaded)
+            {
+                SetLightConfigurationResult(
+                    new UnrealLightConfigurationResult
+                    {
+                        Succeeded = true,
+                        CharacterCode = cache.SelectedCharacterCode,
+                        Items = cache.LightConfigurationItems,
+                        ErrorMessage = cache.LightConfigurationResultMessage
+                    },
+                    cache.SelectedLightConfigurationIds,
+                    selectPendingByDefault: false);
+                _lightConfigurationResultMessage = cache.LightConfigurationResultMessage;
+                OnPropertyChanged(nameof(LightConfigurationResultMessage));
+            }
 
             if (cache.IsPublishDetection)
             {
@@ -1668,6 +1906,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                     var selectedIds = cache.SelectedStableIds.Count > 0
                         ? cache.SelectedStableIds
                         : cache.PublishChanges.Where(change => change.IsSelected).Select(change => change.StableId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var cachedComparison = FilterPublishChanges(cache.PublishChanges).ToArray();
                     var cachedChanges = FilterCachedPublishChanges(cache, source.DraftCharacter).ToArray();
                     var roots = UnrealSyncSelectionTreeBuilder.FromChanges(cachedChanges, UnrealBridgePublishSupportPolicy.CanExecute);
                     ApplySelection(roots, selectedIds);
@@ -1675,7 +1914,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                     {
                         SetPublishDetectionSummary(cachedChanges);
                     }
-                    SetPublishSelectionTree(roots);
+                    SetPublishSelectionTree(roots, cachedComparison);
                 }
             }
             else
@@ -1872,7 +2111,11 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 .ToList(),
             IsNormalizationStepLoaded = _isNormalizationStepLoaded,
             HideCompletedFoundationChecks = HideCompletedFoundationChecks,
-            HideResolvedNormalizationItems = HideResolvedNormalizationItems
+            HideResolvedNormalizationItems = HideResolvedNormalizationItems,
+            IsLightConfigurationLoaded = _isLightConfigurationLoaded,
+            LightConfigurationItems = _lastLightConfigurationItems.ToList(),
+            SelectedLightConfigurationIds = GetSelectedLightConfigurationIds().ToHashSet(StringComparer.OrdinalIgnoreCase),
+            LightConfigurationResultMessage = _lightConfigurationResultMessage
         };
         _loadedSessionCache = cache;
         _pendingSessionCache = cache;
@@ -1970,7 +2213,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
         OnPropertyChanged(nameof(IsPublishSelectionReady));
         OnPropertyChanged(nameof(HasPublishSelection));
+        OnPropertyChanged(nameof(HasNoPublishChanges));
         OnPropertyChanged(nameof(CanStartPublish));
+        OnPropertyChanged(nameof(PublishActionText));
         OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
         OnPropertyChanged(nameof(PendingRedirectCount));
         OnPropertyChanged(nameof(PublishConflictCount));

@@ -129,6 +129,7 @@ namespace CrossingVoidZDTool
 
         private void ShowCharacterDeskPage()
         {
+            CharacterDesk.SetViewOnly(false);
             ShowOnlyPage(CharacterDeskPage);
             SelectShellNavigationItem(CharacterDeskNavItem);
         }
@@ -210,19 +211,20 @@ namespace CrossingVoidZDTool
 
         private bool TryEnterCharacterEditingPage()
         {
+            if (CharacterDesk.IsViewOnly)
+            {
+                return true;
+            }
+
             if (CharacterDesk.CurrentCharacter?.IsCompleted != true)
             {
                 return true;
             }
 
-            var character = CharacterDesk.CurrentCharacter;
-            ShowCharacterDeskPage();
-            ShowFloatingTip(
-                InfoBarSeverity.Warning,
-                "角色已完成并锁定",
-                $"请在 {character.EffectiveDisplayName} 的详情中点击“继续编辑”，恢复为草稿后再进入制作步骤。");
-            AppendLog(LogKind.Warning, $"阻止编辑已完成角色：{character.Name} / {character.Code}");
-            return false;
+            // 已完成角色默认进入只读查看，不再用锁定提示阻断浏览。
+            CharacterDesk.SetViewOnly(true);
+            AppendLog(LogKind.Info, $"已进入完成角色只读查看：{CharacterDesk.CurrentCharacter.Name} / {CharacterDesk.CurrentCharacter.Code}");
+            return true;
         }
 
         private void ShowUnrealProjectSyncPage()
@@ -245,6 +247,8 @@ namespace CrossingVoidZDTool
                 ShowFloatingTip(InfoBarSeverity.Warning, "无法恢复同步进度", restoreResult.ErrorMessage);
             }
 
+            // 恢复页面只恢复缓存，不在启动阶段触发任何 Unreal 检测；进入新步骤或点击
+            // 该步骤自己的重新加载按钮时，才执行对应范围的检测。
             AppendLog(LogKind.Info, "已恢复虚幻同步台状态；进入步骤或手动重新加载时才执行检测。");
         }
 

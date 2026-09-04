@@ -42,6 +42,10 @@ internal sealed class UnrealSyncSessionCache
     public bool IsNormalizationStepLoaded { get; set; }
     public bool HideCompletedFoundationChecks { get; set; }
     public bool HideResolvedNormalizationItems { get; set; }
+    public bool IsLightConfigurationLoaded { get; set; }
+    public List<UnrealLightConfigurationResultItem> LightConfigurationItems { get; set; } = [];
+    public HashSet<string> SelectedLightConfigurationIds { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public string LightConfigurationResultMessage { get; set; } = string.Empty;
 }
 
 internal sealed class UnrealSyncNormalizationCacheItem
