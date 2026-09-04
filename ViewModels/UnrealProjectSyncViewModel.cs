@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.IO;
 using CrossingVoidZDTool.Services;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml;
@@ -13,6 +14,7 @@ namespace CrossingVoidZDTool.ViewModels;
 
 internal sealed class UnrealProjectSyncViewModel : ObservableObject
 {
+    private const int CurrentDetectionAlgorithmVersion = 2;
     private readonly UnrealProjectSyncService _syncService;
     private string _enginePath = string.Empty;
     private string _projectPath = string.Empty;
@@ -40,8 +42,10 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     private UnrealSyncSourceItem? _selectedSource;
     private UnrealSyncPublishStageItem? _selectedPublishStage;
     private bool _isNormalizationWorkspace;
+    private bool _isNormalizationStepLoaded;
     private readonly List<CharacterCard> _draftSources = [];
     private readonly HashSet<string> _existingImportStableIds = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<UnrealSyncSelectionTreeItem, UnrealSyncSelectionTreeItem> _selectionParents = [];
     private bool _hasImportDetection;
     private int _importSelectedCount;
     private int _importAddedCount;
@@ -60,6 +64,8 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     private Visibility _importDetailVisibility = Visibility.Collapsed;
     private Visibility _importResultVisibility = Visibility.Collapsed;
     private bool _canImportSelection;
+    private bool _isPublishRunning;
+    private bool _isWorkflowOperationRunning;
     private readonly UnrealSyncSessionCacheService _sessionCacheService = new();
     private readonly SemaphoreSlim _sessionSaveSemaphore = new(1, 1);
     private int _sessionSaveVersion;
@@ -71,6 +77,13 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     private DateTimeOffset? _lastContentDetectionAt;
     private UnrealBridgeSnapshot? _lastImportSnapshot;
     private List<UnrealBridgeChange> _lastPublishChanges = [];
+    private int _detectionTotalCount;
+    private int _detectionUnchangedCount;
+    private int _detectionAddedCount;
+    private int _detectionUpdatedCount;
+    private int _detectionRenamedCount;
+    private int _detectionConflictCount;
+    private int _detectionDeletedCount;
     private string _publishFilter = "全部";
     private int _workflowStep = 1;
 
@@ -188,6 +201,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 OnPropertyChanged(nameof(IsDetectionWorkspace));
                 OnPropertyChanged(nameof(SelectionEmptyVisibility));
                 OnPropertyChanged(nameof(SelectionContentVisibility));
+                OnPropertyChanged(nameof(DetectionResultVisibility));
             }
         }
     }
@@ -213,21 +227,145 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             _ => "查看最近一次同步执行结果。"
         };
 
-    public string NormalizationSummaryText => NormalizationItems.Count == 0
-        ? "没有需要规整的 Unreal 素材"
-        : $"共 {NormalizationItems.Count} 项：已处理 {NormalizationItems.Count(item => item.IsResolved)}，待处理 {NormalizationItems.Count(item => !item.IsResolved)}";
+    public string NormalizationSummaryText
+    {
+        get
+        {
+            var actionableItems = NormalizationItems.Where(item => !item.IsAlreadyNormalized).ToArray();
+            return actionableItems.Length == 0
+                ? "没有需要规整的 Unreal 素材"
+                : $"共 {actionableItems.Length} 项：已处理 {actionableItems.Count(item => item.IsResolved)}，待处理 {actionableItems.Count(item => !item.IsResolved)}";
+        }
+    }
 
     public bool CanAdvanceWorkflow => WorkflowStep switch
     {
-        1 => FoundationChecks.Count > 0 && FoundationChecks.All(item => item.IsCompliant),
-        2 => NormalizationItems.All(item => item.IsResolved),
+        1 => SelectedSource?.DraftCharacter is not null &&
+            FoundationChecks.Count > 0 && FoundationChecks.All(item => item.IsCompliant),
+        2 => SelectedSource?.DraftCharacter is not null &&
+            _isNormalizationStepLoaded && NormalizationItems.All(item => item.IsResolved),
         3 => IsPublishSelectionReady,
         _ => false
     };
 
+    public bool IsNormalizationStepLoaded => _isNormalizationStepLoaded;
+
+    public bool HasPublishSelection => !IsEngineToToolbox && _importSelectedCount > 0;
+    public bool CanStartPublish => HasPublishSelection && !IsPublishRunning && IsWorkflowOperationIdle;
+
+    public bool IsWorkflowOperationIdle => !_isWorkflowOperationRunning;
+
+    public bool IsPublishRunning
+    {
+        get => _isPublishRunning;
+        private set
+        {
+            if (SetProperty(ref _isPublishRunning, value))
+            {
+                OnPropertyChanged(nameof(CanStartPublish));
+            }
+        }
+    }
+
+    public void SetPublishRunning(bool value) => IsPublishRunning = value;
+
+    public void SetWorkflowOperationRunning(bool value)
+    {
+        if (SetProperty(ref _isWorkflowOperationRunning, value))
+        {
+            OnPropertyChanged(nameof(IsWorkflowOperationIdle));
+            OnPropertyChanged(nameof(CanStartPublish));
+            OnPropertyChanged(nameof(CanDetectSelectedSource));
+            OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
+        }
+    }
+
     public string ContentDetectionStatusText => _lastContentDetectionAt is DateTimeOffset detected
         ? $"上次检测：{detected.LocalDateTime:yyyy-MM-dd HH:mm:ss}（打开页面不会自动重检，同步前会强制刷新）"
         : "尚未检测内容";
+
+    public Visibility DetectionResultVisibility =>
+        !IsNormalizationWorkspace && !IsFoundationWorkspace && HasContentDetection && SelectionTreeRoots.Count == 0
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+    public string DetectionResultTitle => IsEngineToToolbox
+        ? "内容检测完成"
+        : DetectionChangedCount == 0
+            ? "本次没有改动"
+            : $"检测到 {DetectionChangedCount} 项改动";
+
+    public string DetectionResultSummaryText
+    {
+        get
+        {
+            if (IsEngineToToolbox)
+            {
+                return $"共读取 {_detectionTotalCount} 项内容。";
+            }
+
+            var details = new List<string> { $"共检查 {_detectionTotalCount} 项", $"无差异 {_detectionUnchangedCount} 项" };
+            AddDetectionCount(details, "新增", _detectionAddedCount);
+            AddDetectionCount(details, "更新", _detectionUpdatedCount);
+            AddDetectionCount(details, "改名", _detectionRenamedCount);
+            AddDetectionCount(details, "冲突", _detectionConflictCount);
+            AddDetectionCount(details, "删除候选", _detectionDeletedCount);
+            return string.Join(" · ", details);
+        }
+    }
+
+    private int DetectionChangedCount =>
+        _detectionAddedCount + _detectionUpdatedCount + _detectionRenamedCount + _detectionConflictCount + _detectionDeletedCount;
+
+    private static void AddDetectionCount(ICollection<string> details, string label, int count)
+    {
+        if (count > 0)
+        {
+            details.Add($"{label} {count} 项");
+        }
+    }
+
+    private void SetPublishDetectionSummary(IReadOnlyCollection<UnrealBridgeChange> changes)
+    {
+        _detectionTotalCount = changes.Count;
+        _detectionUnchangedCount = changes.Count(change => change.Kind == UnrealBridgeChangeKind.Unchanged);
+        _detectionAddedCount = changes.Count(change => change.Kind == UnrealBridgeChangeKind.Added);
+        _detectionUpdatedCount = changes.Count(change => change.Kind == UnrealBridgeChangeKind.Updated);
+        _detectionRenamedCount = changes.Count(change => change.Kind == UnrealBridgeChangeKind.Renamed);
+        _detectionConflictCount = changes.Count(change => change.Kind == UnrealBridgeChangeKind.Conflict);
+        _detectionDeletedCount = changes.Count(change => change.Kind == UnrealBridgeChangeKind.DeleteCandidate);
+        NotifyDetectionSummaryChanged();
+    }
+
+    private void SetImportDetectionSummary(UnrealBridgeSnapshot? snapshot, IEnumerable<UnrealSyncSelectionTreeItem> roots)
+    {
+        _detectionTotalCount = snapshot?.Items.Count ?? roots.SelectMany(root => root.Children).Count();
+        _detectionUnchangedCount = 0;
+        _detectionAddedCount = _detectionTotalCount;
+        _detectionUpdatedCount = 0;
+        _detectionRenamedCount = 0;
+        _detectionConflictCount = 0;
+        _detectionDeletedCount = 0;
+        NotifyDetectionSummaryChanged();
+    }
+
+    private void ResetDetectionSummary()
+    {
+        _detectionTotalCount = 0;
+        _detectionUnchangedCount = 0;
+        _detectionAddedCount = 0;
+        _detectionUpdatedCount = 0;
+        _detectionRenamedCount = 0;
+        _detectionConflictCount = 0;
+        _detectionDeletedCount = 0;
+        NotifyDetectionSummaryChanged();
+    }
+
+    private void NotifyDetectionSummaryChanged()
+    {
+        OnPropertyChanged(nameof(DetectionResultTitle));
+        OnPropertyChanged(nameof(DetectionResultSummaryText));
+    }
 
     public bool HasContentDetection => _hasImportDetection;
 
@@ -247,6 +385,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 OnPropertyChanged(nameof(WorkflowConfirmationVisibility));
                 OnPropertyChanged(nameof(NormalizationDetailsVisibility));
                 OnPropertyChanged(nameof(WorkflowNextButtonVisibility));
+                OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
                 OnPropertyChanged(nameof(IsFoundationWorkspace));
                 OnPropertyChanged(nameof(FoundationWorkspaceVisibility));
                 OnPropertyChanged(nameof(FoundationDetailsVisibility));
@@ -254,6 +393,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 OnPropertyChanged(nameof(WorkspaceDescription));
                 OnPropertyChanged(nameof(SelectionEmptyVisibility));
                 OnPropertyChanged(nameof(SelectionContentVisibility));
+                OnPropertyChanged(nameof(DetectionResultVisibility));
                 OnPropertyChanged(nameof(CanAdvanceWorkflow));
                 SaveSessionCache();
             }
@@ -282,6 +422,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     public Visibility WorkflowConfirmationVisibility => WorkflowStep == 3 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility NormalizationDetailsVisibility => WorkflowStep == 2 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility WorkflowNextButtonVisibility => WorkflowStep == 3 ? Visibility.Collapsed : Visibility.Visible;
+    public bool WorkflowNextButtonEnabled => WorkflowStep != 3 && CanAdvanceWorkflow && IsWorkflowOperationIdle;
 
     public bool IsPublishSelectionReady
     {
@@ -454,6 +595,8 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 OnPropertyChanged(nameof(FoundationDetailsVisibility));
                 OnPropertyChanged(nameof(WorkspaceTitle));
                 OnPropertyChanged(nameof(WorkspaceDescription));
+                OnPropertyChanged(nameof(DetectionResultVisibility));
+                NotifyDetectionSummaryChanged();
                 SetSelectionTree([]);
                 SelectedSource = null;
                 ResetImportOperation();
@@ -547,11 +690,13 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         private set => SetProperty(ref _canImportSelection, value);
     }
 
-    public Visibility SelectionEmptyVisibility => !IsNormalizationWorkspace && !IsFoundationWorkspace && SelectionTreeRoots.Count == 0
+    public Visibility SelectionEmptyVisibility => !IsNormalizationWorkspace && !IsFoundationWorkspace &&
+        SelectionTreeRoots.Count == 0 && !HasContentDetection
         ? Visibility.Visible
         : Visibility.Collapsed;
 
-    public Visibility SelectionContentVisibility => !IsNormalizationWorkspace && !IsFoundationWorkspace && SelectionTreeRoots.Count > 0
+    public Visibility SelectionContentVisibility => !IsNormalizationWorkspace && !IsFoundationWorkspace &&
+        SelectionTreeRoots.Count > 0
         ? Visibility.Visible
         : Visibility.Collapsed;
 
@@ -577,11 +722,13 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             if (SetProperty(ref _selectedSource, value))
             {
                 OnPropertyChanged(nameof(CanDetectSelectedSource));
+                OnPropertyChanged(nameof(CanAdvanceWorkflow));
+                OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
             }
         }
     }
 
-    public bool CanDetectSelectedSource => CanSync &&
+    public bool CanDetectSelectedSource => IsWorkflowOperationIdle && CanSync &&
         (IsEngineToToolbox || SelectedPublishStage?.IsAvailable == true) &&
         SelectedSource is { IsSharedMaterial: false };
 
@@ -592,6 +739,8 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         {
             if (SetProperty(ref _selectedPublishStage, value))
             {
+                _hasImportDetection = false;
+                OnPropertyChanged(nameof(HasContentDetection));
                 SetSelectionTree([]);
                 ResetImportOperation();
                 OnPropertyChanged(nameof(PublishStageDescription));
@@ -637,6 +786,10 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             ResetImportOperation();
             _lastImportSnapshot = null;
             _lastPublishChanges.Clear();
+            ResetDetectionSummary();
+            _isNormalizationStepLoaded = false;
+            NormalizationItems.Clear();
+            VisibleNormalizationItems = [];
             FoundationChecks.Clear();
             VisibleFoundationChecks = [];
             IsNormalizationWorkspace = false;
@@ -654,7 +807,6 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         _sessionRestored = false;
         _lastContentDetectionAt = null;
         OnPropertyChanged(nameof(ContentDetectionStatusText));
-        Detect();
     }
 
     public void Detect()
@@ -729,9 +881,16 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     public async Task<UnrealProjectSyncExportRunResult> ExportProjectCharactersAsync(
         IReadOnlyCollection<string>? selectedCharacterCodes = null,
         IProgress<ProgressUpdate>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        UnrealProjectSyncExportScope scope = UnrealProjectSyncExportScope.Full)
     {
-        var result = await _syncService.ExportProjectCharactersAsync(EnginePath, ProjectPath, selectedCharacterCodes, progress, cancellationToken);
+        var result = await _syncService.ExportProjectCharactersAsync(
+            EnginePath,
+            ProjectPath,
+            selectedCharacterCodes,
+            progress,
+            cancellationToken,
+            scope);
         Detect();
         return result;
     }
@@ -764,6 +923,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         RefreshVisibleFoundationChecks();
         OnPropertyChanged(nameof(FoundationSummaryText));
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
+        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
     }
 
     public UnrealSyncSessionCacheLoadResult RefreshDraftSources(IEnumerable<CharacterCard> characters, string? preferredCharacterCode = null)
@@ -785,21 +945,37 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         var previousCode = SelectedSource?.UnrealCandidate?.Code ?? SelectedSource?.DraftCharacter?.Code;
         var nextCode = source?.UnrealCandidate?.Code ?? source?.DraftCharacter?.Code;
         var sameDetectedSource = _hasImportDetection && string.Equals(previousCode, nextCode, StringComparison.OrdinalIgnoreCase);
+        var sameSource = string.Equals(previousCode, nextCode, StringComparison.OrdinalIgnoreCase);
         SelectedSource = source;
         if (!sameDetectedSource)
         {
             SetSelectionTree([]);
             ResetImportOperation();
             CloseNormalizationWorkspace();
+            SetNormalizationStepLoaded(false);
+            NormalizationItems.Clear();
+            VisibleNormalizationItems = [];
+        }
+        if (!sameSource)
+        {
+            FoundationChecks.Clear();
+            VisibleFoundationChecks = [];
+            OnPropertyChanged(nameof(FoundationSummaryText));
+            OnPropertyChanged(nameof(CanAdvanceWorkflow));
+            OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
         }
         if (!IsEngineToToolbox && !string.IsNullOrWhiteSpace(nextCode))
         {
-            RefreshFoundationChecks(nextCode);
+            if (!sameSource || FoundationChecks.Count == 0)
+            {
+                Detect();
+                RefreshFoundationChecks(nextCode);
+            }
         }
         SaveSessionCache();
     }
 
-    public bool OpenNormalizationWorkspace()
+    public bool OpenNormalizationWorkspace(bool activateWorkspace = true)
     {
         var character = SelectedSource?.DraftCharacter;
         var candidate = SelectedSource?.UnrealCandidate ??
@@ -810,12 +986,65 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             return false;
         }
 
-        NormalizationItems.Clear();
-        VisibleNormalizationItems = [];
-        var cachedDecisions = _sessionCacheService.Load(ProjectPath, character.Code).Cache?.NormalizationDecisions ?? [];
-        foreach (var item in new UnrealAssetNormalizationService().Build(character, candidate))
+        var inMemoryCache = _loadedSessionCache;
+        var stepCache = _sessionCacheService.LoadStep(ProjectPath, character.Code, 2).Cache;
+        var cachedDecisions = stepCache?.NormalizationDecisions ??
+            (inMemoryCache is not null && string.Equals(
+                inMemoryCache.SelectedCharacterCode,
+                character.Code,
+                StringComparison.OrdinalIgnoreCase)
+                ? inMemoryCache.NormalizationDecisions
+                : _sessionCacheService.Load(ProjectPath, character.Code).Cache?.NormalizationDecisions ?? []);
+        var rebuiltItems = BuildNormalizationItems(character, candidate, cachedDecisions);
+        ApplyNormalizationItems(rebuiltItems, activateWorkspace);
+        return true;
+    }
+
+    public async Task<bool> OpenNormalizationWorkspaceAsync(bool activateWorkspace = true)
+    {
+        var character = SelectedSource?.DraftCharacter;
+        var candidate = SelectedSource?.UnrealCandidate ??
+            CharacterCandidates.FirstOrDefault(item =>
+                string.Equals(item.Code, character?.Code, StringComparison.OrdinalIgnoreCase));
+        if (character is null || candidate is null)
         {
-            if (cachedDecisions.TryGetValue(item.StableId, out var decision))
+            return false;
+        }
+
+        var inMemoryCache = _loadedSessionCache;
+        var cachedDecisions = inMemoryCache is not null && string.Equals(
+                inMemoryCache.SelectedCharacterCode,
+                character.Code,
+                StringComparison.OrdinalIgnoreCase)
+            ? inMemoryCache.NormalizationDecisions
+            : _sessionCacheService.Load(ProjectPath, character.Code).Cache?.NormalizationDecisions ?? [];
+        var rebuiltItems = await Task.Run(() => BuildNormalizationItems(character, candidate, cachedDecisions));
+        ApplyNormalizationItems(rebuiltItems, activateWorkspace);
+        return true;
+    }
+
+    private static IReadOnlyList<UnrealAssetNormalizationItem> BuildNormalizationItems(
+        CharacterCard character,
+        UnrealProjectSyncCharacterCandidate candidate,
+        IReadOnlyDictionary<string, string> cachedDecisions)
+    {
+        var rebuiltItems = new UnrealAssetNormalizationService().Build(character, candidate).ToArray();
+        foreach (var item in rebuiltItems)
+        {
+            var decisionFound = cachedDecisions.TryGetValue(item.StableId, out var decision);
+            if (!decisionFound)
+            {
+                var assetName = item.UnrealObjectPath.Split('/').LastOrDefault()?.Split('.', 2)[0];
+                if (!string.IsNullOrWhiteSpace(assetName))
+                {
+                    var legacyDecision = cachedDecisions.FirstOrDefault(pair =>
+                        pair.Key.EndsWith($"/{assetName}.{assetName}", StringComparison.OrdinalIgnoreCase));
+                    decisionFound = !string.IsNullOrWhiteSpace(legacyDecision.Key);
+                    decision = legacyDecision.Value;
+                }
+            }
+
+            if (decisionFound && !string.IsNullOrWhiteSpace(decision))
             {
                 if (string.Equals(decision, "__not_required__", StringComparison.Ordinal))
                 {
@@ -824,20 +1053,51 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 else
                 {
                     var selected = item.Candidates.FirstOrDefault(candidateItem => string.Equals(candidateItem.StableId, decision, StringComparison.OrdinalIgnoreCase));
+                    var identityId = decision.StartsWith("material:", StringComparison.OrdinalIgnoreCase)
+                        ? decision["material:".Length..]
+                        : decision.StartsWith("voice:", StringComparison.OrdinalIgnoreCase)
+                            ? decision["voice:".Length..]
+                            : decision;
+                    if (selected is null &&
+                        new UnrealBridgeToolboxIdentityService().TryResolveAssignedPath(
+                            character,
+                            item.Module,
+                            identityId,
+                            out var assignedPath))
+                    {
+                        selected = item.Candidates.FirstOrDefault(candidateItem =>
+                            string.Equals(Path.GetFullPath(candidateItem.AssetPath), Path.GetFullPath(assignedPath), StringComparison.OrdinalIgnoreCase));
+                    }
+
                     if (selected is not null) item.SelectRedirect(selected);
                 }
             }
 
+        }
+
+        return rebuiltItems;
+    }
+
+    private void ApplyNormalizationItems(
+        IReadOnlyList<UnrealAssetNormalizationItem> rebuiltItems,
+        bool activateWorkspace)
+    {
+        NormalizationItems.Clear();
+        foreach (var item in rebuiltItems)
+        {
             NormalizationItems.Add(item);
         }
 
         RefreshVisibleNormalizationItems();
+        SetNormalizationStepLoaded(true);
 
-        IsNormalizationWorkspace = true;
-        WorkflowStep = 2;
+        if (activateWorkspace)
+        {
+            IsNormalizationWorkspace = true;
+            WorkflowStep = 2;
+        }
         OnPropertyChanged(nameof(NormalizationSummaryText));
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
-        return true;
     }
 
     public void SelectNormalizationRedirect(UnrealAssetNormalizationItem item, UnrealAssetNormalizationCandidate candidate)
@@ -856,6 +1116,22 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     {
         item.ClearRedirect();
         NormalizationResolutionChanged();
+    }
+
+    public void BeginNormalizationStepLoad() => SetNormalizationStepLoaded(false);
+
+    private void SetNormalizationStepLoaded(bool value)
+    {
+        if (_isNormalizationStepLoaded == value)
+        {
+            return;
+        }
+
+        _isNormalizationStepLoaded = value;
+        OnPropertyChanged(nameof(IsNormalizationStepLoaded));
+        OnPropertyChanged(nameof(CanAdvanceWorkflow));
+        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
+        SaveSessionCache();
     }
 
     private void RefreshVisibleNormalizationItems()
@@ -885,13 +1161,19 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
     public void ReturnToWorkflowStep(int step)
     {
-        WorkflowStep = step;
-        if (step != 2)
+        if (step == 2)
         {
-            IsNormalizationWorkspace = false;
+            IsNormalizationWorkspace = true;
+            WorkflowStep = 2;
+            return;
         }
-        if (step == 1 && SelectedSource?.DraftCharacter is { Code: var characterCode })
+
+        WorkflowStep = step;
+        IsNormalizationWorkspace = false;
+        if (step == 1 && FoundationChecks.Count == 0 &&
+            SelectedSource?.DraftCharacter is { Code: var characterCode })
         {
+            Detect();
             RefreshFoundationChecks(characterCode);
         }
     }
@@ -916,6 +1198,10 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             }
 
             IsNormalizationWorkspace = false;
+            if (!RefreshPublishTreeDisplay())
+            {
+                return false;
+            }
             WorkflowStep = 3;
             return true;
         }
@@ -938,23 +1224,31 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
     public void SetSelectionTree(IEnumerable<UnrealSyncSelectionTreeItem> roots)
     {
+        foreach (var root in SelectionTreeRoots)
+        {
+            root.GroupSelectionChanged -= SelectionGroup_GroupSelectionChanged;
+        }
         foreach (var child in SelectionTreeRoots.SelectMany(root => root.Children))
         {
             child.PropertyChanged -= ImportSelectionItem_PropertyChanged;
         }
 
         SelectionTreeRoots.Clear();
+        _selectionParents.Clear();
         foreach (var root in roots)
         {
             SelectionTreeRoots.Add(root);
+            root.GroupSelectionChanged += SelectionGroup_GroupSelectionChanged;
             foreach (var child in root.Children)
             {
+                _selectionParents[child] = root;
                 child.PropertyChanged += ImportSelectionItem_PropertyChanged;
             }
         }
 
         OnPropertyChanged(nameof(SelectionEmptyVisibility));
         OnPropertyChanged(nameof(SelectionContentVisibility));
+        OnPropertyChanged(nameof(DetectionResultVisibility));
         UpdateImportSelectionSummary();
         ApplyPublishFilter();
     }
@@ -964,20 +1258,35 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         IReadOnlySet<string> existingStableIds,
         UnrealBridgeSnapshot? snapshot = null)
     {
+        var rootList = roots.ToArray();
         _existingImportStableIds.Clear();
         _existingImportStableIds.UnionWith(existingStableIds);
         _hasImportDetection = true;
         OnPropertyChanged(nameof(HasContentDetection));
+        SetImportDetectionSummary(snapshot, rootList);
         ImportOperationTitle = "内容检测完成";
         ImportOperationMessage = "展开中间分类并勾选内容，下面会实时显示本次导入影响。";
         ImportDetailVisibility = Visibility.Visible;
         ImportResultVisibility = Visibility.Collapsed;
         ImportResultMessage = string.Empty;
-        SetSelectionTree(roots);
+        SetSelectionTree(rootList);
         _lastImportSnapshot = snapshot;
         _lastContentDetectionAt = DateTimeOffset.Now;
         OnPropertyChanged(nameof(ContentDetectionStatusText));
+        OnPropertyChanged(nameof(DetectionResultVisibility));
         SaveSessionCache();
+    }
+
+    public async Task SetImportSelectionTreeAsync(
+        UnrealBridgeSnapshot snapshot,
+        IReadOnlySet<string> existingStableIds,
+        CancellationToken cancellationToken = default)
+    {
+        var roots = await Task.Run(
+            () => UnrealSyncSelectionTreeBuilder.FromSnapshot(snapshot),
+            cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        SetImportSelectionTree(roots, existingStableIds, snapshot);
     }
 
     public void CompleteImportOperation(string draftPath, int removedDuplicateCount)
@@ -991,7 +1300,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         ImportResultVisibility = Visibility.Visible;
     }
 
-    public void SetPublishSelectionTree(IEnumerable<UnrealSyncSelectionTreeItem> roots)
+    public void SetPublishSelectionTree(
+        IEnumerable<UnrealSyncSelectionTreeItem> roots,
+        IReadOnlyCollection<UnrealBridgeChange>? changes = null)
     {
         _existingImportStableIds.Clear();
         _hasImportDetection = true;
@@ -1001,14 +1312,33 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         ImportDetailVisibility = Visibility.Visible;
         ImportResultVisibility = Visibility.Collapsed;
         ImportResultMessage = string.Empty;
-        SetSelectionTree(roots);
+        var rootList = roots.ToArray();
+        if (changes is not null)
+        {
+            SetPublishDetectionSummary(changes);
+        }
+        ApplyPublishDisplay(rootList);
+        SetSelectionTree(rootList);
         _lastPublishChanges = SelectionTreeRoots.SelectMany(root => root.Children)
             .Where(item => item.Change is not null)
             .Select(item => item.Change!)
             .ToList();
         _lastContentDetectionAt = DateTimeOffset.Now;
         OnPropertyChanged(nameof(ContentDetectionStatusText));
+        OnPropertyChanged(nameof(DetectionResultVisibility));
         SaveSessionCache();
+    }
+
+    public async Task SetPublishSelectionTreeAsync(
+        IReadOnlyCollection<UnrealBridgeChange> changes,
+        Func<UnrealBridgeChange, bool>? canExecute = null,
+        CancellationToken cancellationToken = default)
+    {
+        var roots = await Task.Run(
+            () => UnrealSyncSelectionTreeBuilder.FromChanges(changes, canExecute),
+            cancellationToken);
+        cancellationToken.ThrowIfCancellationRequested();
+        SetPublishSelectionTree(roots, changes);
     }
 
     public IReadOnlyList<UnrealBridgeChange> FilterPublishChanges(IReadOnlyList<UnrealBridgeChange> changes)
@@ -1023,8 +1353,157 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             .ToArray();
     }
 
+    public bool MatchesCurrentPublishChanges(IReadOnlyList<UnrealBridgeChange> latestChanges)
+    {
+        var current = _lastPublishChanges
+            .Select(GetPublishChangeFingerprint)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var latest = latestChanges
+            .Select(GetPublishChangeFingerprint)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return current.SequenceEqual(latest, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static string GetPublishChangeFingerprint(UnrealBridgeChange change) =>
+        string.Join("|",
+            change.StableId,
+            change.Kind,
+            change.ToolboxItem?.ContentHash ?? string.Empty,
+            change.UnrealItem?.ContentHash ?? string.Empty,
+            change.ToolboxItem?.ToolboxRelativePath ?? string.Empty,
+            change.UnrealItem?.SourceObjectPath ?? string.Empty);
+
+    public bool RefreshPublishTreeDisplay()
+    {
+        return ApplyPublishDisplay(SelectionTreeRoots);
+    }
+
+    private bool ApplyPublishDisplay(IEnumerable<UnrealSyncSelectionTreeItem> roots)
+    {
+        var allRedirectNamesResolved = true;
+        foreach (var item in roots.SelectMany(root => root.Children))
+        {
+            if (item.Change is not UnrealBridgeChange change)
+            {
+                continue;
+            }
+
+            var normalization = change.UnrealItem is null
+                ? null
+                : NormalizationItems.FirstOrDefault(candidate =>
+                    string.Equals(candidate.UnrealObjectPath, change.UnrealItem.SourceObjectPath, StringComparison.OrdinalIgnoreCase));
+            if (normalization is null && change.UnrealItem is not null)
+            {
+                var unrealAssetName = GetUnrealAssetName(change.UnrealItem.SourceObjectPath);
+                normalization = NormalizationItems.FirstOrDefault(candidate =>
+                    candidate.Module == change.Module &&
+                    string.Equals(GetUnrealAssetName(candidate.UnrealObjectPath), unrealAssetName, StringComparison.OrdinalIgnoreCase));
+            }
+            var redirectedDisplayName = change.UnrealItem is null
+                ? null
+                : normalization?.SelectedCandidate?.DisplayName ?? ResolveCachedRedirectDisplayName(change);
+            var displayName = change.UnrealItem is not null
+                ? redirectedDisplayName ?? "待选择工具箱素材"
+                : change.ToolboxItem is { AssetPath: var assetPath }
+                    ? Path.GetFileNameWithoutExtension(assetPath)
+                    : change.DisplayName;
+            var detail = change.UnrealItem is not null
+                ? $"Unreal 现有：{TrimGamePrefix(change.UnrealItem.SourceObjectPath)}"
+                : $"目标：{BuildPublishTargetPreview(change.ToolboxItem)}";
+            item.ApplyDisplay(displayName, detail);
+            if (change.UnrealItem is not null && string.IsNullOrWhiteSpace(redirectedDisplayName))
+            {
+                allRedirectNamesResolved = false;
+            }
+        }
+        return allRedirectNamesResolved;
+    }
+
+    private string? ResolveCachedRedirectDisplayName(UnrealBridgeChange change)
+    {
+        if (change.UnrealItem is null || SelectedSource?.DraftCharacter is not { } character)
+        {
+            return null;
+        }
+
+        var decisions = _loadedSessionCache?.NormalizationDecisions;
+        if (decisions is null || decisions.Count == 0)
+        {
+            return null;
+        }
+
+        var sourcePath = change.UnrealItem.SourceObjectPath;
+        var decision = decisions.GetValueOrDefault(sourcePath);
+        if (string.IsNullOrWhiteSpace(decision))
+        {
+            var assetName = GetUnrealAssetName(sourcePath);
+            decision = decisions.FirstOrDefault(pair =>
+                string.Equals(GetUnrealAssetName(pair.Key), assetName, StringComparison.OrdinalIgnoreCase)).Value;
+        }
+
+        if (string.IsNullOrWhiteSpace(decision) || string.Equals(decision, "__not_required__", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var identityId = decision.StartsWith("material:", StringComparison.OrdinalIgnoreCase)
+            ? decision["material:".Length..]
+            : decision.StartsWith("voice:", StringComparison.OrdinalIgnoreCase)
+                ? decision["voice:".Length..]
+                : decision;
+        return new UnrealBridgeToolboxIdentityService().TryResolveAssignedPath(
+            character,
+            change.Module,
+            identityId,
+            out var assignedPath)
+                ? Path.GetFileNameWithoutExtension(assignedPath)
+                : null;
+    }
+
+    private static string BuildPublishTargetPreview(UnrealBridgeSnapshotItem? toolboxItem)
+    {
+        if (toolboxItem is null || string.IsNullOrWhiteSpace(toolboxItem.AssetPath)) return string.Empty;
+        var relative = toolboxItem.ToolboxRelativePath.Replace('\\', '/').Trim('/');
+        var fileName = Path.GetFileNameWithoutExtension(toolboxItem.AssetPath);
+        var codeMarker = "/Completed/";
+        var normalizedPath = toolboxItem.AssetPath.Replace('\\', '/');
+        var markerIndex = normalizedPath.IndexOf(codeMarker, StringComparison.OrdinalIgnoreCase);
+        var code = markerIndex >= 0 ? normalizedPath[(markerIndex + codeMarker.Length)..].Split('/')[0] : "";
+        if (relative.StartsWith("AssetMaterial/BuffIcon/", StringComparison.OrdinalIgnoreCase))
+            return $"GameActor2D/{code}/BUFF/{fileName}";
+        if (relative.StartsWith("AssetMaterial/", StringComparison.OrdinalIgnoreCase))
+            return $"AssetMaterial/ImageS/CharaterS/{code}/{fileName}";
+        if (relative.StartsWith("Sound/", StringComparison.OrdinalIgnoreCase))
+        {
+            var separatorIndex = relative.LastIndexOf('/');
+            var categoryPath = separatorIndex >= 0 ? relative[..(separatorIndex + 1)] : string.Empty;
+            return $"GameActor2D/{code}/{categoryPath}{fileName}";
+        }
+        return relative;
+    }
+
+    private static string TrimGamePrefix(string path) =>
+        path.StartsWith("/Game/", StringComparison.OrdinalIgnoreCase) ? path[6..] : path;
+
+    private static string GetUnrealAssetName(string objectPath)
+    {
+        var leaf = objectPath.Replace('\\', '/').Split('/').LastOrDefault() ?? string.Empty;
+        return leaf.Split('.', 2)[0];
+    }
+
     public void CompletePublishOperation(int executedCount, int deferredCount)
     {
+        SetSelectionTree([]);
+        _lastPublishChanges.Clear();
+        _hasImportDetection = false;
+        OnPropertyChanged(nameof(HasContentDetection));
+        OnPropertyChanged(nameof(DetectionResultVisibility));
+        ResetDetectionSummary();
+        OnPropertyChanged(nameof(IsPublishSelectionReady));
+        OnPropertyChanged(nameof(HasPublishSelection));
+        OnPropertyChanged(nameof(CanStartPublish));
         WorkflowStep = 4;
         ImportOperationTitle = "同步完成";
         ImportOperationMessage = "执行结果已保留，可以继续调整选择后重新检测。";
@@ -1050,7 +1529,10 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
     public void FailImportDetection(string message)
     {
-        ResetImportOperation();
+        if (IsEngineToToolbox || SelectionTreeRoots.Count == 0)
+        {
+            ResetImportOperation();
+        }
         ImportOperationTitle = IsEngineToToolbox ? "内容检测失败" : "差异检测失败";
         ImportOperationMessage = message;
     }
@@ -1062,10 +1544,24 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     {
         if (e.PropertyName == nameof(UnrealSyncSelectionTreeItem.IsChecked))
         {
+            if (sender is UnrealSyncSelectionTreeItem child &&
+                _selectionParents.TryGetValue(child, out var parent) &&
+                parent.IsUpdatingChildren)
+            {
+                return;
+            }
+
             UpdateImportSelectionSummary();
             ApplyPublishFilter();
             SaveSessionCache();
         }
+    }
+
+    private void SelectionGroup_GroupSelectionChanged(object? sender, EventArgs e)
+    {
+        UpdateImportSelectionSummary();
+        ApplyPublishFilter();
+        SaveSessionCache();
     }
 
     private void NormalizationResolutionChanged()
@@ -1073,6 +1569,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         OnPropertyChanged(nameof(NormalizationSummaryText));
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
         OnPropertyChanged(nameof(IsPublishSelectionReady));
+            OnPropertyChanged(nameof(HasPublishSelection));
+            OnPropertyChanged(nameof(CanStartPublish));
+            OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
         OnPropertyChanged(nameof(PendingRedirectCount));
         OnPropertyChanged(nameof(ReadyPublishCount));
         OnPropertyChanged(nameof(ReadyPublishText));
@@ -1107,23 +1606,10 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             return new(UnrealSyncSessionCacheLoadStatus.Invalid, ErrorMessage: "同步进度使用的 Unreal 引擎路径与当前设置不一致。");
         }
 
-        var hasProgress = cache.IsPublishDetection ? cache.PublishChanges.Count > 0 : cache.ImportSnapshot is not null;
+        var hasProgress = cache.IsPublishDetection || cache.ImportSnapshot is not null;
         if (string.IsNullOrWhiteSpace(cache.SelectedCharacterCode) || !hasProgress)
         {
             return new(UnrealSyncSessionCacheLoadStatus.Missing);
-        }
-
-        if (cache.IsPublishDetection)
-        {
-            try
-            {
-                RefreshFoundationChecks(cache.SelectedCharacterCode);
-                _syncService.ValidatePublishCharacterFolders(ProjectPath, cache.SelectedCharacterCode);
-            }
-            catch (InvalidOperationException ex)
-            {
-                return new(UnrealSyncSessionCacheLoadStatus.Invalid, ErrorMessage: ex.Message);
-            }
         }
 
         _isRestoringSession = true;
@@ -1146,15 +1632,51 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             WorkflowStep = cache.WorkflowStep is >= 1 and <= 4 ? cache.WorkflowStep : 1;
             OnPropertyChanged(nameof(ContentDetectionStatusText));
 
+            RestoreNormalizationItems(cache.NormalizationItems);
+            _detectionTotalCount = cache.DetectionTotalCount;
+            _detectionUnchangedCount = cache.DetectionUnchangedCount;
+            _detectionAddedCount = cache.DetectionAddedCount;
+            _detectionUpdatedCount = cache.DetectionUpdatedCount;
+            _detectionRenamedCount = cache.DetectionRenamedCount;
+            _detectionConflictCount = cache.DetectionConflictCount;
+            _detectionDeletedCount = cache.DetectionDeletedCount;
+            NotifyDetectionSummaryChanged();
+            _isNormalizationStepLoaded = cache.IsNormalizationStepLoaded ||
+                cache.WorkflowStep >= 3 || cache.NormalizationItems.Count > 0;
+            OnPropertyChanged(nameof(IsNormalizationStepLoaded));
+
             if (cache.IsPublishDetection)
             {
-                var selectedIds = cache.SelectedStableIds.Count > 0
-                    ? cache.SelectedStableIds
-                    : cache.PublishChanges.Where(change => change.IsSelected).Select(change => change.StableId).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                var cachedChanges = FilterPublishChanges(cache.PublishChanges).ToArray();
-                var roots = UnrealSyncSelectionTreeBuilder.FromChanges(cachedChanges, UnrealBridgePublishSupportPolicy.CanExecute);
-                ApplySelection(roots, selectedIds);
-                SetPublishSelectionTree(roots);
+                if (cache.DetectionAlgorithmVersion != CurrentDetectionAlgorithmVersion)
+                {
+                    cache.DetectionAlgorithmVersion = CurrentDetectionAlgorithmVersion;
+                    cache.PublishChanges.Clear();
+                    cache.SelectedStableIds.Clear();
+                    _lastPublishChanges.Clear();
+                    _hasImportDetection = false;
+                    ResetDetectionSummary();
+                    OnPropertyChanged(nameof(HasContentDetection));
+                    SetSelectionTree([]);
+                    ImportOperationTitle = "等待差异检测";
+                    ImportOperationMessage = "检测缓存已过期，请重新加载同步素材。";
+                    ImportDetailVisibility = Visibility.Collapsed;
+                    ImportResultVisibility = Visibility.Collapsed;
+                    ImportResultMessage = string.Empty;
+                }
+                else
+                {
+                    var selectedIds = cache.SelectedStableIds.Count > 0
+                        ? cache.SelectedStableIds
+                        : cache.PublishChanges.Where(change => change.IsSelected).Select(change => change.StableId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    var cachedChanges = FilterCachedPublishChanges(cache, source.DraftCharacter).ToArray();
+                    var roots = UnrealSyncSelectionTreeBuilder.FromChanges(cachedChanges, UnrealBridgePublishSupportPolicy.CanExecute);
+                    ApplySelection(roots, selectedIds);
+                    if (cache.DetectionTotalCount == 0 && cachedChanges.Length > 0)
+                    {
+                        SetPublishDetectionSummary(cachedChanges);
+                    }
+                    SetPublishSelectionTree(roots);
+                }
             }
             else
             {
@@ -1163,28 +1685,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 SetImportSelectionTree(roots, new HashSet<string>(StringComparer.OrdinalIgnoreCase), cache.ImportSnapshot);
             }
 
-            var restoredWorkflowStep = WorkflowStep;
-            if (cache.IsPublishDetection && restoredWorkflowStep >= 3 && !OpenNormalizationWorkspace())
-            {
-                return new(
-                    UnrealSyncSessionCacheLoadStatus.Invalid,
-                    ErrorMessage: $"无法恢复 {cache.SelectedCharacterCode} 的素材规整映射。");
-            }
-
-            if (restoredWorkflowStep == 2 && !OpenNormalizationWorkspace())
-            {
-                SetSelectionTree([]);
-                ResetImportOperation();
-                return new(
-                    UnrealSyncSessionCacheLoadStatus.Invalid,
-                    ErrorMessage: $"已恢复 {cache.SelectedCharacterCode} 的第 2 步进度，但无法重建素材规整工作区，将重新检测。");
-            }
-
-            if (restoredWorkflowStep != 2)
-            {
-                IsNormalizationWorkspace = false;
-                WorkflowStep = restoredWorkflowStep;
-            }
+            _lastContentDetectionAt = cache.DetectedAt == default ? null : cache.DetectedAt;
+            IsNormalizationWorkspace = cache.IsPublishDetection && WorkflowStep == 2;
+            OnPropertyChanged(nameof(ContentDetectionStatusText));
 
             return loadResult;
         }
@@ -1192,6 +1695,80 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         {
             _isRestoringSession = false;
         }
+    }
+
+    private void RestoreNormalizationItems(IEnumerable<UnrealSyncNormalizationCacheItem> cachedItems)
+    {
+        NormalizationItems.Clear();
+        foreach (var cached in cachedItems)
+        {
+            var candidates = cached.Candidates.ToArray();
+            var selectedCandidate = candidates.FirstOrDefault(candidate =>
+                string.Equals(candidate.StableId, cached.SelectedCandidateStableId, StringComparison.OrdinalIgnoreCase));
+            var item = new UnrealAssetNormalizationItem(
+                cached.StableId,
+                cached.Module,
+                cached.Category,
+                cached.UnrealAssetName,
+                cached.UnrealObjectPath,
+                cached.PreviewFilePath,
+                cached.ReferenceCount,
+                candidates,
+                cached.Decision == UnrealAssetNormalizationDecision.Redirect ? selectedCandidate : null,
+                cached.IsAlreadyNormalized);
+            if (cached.Decision == UnrealAssetNormalizationDecision.NotRequired)
+            {
+                item.MarkNotRequired();
+            }
+            else if (cached.Decision == UnrealAssetNormalizationDecision.Pending || selectedCandidate is null)
+            {
+                item.ClearRedirect();
+            }
+
+            NormalizationItems.Add(item);
+        }
+
+        RefreshVisibleNormalizationItems();
+        OnPropertyChanged(nameof(CanAdvanceWorkflow));
+    }
+
+    private IReadOnlyList<UnrealBridgeChange> FilterCachedPublishChanges(
+        UnrealSyncSessionCache cache,
+        CharacterCard? character)
+    {
+        var changes = FilterPublishChanges(cache.PublishChanges)
+            .Where(change => change.Kind != UnrealBridgeChangeKind.Unchanged)
+            .ToArray();
+        if (character is null)
+        {
+            return changes;
+        }
+
+        var state = new UnrealBridgeStateService().Load(character, ProjectPath);
+        if (state is null)
+        {
+            return changes;
+        }
+
+        return changes
+            .Where(change => !IsAlreadyVerified(change, state))
+            .ToArray();
+    }
+
+    private static bool IsAlreadyVerified(
+        UnrealBridgeChange change,
+        UnrealBridgeSyncState state)
+    {
+        if (!state.Entries.TryGetValue(change.StableId, out var entry))
+        {
+            return false;
+        }
+
+        var toolboxMatches = change.ToolboxItem is not null &&
+            string.Equals(change.ToolboxItem.ContentHash, entry.ToolboxHash, StringComparison.OrdinalIgnoreCase);
+        var unrealMatches = change.UnrealItem is not null &&
+            string.Equals(change.UnrealItem.ContentHash, entry.UnrealHash, StringComparison.OrdinalIgnoreCase);
+        return toolboxMatches && (unrealMatches || change.UnrealItem is null);
     }
 
     private static void ApplySelection(IEnumerable<UnrealSyncSelectionTreeItem> roots, IReadOnlySet<string> selectedIds)
@@ -1231,6 +1808,12 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         if (_isRestoringSession || string.IsNullOrWhiteSpace(ProjectPath)) return;
         var existing = _loadedSessionCache;
         var selectedCode = SelectedSource?.UnrealCandidate?.Code ?? SelectedSource?.DraftCharacter?.Code ?? existing?.SelectedCharacterCode ?? string.Empty;
+        var existingForSelectedCharacter = existing is not null && string.Equals(
+            existing.SelectedCharacterCode,
+            selectedCode,
+            StringComparison.OrdinalIgnoreCase)
+                ? existing
+                : null;
         var selectedIds = GetSelectedStableIds().ToHashSet(StringComparer.OrdinalIgnoreCase);
         var selectedByStableId = SelectionTreeRoots.SelectMany(root => root.Children)
             .ToDictionary(item => item.StableId, item => item.IsChecked == true, StringComparer.OrdinalIgnoreCase);
@@ -1242,25 +1825,52 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         {
             EnginePath = EnginePath,
             ProjectPath = ProjectPath,
+            DetectionAlgorithmVersion = CurrentDetectionAlgorithmVersion,
             Direction = IsEngineToToolbox ? UnrealBridgeDirection.ImportFromUnreal : UnrealBridgeDirection.PublishToUnreal,
             Stage = SelectedPublishStage?.Stage ?? UnrealBridgePublishStage.CharacterMaterials,
             WorkflowStep = WorkflowStep,
             SelectedCharacterCode = selectedCode,
             DetectedAt = _lastContentDetectionAt ?? DateTimeOffset.Now,
             IsPublishDetection = !IsEngineToToolbox,
-            ImportSnapshot = _lastImportSnapshot ?? existing?.ImportSnapshot,
-            PublishChanges = changes.Count > 0 ? changes : existing?.PublishChanges ?? [],
+            DetectionTotalCount = _detectionTotalCount,
+            DetectionUnchangedCount = _detectionUnchangedCount,
+            DetectionAddedCount = _detectionAddedCount,
+            DetectionUpdatedCount = _detectionUpdatedCount,
+            DetectionRenamedCount = _detectionRenamedCount,
+            DetectionConflictCount = _detectionConflictCount,
+            DetectionDeletedCount = _detectionDeletedCount,
+            ImportSnapshot = _lastImportSnapshot ?? existingForSelectedCharacter?.ImportSnapshot,
+            PublishChanges = WorkflowStep == 4
+                ? []
+                : changes.Count > 0 ? changes : existingForSelectedCharacter?.PublishChanges ?? [],
             SelectedStableIds = selectedIds,
             NormalizationDecisions = NormalizationItems.Count == 0
-                ? existing?.NormalizationDecisions ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+                ? existingForSelectedCharacter?.NormalizationDecisions ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 : NormalizationItems
                     .Where(item => item.IsResolved)
-                    .ToDictionary(
-                        item => item.StableId,
-                        item => item.Decision == UnrealAssetNormalizationDecision.NotRequired
-                            ? "__not_required__"
-                            : item.SelectedCandidate?.StableId ?? string.Empty,
-                        StringComparer.OrdinalIgnoreCase),
+                     .ToDictionary(
+                         item => item.StableId,
+                         item => item.Decision == UnrealAssetNormalizationDecision.NotRequired
+                             ? "__not_required__"
+                             : item.SelectedCandidate?.StableId ?? string.Empty,
+                         StringComparer.OrdinalIgnoreCase),
+            NormalizationItems = NormalizationItems
+                .Select(item => new UnrealSyncNormalizationCacheItem
+                {
+                    StableId = item.StableId,
+                    Module = item.Module,
+                    Category = item.Category,
+                    UnrealAssetName = item.UnrealAssetName,
+                    UnrealObjectPath = item.UnrealObjectPath,
+                    PreviewFilePath = item.PreviewFilePath,
+                    ReferenceCount = item.ReferenceCount,
+                    Candidates = item.Candidates.ToList(),
+                    SelectedCandidateStableId = item.SelectedCandidate?.StableId ?? string.Empty,
+                    Decision = item.Decision,
+                    IsAlreadyNormalized = item.IsAlreadyNormalized
+                })
+                .ToList(),
+            IsNormalizationStepLoaded = _isNormalizationStepLoaded,
             HideCompletedFoundationChecks = HideCompletedFoundationChecks,
             HideResolvedNormalizationItems = HideResolvedNormalizationItems
         };
@@ -1359,6 +1969,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         CanImportSelection = CanSync && _importSelectedCount > 0 && !hasUnsupportedSelection;
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
         OnPropertyChanged(nameof(IsPublishSelectionReady));
+        OnPropertyChanged(nameof(HasPublishSelection));
+        OnPropertyChanged(nameof(CanStartPublish));
+        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
         OnPropertyChanged(nameof(PendingRedirectCount));
         OnPropertyChanged(nameof(PublishConflictCount));
         OnPropertyChanged(nameof(ReadyPublishCount));
@@ -1387,6 +2000,8 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     {
         _hasImportDetection = false;
         OnPropertyChanged(nameof(HasContentDetection));
+        OnPropertyChanged(nameof(DetectionResultVisibility));
+        ResetDetectionSummary();
         _existingImportStableIds.Clear();
         _importSelectedCount = 0;
         _importAddedCount = 0;

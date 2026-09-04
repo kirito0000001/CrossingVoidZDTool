@@ -48,6 +48,11 @@ internal sealed class UnrealAssetNormalizationService
                      .ThenBy(item => item.Category, StringComparer.OrdinalIgnoreCase)
                      .ThenBy(item => item.AssetName, StringComparer.OrdinalIgnoreCase))
         {
+            var moduleCandidates = toolboxItems
+                .Where(item => item.Module == unrealItem.Module)
+                .Select(item => new UnrealAssetNormalizationCandidate(item.StableId, Path.GetFileNameWithoutExtension(item.AssetPath), item.AssetPath))
+                .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
             var candidates = toolboxItems
                 .Where(item => item.Module == unrealItem.Module)
                 .Where(item => string.Equals(ReadCategory(item.PayloadJson), unrealItem.Category, StringComparison.OrdinalIgnoreCase))
@@ -63,6 +68,11 @@ internal sealed class UnrealAssetNormalizationService
                     .ToArray();
             }
             var exactMatch = candidates.FirstOrDefault(item => string.Equals(
+                NormalizeName(Path.GetFileNameWithoutExtension(item.AssetPath)),
+                NormalizeName(unrealItem.AssetName),
+                StringComparison.OrdinalIgnoreCase) &&
+                IsCanonicalCharacterPath(unrealItem.ObjectPath, character.Code));
+            exactMatch ??= moduleCandidates.FirstOrDefault(item => string.Equals(
                 NormalizeName(Path.GetFileNameWithoutExtension(item.AssetPath)),
                 NormalizeName(unrealItem.AssetName),
                 StringComparison.OrdinalIgnoreCase) &&

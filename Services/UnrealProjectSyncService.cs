@@ -244,6 +244,7 @@ internal sealed class UnrealProjectSyncService
             CheckChildFolder(actorRootPath, actorObjectPath, "BUFF", "个人 BUFF 素材"),
             CheckChildFolder(actorRootPath, actorObjectPath, "Material", "序列帧素材"),
             CheckChildFolder(actorRootPath, actorObjectPath, "Sound", "角色声音"),
+            CheckChildFolder(soundRootPath, soundObjectPath, "Other", "待分配语音目录"),
             CheckExactAsset(contentPath, soundRootPath, soundObjectPath, $"{characterCode}_OnDM", "Meta 受击音", "MetaSoundSource", manifest, requireAssetTypes,
                 name => name.EndsWith("_OnDM", StringComparison.OrdinalIgnoreCase)),
             CheckExactAsset(contentPath, soundRootPath, soundObjectPath, $"{characterCode}_Con_Talk", "语音并发", "SoundConcurrency", manifest, requireAssetTypes,
@@ -376,7 +377,9 @@ internal sealed class UnrealProjectSyncService
     public ProcessStartInfo BuildExportProcessStartInfo(
         string? enginePath,
         string? projectPath,
-        IReadOnlyCollection<string>? selectedCharacterCodes = null)
+        IReadOnlyCollection<string>? selectedCharacterCodes = null,
+        bool validateProjectModules = true,
+        UnrealProjectSyncExportScope scope = UnrealProjectSyncExportScope.Full)
     {
         var normalizedEnginePath = NormalizePath(enginePath);
         var normalizedProjectPath = NormalizePath(projectPath);
@@ -391,7 +394,10 @@ internal sealed class UnrealProjectSyncService
             throw new InvalidOperationException("请先选择有效的 Unreal .uproject 文件。");
         }
 
-        ValidateProjectModuleBuildIds(normalizedEnginePath, normalizedProjectPath);
+        if (validateProjectModules)
+        {
+            ValidateProjectModuleBuildIds(normalizedEnginePath, normalizedProjectPath);
+        }
 
         var scriptPath = GetExportScriptPath();
         if (!File.Exists(scriptPath))
@@ -415,6 +421,7 @@ internal sealed class UnrealProjectSyncService
         startInfo.Environment["ZD_TOOLBOX_EXPORT_MANIFEST"] = manifestPath;
         startInfo.Environment["ZD_TOOLBOX_EXPORT_PROGRESS"] = GetExportProgressPath(manifestPath);
         startInfo.Environment["ZD_TOOLBOX_TARGET_PATHS"] = $"[{string.Join(", ", ExportTargetContentPaths.Select(ToJsonStringLiteral))}]";
+        startInfo.Environment["ZD_TOOLBOX_EXPORT_SCOPE"] = scope.ToString();
         if (selectedCharacterCodes is { Count: > 0 })
         {
             startInfo.Environment["ZD_TOOLBOX_SELECTED_CHARACTERS"] =
@@ -535,28 +542,48 @@ internal sealed class UnrealProjectSyncService
         string? projectPath,
         IReadOnlyCollection<string>? selectedCharacterCodes = null,
         IProgress<ProgressUpdate>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        UnrealProjectSyncExportScope scope = UnrealProjectSyncExportScope.Full)
     {
         cancellationToken.ThrowIfCancellationRequested();
         progress?.Report(new ProgressUpdate("正在校验虚幻同步定位...", 5, "检查引擎、项目和工具箱内置导出脚本。"));
         var selectedCodes = NormalizeSelectedCharacterCodes(selectedCharacterCodes);
-        var startInfo = BuildExportProcessStartInfo(enginePath, projectPath, selectedCodes);
-        startInfo.RedirectStandardOutput = true;
-        startInfo.RedirectStandardError = true;
-
         var normalizedProjectPath = NormalizePath(projectPath);
         var manifestPath = Path.Combine(GetExportDirectoryPath(normalizedProjectPath), ExportManifestFileName);
         var progressPath = GetExportProgressPath(manifestPath);
+        var taskExecutionService = new UnrealPythonTaskExecutionService();
+        var useRunningEditor = taskExecutionService.ShouldUseRunningEditor();
+        var offlineStartInfo = BuildExportProcessStartInfo(
+            enginePath,
+            projectPath,
+            selectedCodes,
+            validateProjectModules: !useRunningEditor,
+            scope: scope);
+        offlineStartInfo.RedirectStandardOutput = true;
+        offlineStartInfo.RedirectStandardError = true;
+        var launch = taskExecutionService.BuildLaunch(
+            NormalizePath(enginePath),
+            normalizedProjectPath,
+            GetExportScriptPath(),
+            Path.Combine(Path.GetDirectoryName(manifestPath)!, "export.remote-job.json"),
+            offlineStartInfo,
+            useRunningEditor);
+        var startInfo = launch.StartInfo;
         TryDeleteFile(progressPath);
         progress?.Report(new ProgressUpdate("正在准备导出目录...", 18, manifestPath));
         Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
 
-        progress?.Report(new ProgressUpdate("正在启动 Unreal Editor 命令进程...", 35, startInfo.FileName));
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("无法启动 Unreal Editor。");
+        progress?.Report(new ProgressUpdate(
+            launch.UsesRunningEditor ? "正在连接已打开的 Unreal Editor..." : "正在启动 Unreal Editor 命令进程...",
+            35,
+            startInfo.FileName));
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("无法启动 Unreal Python 任务进程。");
         var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
         progress?.Report(new ProgressUpdate(
-            "Unreal 已启动，正在加载项目并执行导出脚本...",
+            launch.UsesRunningEditor
+                ? "已连接 Unreal Editor，正在执行导出脚本..."
+                : "Unreal 已启动，正在加载项目并执行导出脚本...",
             45,
             selectedCodes.Count == 0
                 ? "首次加载项目可能需要较长时间。"
@@ -1088,6 +1115,13 @@ internal sealed class UnrealProjectSyncService
             {
                 var baseAssets = baseGroups.TryGetValue(code, out var matchedBaseAssets) ? matchedBaseAssets : [];
                 var zdAssets = zdGroups.TryGetValue(code, out var matchedZdAssets) ? matchedZdAssets : [];
+                var personalBuffRoot = $"{TargetZdContentPath}/{code}/BUFF";
+                var materialAssets = baseAssets
+                    .Concat(zdAssets.Where(asset =>
+                        IsTextureAsset(asset) &&
+                        (string.Equals(asset.PackagePath, personalBuffRoot, StringComparison.OrdinalIgnoreCase) ||
+                         asset.PackagePath.StartsWith(personalBuffRoot + "/", StringComparison.OrdinalIgnoreCase))))
+                    .ToArray();
                 var zdMaterialTextureCount = CountZdMaterialTextures(zdAssets, code);
                 var characterItem = ResolveCharacterItem(code, baseAssets, zdAssets, manifest.CharacterItems);
                 actorMap.TryGetValue(code, out var characterActor);
@@ -1105,7 +1139,7 @@ internal sealed class UnrealProjectSyncService
                     BuildSkillsPreview(characterActor, characterItem, manifest.LinkSkillLibrary, manifest.SupportSkillLibrary, assetLookup),
                     sequencePreview,
                     BuildBuffsPreview(characterBuffs),
-                    BuildMaterialBuckets(baseAssets),
+                    BuildMaterialBuckets(materialAssets),
                     hasLatestData: manifest.SchemaVersion >= CurrentExportSchemaVersion &&
                         HasDetailedCharacterData(characterItem, characterActor, characterSequence, characterBuffs),
                     voiceBuckets: BuildVoiceBuckets(zdAssets, sequencePreview));
@@ -2682,6 +2716,7 @@ internal sealed class UnrealProjectSyncService
         IReadOnlyList<UnrealProjectExportAsset> assets)
     {
         return assets
+            .Where(asset => !IsObjectRedirector(asset))
             .Select(asset => (Kind: ClassifyMaterial(asset.AssetName), Asset: asset))
             .GroupBy(item => item.Kind.Key, StringComparer.OrdinalIgnoreCase)
             .OrderBy(group => group.Key == "OtherImage" ? 1 : 0)
@@ -2726,7 +2761,6 @@ internal sealed class UnrealProjectSyncService
 
         return assets
             .Where(asset => asset.AssetClass.Contains("SoundWave", StringComparison.OrdinalIgnoreCase))
-            .Where(asset => !string.IsNullOrWhiteSpace(asset.ExportedFilePath) && File.Exists(asset.ExportedFilePath))
             .Select(asset => (
                 Kind: sequenceKinds.TryGetValue(NormalizeObjectPath(asset.ObjectPath), out var sequenceKind)
                     ? sequenceKind
@@ -2756,6 +2790,9 @@ internal sealed class UnrealProjectSyncService
             })
             .ToArray();
     }
+
+    private static bool IsObjectRedirector(UnrealProjectExportAsset asset) =>
+        asset.AssetClass.Contains("ObjectRedirector", StringComparison.OrdinalIgnoreCase);
 
     private static (string Key, string DisplayName) ClassifyMaterial(string assetName)
     {

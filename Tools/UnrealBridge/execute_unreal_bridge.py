@@ -54,6 +54,46 @@ def _asset_name(object_path):
     return package_path.rsplit("/", 1)[-1] if package_path else ""
 
 
+def _save_asset(package_path, only_if_dirty=False):
+    if not package_path or not unreal.EditorAssetLibrary.does_asset_exist(package_path):
+        return
+    if not unreal.EditorAssetLibrary.save_asset(package_path, only_if_is_dirty=only_if_dirty):
+        raise RuntimeError("failed to save Unreal asset: " + package_path)
+
+
+def _dependency_options():
+    try:
+        return unreal.AssetRegistryDependencyOptions(
+            include_soft_package_references=True,
+            include_hard_package_references=True,
+            include_searchable_names=False,
+            include_soft_management_references=True,
+            include_hard_management_references=True,
+        )
+    except Exception:
+        options = unreal.AssetRegistryDependencyOptions()
+        for name in (
+                "include_soft_package_references",
+                "include_hard_package_references",
+                "include_soft_management_references",
+                "include_hard_management_references"):
+            try:
+                setattr(options, name, True)
+            except Exception:
+                pass
+        return options
+
+
+def _referencers(package_path):
+    try:
+        registry = unreal.AssetRegistryHelpers.get_asset_registry()
+        return [str(value) for value in registry.get_referencers(
+            package_path,
+            _dependency_options())]
+    except Exception:
+        return []
+
+
 def _rename_asset(source_object_path, target_object_path):
     source_package = _package_path(source_object_path)
     target_package = _package_path(target_object_path)
@@ -71,6 +111,7 @@ def _rename_asset(source_object_path, target_object_path):
             raise RuntimeError("failed to create asset folder: " + target_folder)
     if not unreal.EditorAssetLibrary.rename_asset(source_package, target_package):
         raise RuntimeError("failed to rename asset: " + source_package)
+    _save_asset(target_package)
     return target_package + "." + _asset_name(target_package)
 
 
@@ -94,7 +135,7 @@ def _import_file(source_file_path, target_object_path):
     imported_paths = [str(path) for path in task.imported_object_paths]
     if not imported_paths and not unreal.EditorAssetLibrary.does_asset_exist(target_package):
         raise RuntimeError("Unreal did not import the material: " + source_file_path)
-    unreal.EditorAssetLibrary.save_asset(target_package, only_if_is_dirty=False)
+    _save_asset(target_package)
     return imported_paths[0] if imported_paths else target_package + "." + target_name
 
 
@@ -111,10 +152,13 @@ def _consolidate_asset(source_object_path, target_object_path):
         raise RuntimeError("redirect source asset does not exist: " + source_package)
     if target_asset is None:
         raise RuntimeError("redirect target asset does not exist: " + target_package)
+    referencer_packages = _referencers(source_package)
     result = unreal.EditorAssetLibrary.consolidate_assets(target_asset, [source_asset])
     if result is False:
         raise RuntimeError("failed to redirect asset references: " + source_package)
-    unreal.EditorAssetLibrary.save_asset(target_package, only_if_is_dirty=False)
+    _save_asset(target_package)
+    for referencer_package in referencer_packages:
+        _save_asset(referencer_package, only_if_dirty=True)
     return target_package + "." + _asset_name(target_package)
 
 
@@ -220,11 +264,6 @@ def _execute():
                 "outputFilePath": "",
             })
         _write_progress(progress_path, index + 1, total, stable_id, "Completed " + display_name)
-    if direction == DIRECTION_PUBLISH:
-        try:
-            unreal.EditorLoadingAndSavingUtils.save_dirty_packages(True, True)
-        except Exception:
-            pass
     succeeded = all(item["succeeded"] for item in results)
     _write_json_atomic(result_path, {
         "protocolVersion": PROTOCOL_VERSION,

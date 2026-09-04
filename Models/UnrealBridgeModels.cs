@@ -204,7 +204,11 @@ internal sealed record UnrealBridgeChange(
 
 internal sealed class UnrealBridgeSyncState
 {
+    public const string SourceFileHashScheme = "source-file-v1";
+
     public int ProtocolVersion { get; set; } = 2;
+
+    public string HashScheme { get; set; } = string.Empty;
 
     public DateTimeOffset LastVerifiedAt { get; set; }
 

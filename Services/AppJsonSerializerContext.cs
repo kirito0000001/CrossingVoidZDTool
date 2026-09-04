@@ -31,6 +31,9 @@ namespace CrossingVoidZDTool.Services;
 [JsonSerializable(typeof(UnrealBridgeExecutionResult))]
 [JsonSerializable(typeof(UnrealBridgeExecutionItemResult))]
 [JsonSerializable(typeof(UnrealSyncSessionCache))]
+[JsonSerializable(typeof(UnrealSyncNormalizationCacheItem))]
+[JsonSerializable(typeof(UnrealAssetNormalizationCandidate))]
+[JsonSerializable(typeof(UnrealRemotePythonJob))]
 internal sealed partial class AppJsonSerializerContext : JsonSerializerContext
 {
 }

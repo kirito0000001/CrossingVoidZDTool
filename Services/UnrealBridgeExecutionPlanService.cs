@@ -24,8 +24,23 @@ internal sealed class UnrealBridgeExecutionPlanService
             throw new InvalidOperationException("执行同步前必须选择一个角色。");
         }
 
-        var selected = changes
+        var selectedChanges = changes
             .Where(change => change.IsSelected && change.Kind != UnrealBridgeChangeKind.Unchanged)
+            .ToArray();
+        var requestedRedirects = direction == UnrealBridgeDirection.PublishToUnreal && normalizationItems is not null
+            ? normalizationItems
+                .Where(item => item.Decision == UnrealAssetNormalizationDecision.Redirect && item.SelectedCandidate is not null)
+                .Where(item => selectedChanges.Any(change =>
+                    change.Kind == UnrealBridgeChangeKind.DeleteCandidate &&
+                    string.Equals(change.UnrealItem?.SourceObjectPath, item.UnrealObjectPath, StringComparison.OrdinalIgnoreCase)))
+                .ToArray()
+            : Array.Empty<UnrealAssetNormalizationItem>();
+        var redirectedSourcePaths = requestedRedirects
+            .Select(item => item.UnrealObjectPath)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var selected = selectedChanges
+            .Where(change => change.Kind != UnrealBridgeChangeKind.DeleteCandidate ||
+                !redirectedSourcePaths.Contains(change.UnrealItem?.SourceObjectPath ?? string.Empty))
             .ToArray();
         if (selected.Any(change => change.Kind == UnrealBridgeChangeKind.DeleteCandidate) && !deletionsConfirmed)
         {
@@ -43,9 +58,9 @@ internal sealed class UnrealBridgeExecutionPlanService
         var operations = selected
             .Select(change => BuildOperation(direction, characterCode, baseline, change))
             .ToList();
-        if (direction == UnrealBridgeDirection.PublishToUnreal && normalizationItems is not null)
+        if (direction == UnrealBridgeDirection.PublishToUnreal)
         {
-            foreach (var item in normalizationItems.Where(item => item.Decision == UnrealAssetNormalizationDecision.Redirect && item.SelectedCandidate is not null))
+            foreach (var item in requestedRedirects)
             {
                 var targetPath = operations.FirstOrDefault(operation =>
                     string.Equals(operation.StableId, item.SelectedCandidate!.StableId, StringComparison.OrdinalIgnoreCase))?.TargetObjectPath;
@@ -227,7 +242,7 @@ internal sealed class UnrealBridgeExecutionPlanService
             var kindText = document.RootElement.TryGetProperty("kind", out var kind)
                 ? kind.GetString()
                 : null;
-            if (!Enum.TryParse<VoiceMaterialKind>(kindText, true, out var voiceKind) || voiceKind == VoiceMaterialKind.Other)
+            if (!Enum.TryParse<VoiceMaterialKind>(kindText, true, out var voiceKind))
             {
                 throw new InvalidOperationException($"新增语音缺少可识别分类：{referenceItem.DisplayName}。");
             }

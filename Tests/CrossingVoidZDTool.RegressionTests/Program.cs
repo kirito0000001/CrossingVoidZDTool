@@ -114,6 +114,10 @@ var tests = new (string Name, Action Run)[]
     ("虚幻扫描器通过 AssetRegistry 引用关系识别素材", UnrealBridgeScannerUsesAssetRegistryReferences),
     ("工具箱规范化改名识别为 Rename 操作", UnrealBridgeDiffRecognizesNormalizationRename),
     ("双端格式哈希不同但各自未变时保持未修改", UnrealBridgeDiffUsesEndpointBaselinesForUnchangedItems),
+    ("无旧基线时已有配对素材先迁移为未修改", UnrealBridgeDiffMigratesMatchedItemsWithoutBaseline),
+    ("特殊字符清洗后的语音仍按规范路径配对", UnrealBridgeDiffPairsSanitizedVoiceNames),
+    ("规范连字符语音不会误报改名", UnrealBridgeDiffKeepsCanonicalVoiceNameUnchanged),
+    ("新基线按源文件哈希识别工具箱更新", UnrealBridgeDiffDetectsSourceFileChangeAfterMigration),
     ("虚幻执行计划只包含选中项且删除排最后", UnrealBridgeExecutionPlanUsesSelectedChangesAndDeletesLast),
     ("虚幻语音发布计划创建分类目录并规范名称", UnrealBridgeVoicePublishCreatesCategoryFolder),
     ("虚幻执行计划要求删除确认和首次发布模板", UnrealBridgeExecutionPlanRequiresDeleteConfirmationAndTemplate),
@@ -121,6 +125,7 @@ var tests = new (string Name, Action Run)[]
     ("虚幻改名执行后用结果路径恢复原同步身份", UnrealBridgePostExecutionRestoresRenamedIdentity),
     ("虚幻执行器使用固定脚本和结果协议", UnrealBridgeExecutorUsesFixedScriptAndResultProtocol),
     ("虚幻执行结果全部验证后才生成同步状态", UnrealBridgeVerificationRequiresCompleteSuccess),
+    ("部分同步验证保留未选素材基线", UnrealBridgeVerificationPreservesUnselectedBaselineEntries),
     ("从虚幻导入统一创建 Draft 并写入可读模块", UnrealBridgeImportCreatesDraftAndWritesReadableModules),
     ("从虚幻导入只写入勾选的具体素材", UnrealBridgeImportUsesSelectedLeafItems),
     ("从虚幻导入失败不保留新建 Draft 半成品", UnrealBridgeFailedImportRemovesNewDraft),
@@ -4236,6 +4241,8 @@ static void UnrealImportOperationPanelShowsGuidanceAndPersistentResult()
     AssertEqual(true, bindings.Contains("ImportSkippedCountText", StringComparison.Ordinal));
     AssertEqual(true, bindings.Contains("ImportPrimaryActionText", StringComparison.Ordinal));
     AssertEqual(true, bindings.Contains("ImportResultMessage", StringComparison.Ordinal));
+    AssertEqual(true, bindings.Contains("DetectionResultTitle", StringComparison.Ordinal));
+    AssertEqual(true, bindings.Contains("DetectionResultSummaryText", StringComparison.Ordinal));
 }
 
 static void UnrealBridgeStateIsScopedToCharacterAndProject()
@@ -4264,6 +4271,17 @@ static void UnrealBridgeStateIsScopedToCharacterAndProject()
         AssertEqual("Origin_Misaka", service.Load(first, firstProject)?.TemplateCharacterCode);
         AssertEqual<UnrealBridgeSyncState?>(null, service.Load(first, secondProject));
         AssertEqual<UnrealBridgeSyncState?>(null, service.Load(second, firstProject));
+
+        File.WriteAllText(
+            service.GetStatePath(first, firstProject),
+            JsonSerializer.Serialize(new
+            {
+                ProtocolVersion = 2,
+                CharacterCode = first.Code,
+                UnrealProjectPath = Path.GetFullPath(firstProject),
+                Entries = new Dictionary<string, object>()
+            }));
+        AssertEqual<UnrealBridgeSyncState?>(null, service.Load(first, firstProject));
     }
     finally
     {
@@ -4918,6 +4936,141 @@ static void UnrealBridgeDiffUsesEndpointBaselinesForUnchangedItems()
     AssertEqual(false, change.IsSelected);
 }
 
+static void UnrealBridgeDiffMigratesMatchedItemsWithoutBaseline()
+{
+    var toolbox = new UnrealBridgeSnapshot("Misaka", [new UnrealBridgeSnapshotItem(
+        "material:1", "module:BaseMaterials", UnrealBridgeModule.BaseMaterials, "头像", "toolbox-source-hash", "{}",
+        @"D:\Project\Misaka\AssetMaterial\Icon\Misaka-Icon-1.png",
+        ToolboxRelativePath: "AssetMaterial/Icon/Misaka-Icon-1.png", NormalizedName: "Misaka-Icon-1")]);
+    var unreal = new UnrealBridgeSnapshot("Misaka", [new UnrealBridgeSnapshotItem(
+        "material:1", "module:BaseMaterials", UnrealBridgeModule.BaseMaterials, "头像", "unreal-package-hash", "{}", string.Empty,
+        SourceObjectPath: "/Game/AssetMaterial/ImageS/CharaterS/Misaka/Misaka-Icon-1.Misaka-Icon-1",
+        NormalizedName: "Misaka-Icon-1")]);
+
+    var change = new UnrealBridgeDiffService()
+        .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, baseline: null)
+        .Single();
+
+    AssertEqual(UnrealBridgeChangeKind.Unchanged, change.Kind);
+    AssertEqual(false, change.IsSelected);
+
+    var state = new UnrealBridgeBaselineService().BuildFromChanges(
+        "Misaka",
+        @"D:\Project\Game.uproject",
+        [change]);
+    AssertEqual("toolbox-source-hash", state.Entries["material:1"].ToolboxHash);
+    AssertEqual("unreal-package-hash", state.Entries["material:1"].UnrealHash);
+}
+
+static void UnrealBridgeDiffPairsSanitizedVoiceNames()
+{
+    var toolboxItem = new UnrealBridgeSnapshotItem(
+        "voice:toolbox-id",
+        "module:Voices",
+        UnrealBridgeModule.Voices,
+        "编队语音 #1",
+        "source-wave-hash",
+        "{\"kind\":\"Formation\"}",
+        @"D:\Project\Misaka\Sound\Formation\Misaka-编队 (1).wav",
+        ToolboxRelativePath: "Sound/Formation/Misaka-编队 (1).wav",
+        NormalizedName: "Misaka-编队 (1)");
+    var unrealItem = new UnrealBridgeSnapshotItem(
+        "voice:unreal-object-id",
+        "module:Voices",
+        UnrealBridgeModule.Voices,
+        "Misaka-编队__1",
+        "unreal-preview-hash",
+        "{}",
+        string.Empty,
+        SourceObjectPath: "/Game/GameActor2D/Misaka/Sound/Formation/Misaka-编队__1.Misaka-编队__1",
+        OriginIdentity: "package-guid",
+        NormalizedName: "Misaka-编队__1");
+
+    var changes = new UnrealBridgeDiffService().Compare(
+        new UnrealBridgeSnapshot("Misaka", [toolboxItem]),
+        new UnrealBridgeSnapshot("Misaka", [unrealItem]),
+        UnrealBridgeDirection.PublishToUnreal,
+        baseline: null);
+
+    var change = changes.Single();
+    AssertEqual("voice:toolbox-id", change.StableId);
+    AssertEqual(UnrealBridgeChangeKind.Unchanged, change.Kind);
+    AssertEqual("package-guid", change.UnrealItem?.OriginIdentity);
+}
+
+static void UnrealBridgeDiffKeepsCanonicalVoiceNameUnchanged()
+{
+    var toolboxItem = new UnrealBridgeSnapshotItem(
+        "voice:canonical",
+        "module:Voices",
+        UnrealBridgeModule.Voices,
+        "一技能语音 #1",
+        "source-wave-hash",
+        "{\"kind\":\"Skill1\"}",
+        @"D:\Project\Misaka\Sound\Skill1\Misaka-Skill1-1.wav",
+        ToolboxRelativePath: "Sound/Skill1/Misaka-Skill1-1.wav",
+        NormalizedName: "Misaka-Skill1-1");
+    var unrealItem = new UnrealBridgeSnapshotItem(
+        "voice:canonical",
+        "module:Voices",
+        UnrealBridgeModule.Voices,
+        "Misaka-Skill1-1",
+        "target-wave-hash",
+        "{}",
+        string.Empty,
+        SourceObjectPath: "/Game/GameActor2D/Misaka/Sound/Skill1/Misaka-Skill1-1.Misaka-Skill1-1",
+        OriginIdentity: "package-guid",
+        NormalizedName: "Misaka-Skill1-1");
+    var baseline = new UnrealBridgeSyncState
+    {
+        HashScheme = UnrealBridgeSyncState.SourceFileHashScheme,
+        Entries =
+        {
+            [toolboxItem.StableId] = new UnrealBridgeSyncStateEntry(
+                toolboxItem.ContentHash,
+                unrealItem.ContentHash,
+                UnrealObjectPath: unrealItem.SourceObjectPath,
+                UnrealIdentity: unrealItem.OriginIdentity,
+                ToolboxRelativePath: toolboxItem.ToolboxRelativePath,
+                NormalizedName: toolboxItem.NormalizedName)
+        }
+    };
+
+    var change = new UnrealBridgeDiffService()
+        .Compare(
+            new UnrealBridgeSnapshot("Misaka", [toolboxItem]),
+            new UnrealBridgeSnapshot("Misaka", [unrealItem]),
+            UnrealBridgeDirection.PublishToUnreal,
+            baseline)
+        .Single();
+
+    AssertEqual(UnrealBridgeChangeKind.Unchanged, change.Kind);
+    AssertEqual(false, change.IsSelected);
+}
+
+static void UnrealBridgeDiffDetectsSourceFileChangeAfterMigration()
+{
+    var toolbox = CreateUnrealBridgeSnapshot(
+        ("asset-1", UnrealBridgeModule.BaseMaterials, "头像", "source-new"));
+    var unreal = CreateUnrealBridgeSnapshot(
+        ("asset-1", UnrealBridgeModule.BaseMaterials, "头像", "target-same"));
+    var baseline = new UnrealBridgeSyncState
+    {
+        HashScheme = UnrealBridgeSyncState.SourceFileHashScheme,
+        Entries =
+        {
+            ["asset-1"] = new UnrealBridgeSyncStateEntry("source-old", "target-same")
+        }
+    };
+
+    var change = new UnrealBridgeDiffService()
+        .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, baseline)
+        .Single();
+
+    AssertEqual(UnrealBridgeChangeKind.Updated, change.Kind);
+    AssertEqual(true, change.IsSelected);
+}
+
 static void UnrealBridgeImportCreatesDraftAndWritesReadableModules()
 {
     var root = CreateTemporaryTestFolder();
@@ -5486,7 +5639,7 @@ static void UnrealBridgeImportedSequenceFramesKeepStableIds()
 static void UnrealBridgeVoicesClassifyAndKeepStableIds()
 {
     AssertEqual(
-        VoiceMaterialKind.Other,
+        VoiceMaterialKind.Skill1,
         UnrealBridgeVoiceClassification.Classify("/Game/GameActor2D/Misaka/Sound/SK1/Misaka_SK1_01", "Misaka_SK1_01"));
     AssertEqual(
         VoiceMaterialKind.Other,
@@ -6097,6 +6250,56 @@ static void UnrealBridgeVerificationRequiresCompleteSuccess()
     }
 
     AssertEqual(true, rejected);
+}
+
+static void UnrealBridgeVerificationPreservesUnselectedBaselineEntries()
+{
+    var plan = new UnrealBridgeExecutionPlan
+    {
+        CharacterCode = "Misaka",
+        UnrealProjectPath = @"D:\Project\Game.uproject",
+        Operations =
+        {
+            new UnrealBridgeOperation
+            {
+                StableId = "selected",
+                Module = UnrealBridgeModule.BaseMaterials,
+                Kind = UnrealBridgeOperationKind.Update
+            }
+        }
+    };
+    var result = new UnrealBridgeExecutionResult
+    {
+        Succeeded = true,
+        Items =
+        {
+            new UnrealBridgeExecutionItemResult { StableId = "selected", Succeeded = true }
+        }
+    };
+    var toolbox = CreateUnrealBridgeSnapshot(
+        ("selected", UnrealBridgeModule.BaseMaterials, "新头像", "selected-source-new"));
+    var unreal = CreateUnrealBridgeSnapshot(
+        ("selected", UnrealBridgeModule.BaseMaterials, "新头像", "selected-target-new"));
+    var previous = new UnrealBridgeSyncState
+    {
+        Entries =
+        {
+            ["selected"] = new UnrealBridgeSyncStateEntry("selected-source-old", "selected-target-old"),
+            ["unselected"] = new UnrealBridgeSyncStateEntry("kept-source", "kept-target")
+        }
+    };
+
+    var state = new UnrealBridgeVerificationService().BuildVerifiedState(
+        plan,
+        result,
+        toolbox,
+        unreal,
+        previous);
+
+    AssertEqual("selected-source-new", state.Entries["selected"].ToolboxHash);
+    AssertEqual("selected-target-new", state.Entries["selected"].UnrealHash);
+    AssertEqual("kept-source", state.Entries["unselected"].ToolboxHash);
+    AssertEqual("kept-target", state.Entries["unselected"].UnrealHash);
 }
 
 static UnrealBridgeChange CreateUnrealBridgeChange(UnrealBridgeChangeKind kind, bool isSelected)

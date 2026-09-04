@@ -34,11 +34,60 @@ internal sealed class UnrealSyncSessionCacheService
 
     public UnrealSyncSessionCacheLoadResult Load(string projectPath, string characterCode)
     {
-        var path = GetPath(projectPath, characterCode);
-        if (File.Exists(path))
+        try
         {
-            return LoadFromPath(projectPath, path);
+            var folder = GetFolderPath();
+            var prefix = $"session-{GetProjectKey(projectPath)}-{SanitizeFileName(characterCode)}-step";
+            var stepPaths = Directory.Exists(folder)
+                ? Directory.EnumerateFiles(folder, $"{prefix}*.json")
+                    .OrderByDescending(File.GetLastWriteTimeUtc)
+                    .ToArray()
+                : Array.Empty<string>();
+            foreach (var stepPath in stepPaths)
+            {
+                var stepResult = LoadFromPath(projectPath, stepPath);
+                if (stepResult.Status == UnrealSyncSessionCacheLoadStatus.Loaded)
+                {
+                    return stepResult;
+                }
+            }
+
+            var path = GetPath(projectPath, characterCode);
+            if (File.Exists(path))
+            {
+                return LoadFromPath(projectPath, path);
+            }
         }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return new(UnrealSyncSessionCacheLoadStatus.Invalid, ErrorMessage: $"无法查找角色同步进度文件。\n{ex.Message}");
+        }
+
+        return LoadLegacyProjectCache(projectPath, characterCode);
+    }
+
+    public UnrealSyncSessionCacheLoadResult LoadStep(string projectPath, string characterCode, int workflowStep)
+    {
+        if (workflowStep is < 1 or > 4 || string.IsNullOrWhiteSpace(characterCode))
+        {
+            return new(UnrealSyncSessionCacheLoadStatus.Missing);
+        }
+
+        var path = GetStepPath(projectPath, characterCode, workflowStep);
+        var preferred = File.Exists(path)
+            ? LoadFromPath(projectPath, path)
+            : new UnrealSyncSessionCacheLoadResult(UnrealSyncSessionCacheLoadStatus.Missing);
+        if (preferred.Status == UnrealSyncSessionCacheLoadStatus.Loaded)
+        {
+            return preferred;
+        }
+
+        var fallback = Load(projectPath, characterCode);
+        return fallback.Status == UnrealSyncSessionCacheLoadStatus.Loaded ? fallback : preferred;
+    }
+
+    private UnrealSyncSessionCacheLoadResult LoadLegacyProjectCache(string projectPath, string characterCode)
+    {
 
         // 兼容迁移前按项目保存的单文件进度。
         var legacyPath = GetPath(projectPath, string.Empty);
@@ -63,7 +112,8 @@ internal sealed class UnrealSyncSessionCacheService
             var cache = JsonSerializer.Deserialize(
                 File.ReadAllText(path, Encoding.UTF8),
                 AppJsonSerializerContext.Default.UnrealSyncSessionCache);
-            if (cache is null || cache.ProtocolVersion != 3 || cache.PublishChanges is null || cache.SelectedStableIds is null || cache.NormalizationDecisions is null ||
+            if (cache is null || cache.ProtocolVersion != 3 || cache.PublishChanges is null || cache.SelectedStableIds is null || cache.NormalizationDecisions is null || cache.NormalizationItems is null ||
+                cache.NormalizationItems.Any(item => item is null || item.Candidates is null) ||
                 !string.Equals(Normalize(cache.ProjectPath), Normalize(projectPath), StringComparison.OrdinalIgnoreCase))
             {
                 return new(UnrealSyncSessionCacheLoadStatus.Invalid, ErrorMessage: $"同步进度文件内容无效：{path}");
@@ -79,7 +129,7 @@ internal sealed class UnrealSyncSessionCacheService
 
     public void Write(string projectPath, UnrealSyncSessionCache cache)
     {
-        var path = GetPath(projectPath, cache.SelectedCharacterCode);
+        var path = GetStepPath(projectPath, cache.SelectedCharacterCode, cache.WorkflowStep);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         var temporaryPath = path + ".tmp";
         File.WriteAllText(
@@ -95,6 +145,14 @@ internal sealed class UnrealSyncSessionCacheService
             ? string.Empty
             : $"-{SanitizeFileName(characterCode)}";
         return Path.Combine(GetFolderPath(), $"session-{GetProjectKey(projectPath)}{characterSuffix}.json");
+    }
+
+    private static string GetStepPath(string projectPath, string characterCode, int workflowStep)
+    {
+        var characterSuffix = string.IsNullOrWhiteSpace(characterCode)
+            ? string.Empty
+            : $"-{SanitizeFileName(characterCode)}";
+        return Path.Combine(GetFolderPath(), $"session-{GetProjectKey(projectPath)}{characterSuffix}-step{Math.Clamp(workflowStep, 1, 4)}.json");
     }
 
     private static string GetFolderPath() =>

@@ -91,7 +91,7 @@ internal sealed class UnrealBridgeExecutorService
         TryDelete(progressPath);
         TryDelete(resultPath);
         using var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("无法启动 UnrealEditor-Cmd.exe。");
+            ?? throw new InvalidOperationException("无法启动 Unreal Python 任务进程。");
         var standardOutput = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var standardError = process.StandardError.ReadToEndAsync(cancellationToken);
         var startedAt = DateTime.UtcNow;

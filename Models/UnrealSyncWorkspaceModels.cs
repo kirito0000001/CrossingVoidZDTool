@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
+using System.IO;
+using System.Text.Json;
 using CrossingVoidZDTool.ViewModels;
 
 namespace CrossingVoidZDTool;
@@ -42,6 +44,8 @@ internal sealed class UnrealSyncSelectionTreeItem : ObservableObject
     private bool? _isChecked;
     private bool _isUpdatingChildren;
 
+    public event EventHandler? GroupSelectionChanged;
+
     public UnrealSyncSelectionTreeItem(
         string stableId,
         string displayName,
@@ -78,9 +82,9 @@ internal sealed class UnrealSyncSelectionTreeItem : ObservableObject
 
     public string StableId { get; }
 
-    public string DisplayName { get; }
+    public string DisplayName { get; private set; }
 
-    public string DetailText { get; }
+    public string DetailText { get; private set; }
 
     public string StatusText { get; }
 
@@ -106,6 +110,22 @@ internal sealed class UnrealSyncSelectionTreeItem : ObservableObject
         VisibleChildren = items.ToArray();
 
     public bool IsLeaf => Children.Count == 0;
+    public bool IsUpdatingChildren => _isUpdatingChildren;
+
+    public void ApplyDisplay(string displayName, string detailText)
+    {
+        if (!string.Equals(DisplayName, displayName, StringComparison.Ordinal))
+        {
+            DisplayName = displayName;
+            OnPropertyChanged(nameof(DisplayName));
+        }
+
+        if (!string.Equals(DetailText, detailText, StringComparison.Ordinal))
+        {
+            DetailText = detailText;
+            OnPropertyChanged(nameof(DetailText));
+        }
+    }
 
     public bool IsGroupChecked => _isChecked == true;
 
@@ -150,6 +170,7 @@ internal sealed class UnrealSyncSelectionTreeItem : ObservableObject
 
         _isUpdatingChildren = false;
         UpdateCheckedStateFromChildren();
+        GroupSelectionChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private void Child_PropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -239,15 +260,21 @@ internal static class UnrealSyncSelectionTreeBuilder
                 var children = group
                     .Where(item => !item.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase))
                     .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
-                    .Select(item => new UnrealSyncSelectionTreeItem(
-                        item.StableId,
-                        item.DisplayName,
-                        string.IsNullOrWhiteSpace(item.SourceObjectPath) ? item.NormalizedName : item.SourceObjectPath,
-                        "可导入",
-                        true,
-                        false,
-                        true,
-                        item.Module))
+                    .Select(item =>
+                    {
+                        var requiresExportedFile = item.Module is UnrealBridgeModule.BaseMaterials or UnrealBridgeModule.Voices;
+                        var isSelectable = !requiresExportedFile ||
+                            !string.IsNullOrWhiteSpace(item.AssetPath) && File.Exists(item.AssetPath);
+                        return new UnrealSyncSelectionTreeItem(
+                            item.StableId,
+                            item.DisplayName,
+                            string.IsNullOrWhiteSpace(item.SourceObjectPath) ? item.NormalizedName : item.SourceObjectPath,
+                            isSelectable ? "可导入" : "缺少导出文件",
+                            isSelectable,
+                            !isSelectable,
+                            isSelectable,
+                            item.Module);
+                    })
                     .ToArray();
                 return new UnrealSyncSelectionTreeItem(
                     $"module:{group.Key}",

@@ -7,6 +7,12 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace CrossingVoidZDTool;
 
+internal enum UnrealProjectSyncExportScope
+{
+    Full,
+    CharacterMaterials
+}
+
 internal sealed record UnrealProjectSyncCheckItem(
     string Title,
     string Path,

@@ -245,12 +245,7 @@ namespace CrossingVoidZDTool
                 ShowFloatingTip(InfoBarSeverity.Warning, "无法恢复同步进度", restoreResult.ErrorMessage);
             }
 
-            if (!_applicationViewModel.UnrealProjectSync.IsEngineToToolbox &&
-                _applicationViewModel.UnrealProjectSync.SelectedSource?.DraftCharacter is { Code: var characterCode })
-            {
-                _applicationViewModel.UnrealProjectSync.RefreshFoundationChecks(characterCode);
-            }
-            AppendLog(LogKind.Info, "已检测虚幻同步台关联状态。");
+            AppendLog(LogKind.Info, "已恢复虚幻同步台状态；进入步骤或手动重新加载时才执行检测。");
         }
 
         private string? GetLastEditedModuleTag()

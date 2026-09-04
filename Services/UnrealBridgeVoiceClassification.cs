@@ -8,6 +8,11 @@ internal static class UnrealBridgeVoiceClassification
 {
     private static readonly IReadOnlyList<(VoiceMaterialKind Kind, string[] Tokens)> Rules =
     [
+        (VoiceMaterialKind.Skill1, ["skill1", "sk1"]),
+        (VoiceMaterialKind.Skill2, ["skill2", "sk2"]),
+        (VoiceMaterialKind.Ultimate, ["ultimate", "ko"]),
+        (VoiceMaterialKind.Support, ["support", "sub"]),
+        (VoiceMaterialKind.Combo, ["combo", "link"]),
         (VoiceMaterialKind.Formation, ["formation", "team", "deploy", "voselect"]),
         (VoiceMaterialKind.Click, ["click", "touch"]),
         (VoiceMaterialKind.Hurt, ["hurt", "damage", "ondm", "odnm"]),

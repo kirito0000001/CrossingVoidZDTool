@@ -99,10 +99,14 @@ def _load_selected_character_codes():
         return set()
     try:
         values = json.loads(raw)
-        return {str(value).strip().lower() for value in values if str(value).strip()}
+        return {str(value).strip() for value in values if str(value).strip()}
     except Exception:
         unreal.log_warning("ZDToolbox selected character env parse failed; fallback to full export.")
         return set()
+
+
+def _load_export_scope():
+    return os.environ.get("ZD_TOOLBOX_EXPORT_SCOPE", "Full").strip() or "Full"
 
 
 def _load_previous_manifest(path):
@@ -139,6 +143,84 @@ def _asset_character_code(asset_data):
 
 def _entry_character_code(entry):
     return _to_text(entry.get("code", "")).strip()
+
+
+def _material_scope_kind(package_path, asset_name, asset_class, selected_codes):
+    normalized_package = _to_text(package_path).strip().rstrip("/").lower()
+    normalized_name = _to_text(asset_name).strip().lower()
+    normalized_class = _to_text(asset_class).lower()
+    for code in selected_codes:
+        base_root = "{}/{}".format(BASE_MATERIAL_ROOT, code).lower()
+        actor_root = "{}/{}".format(CHARACTER_ACTOR_ROOT, code).lower()
+        if normalized_package == base_root or normalized_package.startswith(base_root + "/"):
+            return "base"
+        if normalized_package == actor_root + "/sound" or normalized_package.startswith(actor_root + "/sound/"):
+            return "sound"
+        if normalized_package == actor_root + "/buff" or normalized_package.startswith(actor_root + "/buff/"):
+            if "texture" in normalized_class or "objectredirector" in normalized_class:
+                return "buff"
+        if normalized_package == actor_root and normalized_name in (
+                code.lower(),
+                "{}_animbp".format(code).lower(),
+                "{}_animmaps".format(code).lower()):
+            return "foundation"
+        if (normalized_package == CHAR_ITEM_ROOT.lower() and
+                normalized_name == "item_{}".format(code).lower()):
+            return "foundation"
+    return ""
+
+
+def _include_material_scope_asset(asset, selected_codes):
+    asset_class = _asset_class(asset)
+    kind = _material_scope_kind(
+        _to_text(asset.package_path),
+        _to_text(asset.asset_name),
+        asset_class,
+        selected_codes)
+    if not kind or "objectredirector" in asset_class.lower():
+        return False
+    if kind in ("base", "buff"):
+        return "texture" in asset_class.lower()
+    if kind == "sound":
+        return any(value in asset_class.lower() for value in (
+            "soundwave",
+            "metasoundsource",
+            "soundconcurrency"))
+    return True
+
+
+def _is_top_level_asset(asset):
+    package_name = _to_text(asset.package_name).strip().rstrip("/")
+    asset_name = _to_text(asset.asset_name).strip()
+    return bool(package_name and asset_name and package_name.rsplit("/", 1)[-1] == asset_name)
+
+
+def _manifest_asset_is_material_scope_owned(asset, selected_codes):
+    return bool(_material_scope_kind(
+        asset.get("packagePath", ""),
+        asset.get("assetName", ""),
+        asset.get("assetClass", ""),
+        selected_codes))
+
+
+def _merge_material_scope_manifest(previous_manifest, current_manifest, selected_codes):
+    if not previous_manifest:
+        return current_manifest
+    old_assets = previous_manifest.get("assets", [])
+    current_manifest["assets"] = [
+        asset for asset in old_assets
+        if not _manifest_asset_is_material_scope_owned(asset, selected_codes)
+    ] + current_manifest.get("assets", [])
+    for key in (
+            "characterSummaries",
+            "characterItems",
+            "characterActors",
+            "characterSequences",
+            "characterBuffs",
+            "linkSkillLibrary",
+            "supportSkillLibrary"):
+        current_manifest[key] = previous_manifest.get(key, current_manifest.get(key))
+    return current_manifest
 
 
 def _merge_selected_manifest(previous_manifest, current_manifest, selected_codes):
@@ -3195,10 +3277,30 @@ def _export():
     project_path = os.environ.get("ZD_TOOLBOX_PROJECT_PATH", "")
     target_paths = _load_target_paths()
     selected_codes = _load_selected_character_codes()
+    selected_code_keys = {code.lower() for code in selected_codes}
+    export_scope = _load_export_scope()
+    material_scope = export_scope.lower() == "charactermaterials" and bool(selected_codes)
     previous_manifest = _load_previous_manifest(manifest_path) if selected_codes else {}
     export_root = os.path.dirname(manifest_path)
     registry = unreal.AssetRegistryHelpers.get_asset_registry()
-    scan_paths = list(target_paths) + [CHAR_ITEM_ROOT]
+    if material_scope:
+        asset_scan_entries = []
+        for code in sorted(selected_codes):
+            actor_root = "{}/{}".format(CHARACTER_ACTOR_ROOT, code)
+            asset_scan_entries.extend([
+                ("{}/{}".format(BASE_MATERIAL_ROOT, code), True),
+                (actor_root + "/Sound", True),
+                (actor_root + "/BUFF", True),
+                (actor_root, False),
+            ])
+        asset_scan_entries.append((CHAR_ITEM_ROOT, False))
+        scan_paths = [
+            path for path, recursive in asset_scan_entries
+            if recursive or path == CHAR_ITEM_ROOT
+        ]
+    else:
+        asset_scan_entries = [(path, True) for path in target_paths]
+        scan_paths = list(target_paths) + [CHAR_ITEM_ROOT]
     for index, target_path in enumerate(scan_paths):
         _write_progress(
             "Unreal 正在扫描内容目录...",
@@ -3207,28 +3309,31 @@ def _export():
             True)
         _scan_registry_path(registry, target_path)
     assets = []
-    for target_index, target_path in enumerate(target_paths):
+    for target_index, (target_path, recursive) in enumerate(asset_scan_entries):
         try:
             found = registry.get_assets_by_path(
                 unreal.Name(target_path),
-                recursive=True,
+                recursive=recursive,
                 include_only_on_disk_assets=False)
         except TypeError:
-            found = registry.get_assets_by_path(unreal.Name(target_path), True)
-        if selected_codes and target_path not in (SHARED_BUFF_ICON_ROOT, SHARED_BATTLE_EFFECT_ROOT):
+            found = registry.get_assets_by_path(unreal.Name(target_path), recursive)
+        found = [asset for asset in found if _is_top_level_asset(asset)]
+        if material_scope:
+            found = [asset for asset in found if _include_material_scope_asset(asset, selected_codes)]
+        elif selected_codes and target_path not in (SHARED_BUFF_ICON_ROOT, SHARED_BATTLE_EFFECT_ROOT):
             found = [
                 asset for asset in found
-                if _character_code_from_package_path(_to_text(asset.package_path), target_path).lower() in selected_codes
+                if _character_code_from_package_path(_to_text(asset.package_path), target_path).lower() in selected_code_keys
             ]
         found_count = len(found)
         for asset_index, asset in enumerate(found):
             if asset_index % 10 == 0 or asset_index == found_count - 1:
                 _write_progress(
                     "Unreal 正在导出素材预览...",
-                    56 + (target_index + asset_index / max(1, found_count)) / max(1, len(target_paths)) * 14,
+                    56 + (target_index + asset_index / max(1, found_count)) / max(1, len(asset_scan_entries)) * 14,
                     "目录 {}/{}：{}；资产 {}/{}：{}".format(
                         target_index + 1,
-                        len(target_paths),
+                        len(asset_scan_entries),
                         target_path,
                         asset_index + 1,
                         found_count,
@@ -3261,27 +3366,36 @@ def _export():
             })
 
     selected_detail = "选中角色：{}".format("、".join(sorted(selected_codes))) if selected_codes else "全部角色"
-    _write_progress("Unreal 正在读取 St3 角色信息...", 72, "扫描角色道具蓝图：{}；{}".format(CHAR_ITEM_ROOT, selected_detail), True)
-    character_items = _export_character_items(registry, project_path)
-    if selected_codes:
-        character_items = [
-            item for item in character_items
-            if _to_text(item.get("code", "")).strip().lower() in selected_codes
-        ]
-    _write_progress("Unreal 正在读取 St4 技能信息...", 76, "读取角色蓝图 SkillSlot1-4。", True)
-    character_actors = _export_character_actors(assets)
-    _write_progress("Unreal 正在读取 St5 序列帧...", 80, "读取 AnimMaps、AnimSequences、Flipbook 帧顺序。", True)
-    character_sequences = _export_character_sequences(character_actors, assets, project_path)
-    _write_progress("Unreal 正在读取 St6-BUFF...", 84, "扫描每个角色的 BUFF 文件夹和 DreamTask 蓝图。", True)
-    character_buffs = _export_character_buffs(character_actors, assets, export_root, project_path)
-    _write_progress("Unreal 正在读取连携与护援函数库...", 88, LINK_SKILL_LIBRARY_PATH, True)
-    link_skill_library = _export_link_skill_library()
-    if not link_skill_library.get("hasData"):
-        fallback_library = _export_link_skill_library_from_text(project_path)
-        if fallback_library.get("hasData"):
-            fallback_library["readMessage"] = "text fallback: " + link_skill_library.get("readMessage", "")
-            link_skill_library = fallback_library
-    support_skill_library = _export_support_skill_library_from_text(project_path, character_items)
+    if material_scope:
+        _write_progress("Unreal 正在整理角色素材清单...", 88, selected_detail, True)
+        character_items = []
+        character_actors = []
+        character_sequences = []
+        character_buffs = []
+        link_skill_library = {}
+        support_skill_library = {}
+    else:
+        _write_progress("Unreal 正在读取 St3 角色信息...", 72, "扫描角色道具蓝图：{}；{}".format(CHAR_ITEM_ROOT, selected_detail), True)
+        character_items = _export_character_items(registry, project_path)
+        if selected_codes:
+            character_items = [
+                item for item in character_items
+                if _to_text(item.get("code", "")).strip().lower() in selected_code_keys
+            ]
+        _write_progress("Unreal 正在读取 St4 技能信息...", 76, "读取角色蓝图 SkillSlot1-4。", True)
+        character_actors = _export_character_actors(assets)
+        _write_progress("Unreal 正在读取 St5 序列帧...", 80, "读取 AnimMaps、AnimSequences、Flipbook 帧顺序。", True)
+        character_sequences = _export_character_sequences(character_actors, assets, project_path)
+        _write_progress("Unreal 正在读取 St6-BUFF...", 84, "扫描每个角色的 BUFF 文件夹和 DreamTask 蓝图。", True)
+        character_buffs = _export_character_buffs(character_actors, assets, export_root, project_path)
+        _write_progress("Unreal 正在读取连携与护援函数库...", 88, LINK_SKILL_LIBRARY_PATH, True)
+        link_skill_library = _export_link_skill_library()
+        if not link_skill_library.get("hasData"):
+            fallback_library = _export_link_skill_library_from_text(project_path)
+            if fallback_library.get("hasData"):
+                fallback_library["readMessage"] = "text fallback: " + link_skill_library.get("readMessage", "")
+                link_skill_library = fallback_library
+        support_skill_library = _export_support_skill_library_from_text(project_path, character_items)
     _write_progress("Unreal 正在整理导出清单...", 92, "排序资产、写入 characters.json。", True)
     assets.sort(key=lambda item: (
         item.get("sourceRoot", ""),
@@ -3302,7 +3416,9 @@ def _export():
         "linkSkillLibrary": link_skill_library,
         "supportSkillLibrary": support_skill_library
     }
-    manifest = _merge_selected_manifest(previous_manifest, manifest, selected_codes)
+    manifest = (_merge_material_scope_manifest(previous_manifest, manifest, selected_codes)
+                if material_scope
+                else _merge_selected_manifest(previous_manifest, manifest, selected_codes))
     os.makedirs(os.path.dirname(manifest_path), exist_ok=True)
     with open(manifest_path, "w", encoding="utf-8") as output:
         json.dump(manifest, output, ensure_ascii=False, indent=2)

@@ -303,6 +303,21 @@ internal sealed class UnrealBridgeToolboxSnapshotService
         string toolboxRelativePath = "",
         string normalizedName = "")
     {
+        if ((module is UnrealBridgeModule.BaseMaterials or UnrealBridgeModule.Voices) &&
+            !string.IsNullOrWhiteSpace(assetPath) && File.Exists(assetPath))
+        {
+            return new UnrealBridgeSnapshotItem(
+                stableId,
+                parentStableId,
+                module,
+                displayName,
+                ComputeFileContentHash(assetPath),
+                payload,
+                assetPath,
+                ToolboxRelativePath: toolboxRelativePath,
+                NormalizedName: normalizedName);
+        }
+
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData(Encoding.UTF8.GetBytes(payload));
         if (!string.IsNullOrWhiteSpace(assetPath) && File.Exists(assetPath))

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 
 namespace CrossingVoidZDTool.Services;
@@ -17,18 +18,208 @@ internal sealed class UnrealBridgeDiffService
 
         var toolboxItems = ToItemMap(toolbox.Items, "工具箱");
         var unrealItems = ToItemMap(unreal.Items, "Unreal");
+        if (direction == UnrealBridgeDirection.PublishToUnreal)
+        {
+            AlignCanonicalMaterialItems(toolboxItems, unrealItems, toolbox.CharacterCode);
+        }
         return toolboxItems.Keys
             .Union(unrealItems.Keys, StringComparer.OrdinalIgnoreCase)
             .Select(stableId => BuildChange(
-                 stableId,
-                 toolboxItems.GetValueOrDefault(stableId),
-                 unrealItems.GetValueOrDefault(stableId),
-                 direction,
-                baseline))
+                stableId,
+                toolboxItems.GetValueOrDefault(stableId),
+                unrealItems.GetValueOrDefault(stableId),
+                direction,
+                baseline,
+                direction == UnrealBridgeDirection.PublishToUnreal &&
+                    toolboxItems.TryGetValue(stableId, out var matchedToolboxItem) &&
+                    unrealItems.TryGetValue(stableId, out var matchedUnrealItem) &&
+                    IsMigrationSafePair(matchedToolboxItem, matchedUnrealItem, toolbox.CharacterCode)))
             .OrderBy(change => change.Module)
             .ThenBy(change => change.StableId, StringComparer.OrdinalIgnoreCase)
             .ToArray();
     }
+
+    private static void AlignCanonicalMaterialItems(
+        IDictionary<string, UnrealBridgeSnapshotItem> toolboxItems,
+        IDictionary<string, UnrealBridgeSnapshotItem> unrealItems,
+        string characterCode)
+    {
+        if (string.IsNullOrWhiteSpace(characterCode))
+        {
+            return;
+        }
+
+        var claimedUnrealIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var toolboxPair in toolboxItems.ToArray())
+        {
+            var toolboxItem = toolboxPair.Value;
+            if (unrealItems.ContainsKey(toolboxPair.Key) ||
+                toolboxItem.Module is not (UnrealBridgeModule.BaseMaterials or UnrealBridgeModule.Voices))
+            {
+                continue;
+            }
+
+            var canonicalPath = BuildCanonicalObjectPath(characterCode, toolboxItem);
+            if (string.IsNullOrWhiteSpace(canonicalPath))
+            {
+                continue;
+            }
+
+            var matchingPair = unrealItems.FirstOrDefault(pair =>
+                !claimedUnrealIds.Contains(pair.Key) &&
+                pair.Value.Module == toolboxItem.Module &&
+                SameObjectPath(pair.Value.SourceObjectPath, canonicalPath));
+            if (string.IsNullOrWhiteSpace(matchingPair.Key))
+            {
+                var expectedFolder = GetCanonicalFolder(characterCode, toolboxItem);
+                var expectedName = NormalizeAssetName(GetToolboxAssetName(toolboxItem));
+                var fallbackMatches = unrealItems
+                    .Where(pair =>
+                        !claimedUnrealIds.Contains(pair.Key) &&
+                        pair.Value.Module == toolboxItem.Module &&
+                        string.Equals(GetObjectFolder(pair.Value.SourceObjectPath), expectedFolder, StringComparison.OrdinalIgnoreCase) &&
+                        string.Equals(NormalizeAssetName(GetObjectAssetName(pair.Value.SourceObjectPath)), expectedName, StringComparison.Ordinal))
+                    .ToArray();
+                matchingPair = fallbackMatches.Length == 1 ? fallbackMatches[0] : default;
+            }
+            if (string.IsNullOrWhiteSpace(matchingPair.Key))
+            {
+                continue;
+            }
+
+            unrealItems.Remove(matchingPair.Key);
+            unrealItems[toolboxPair.Key] = matchingPair.Value with { StableId = toolboxPair.Key };
+            claimedUnrealIds.Add(toolboxPair.Key);
+        }
+    }
+
+    private static string BuildCanonicalObjectPath(string characterCode, UnrealBridgeSnapshotItem toolboxItem)
+    {
+        var relative = toolboxItem.ToolboxRelativePath.Replace('\\', '/').Trim('/');
+        var fileName = Path.GetFileNameWithoutExtension(
+            string.IsNullOrWhiteSpace(relative) ? toolboxItem.AssetPath : relative);
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            fileName = toolboxItem.NormalizedName;
+        }
+
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            return string.Empty;
+        }
+
+        if (toolboxItem.Module == UnrealBridgeModule.Voices &&
+            relative.StartsWith("Sound/", StringComparison.OrdinalIgnoreCase))
+        {
+            var relativeFolder = relative[..relative.LastIndexOf('/')];
+            return $"/Game/GameActor2D/{characterCode}/{relativeFolder}/{fileName}.{fileName}";
+        }
+
+        if (toolboxItem.Module == UnrealBridgeModule.BaseMaterials &&
+            relative.StartsWith("AssetMaterial/BuffIcon/", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"/Game/GameActor2D/{characterCode}/BUFF/{fileName}.{fileName}";
+        }
+
+        if (toolboxItem.Module == UnrealBridgeModule.BaseMaterials &&
+            relative.StartsWith("AssetMaterial/", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"/Game/AssetMaterial/ImageS/CharaterS/{characterCode}/{fileName}.{fileName}";
+        }
+
+        return string.Empty;
+    }
+
+    private static bool SameObjectPath(string left, string right) =>
+        string.Equals(NormalizeObjectPath(left), NormalizeObjectPath(right), StringComparison.OrdinalIgnoreCase);
+
+    private static string NormalizeObjectPath(string value)
+    {
+        var path = (value ?? string.Empty).Trim().Replace('\\', '/');
+        var dotIndex = path.IndexOf('.', StringComparison.Ordinal);
+        return dotIndex >= 0 ? path[..dotIndex] : path;
+    }
+
+    private static string GetCanonicalFolder(string characterCode, UnrealBridgeSnapshotItem toolboxItem)
+    {
+        var relative = toolboxItem.ToolboxRelativePath.Replace('\\', '/').Trim('/');
+        if (string.IsNullOrWhiteSpace(characterCode) || string.IsNullOrWhiteSpace(relative))
+        {
+            return string.Empty;
+        }
+
+        var separator = relative.LastIndexOf('/');
+        if (separator < 0)
+        {
+            return string.Empty;
+        }
+
+        var folder = relative[..separator];
+        if (toolboxItem.Module == UnrealBridgeModule.Voices &&
+            relative.StartsWith("Sound/", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"/Game/GameActor2D/{characterCode}/{folder}";
+        }
+
+        if (toolboxItem.Module == UnrealBridgeModule.BaseMaterials &&
+            relative.StartsWith("AssetMaterial/BuffIcon/", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"/Game/GameActor2D/{characterCode}/BUFF";
+        }
+
+        if (toolboxItem.Module == UnrealBridgeModule.BaseMaterials &&
+            relative.StartsWith("AssetMaterial/", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"/Game/AssetMaterial/ImageS/CharaterS/{characterCode}";
+        }
+
+        return string.Empty;
+    }
+
+    private static bool IsMigrationSafePair(
+        UnrealBridgeSnapshotItem toolboxItem,
+        UnrealBridgeSnapshotItem unrealItem,
+        string characterCode)
+    {
+        if (toolboxItem.Module is not (UnrealBridgeModule.BaseMaterials or UnrealBridgeModule.Voices) ||
+            unrealItem.Module != toolboxItem.Module ||
+            string.IsNullOrWhiteSpace(unrealItem.SourceObjectPath))
+        {
+            return false;
+        }
+
+        var expectedFolder = GetCanonicalFolder(characterCode, toolboxItem);
+        var expectedName = NormalizeAssetName(GetToolboxAssetName(toolboxItem));
+        return !string.IsNullOrWhiteSpace(expectedFolder) &&
+            string.Equals(GetObjectFolder(unrealItem.SourceObjectPath), expectedFolder, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(
+                NormalizeAssetName(GetObjectAssetName(unrealItem.SourceObjectPath)),
+                expectedName,
+                StringComparison.Ordinal);
+    }
+
+    private static string GetToolboxAssetName(UnrealBridgeSnapshotItem item) =>
+        Path.GetFileNameWithoutExtension(
+            string.IsNullOrWhiteSpace(item.ToolboxRelativePath)
+                ? item.AssetPath
+                : item.ToolboxRelativePath);
+
+    private static string GetObjectFolder(string objectPath)
+    {
+        var package = NormalizeObjectPath(objectPath);
+        var separator = package.LastIndexOf('/');
+        return separator > 0 ? package[..separator] : string.Empty;
+    }
+
+    private static string GetObjectAssetName(string objectPath)
+    {
+        var package = NormalizeObjectPath(objectPath);
+        var separator = package.LastIndexOf('/');
+        return separator >= 0 ? package[(separator + 1)..] : package;
+    }
+
+    private static string NormalizeAssetName(string value) =>
+        new string(value.Where(char.IsLetterOrDigit).Select(char.ToLowerInvariant).ToArray());
 
     private static Dictionary<string, UnrealBridgeSnapshotItem> ToItemMap(
         IReadOnlyList<UnrealBridgeSnapshotItem> items,
@@ -56,7 +247,8 @@ internal sealed class UnrealBridgeDiffService
         UnrealBridgeSnapshotItem? toolboxItem,
         UnrealBridgeSnapshotItem? unrealItem,
         UnrealBridgeDirection direction,
-        UnrealBridgeSyncState? baseline)
+        UnrealBridgeSyncState? baseline,
+        bool isMigrationSafePair)
     {
         var sourceItem = direction == UnrealBridgeDirection.PublishToUnreal ? toolboxItem : unrealItem;
         var targetItem = direction == UnrealBridgeDirection.PublishToUnreal ? unrealItem : toolboxItem;
@@ -92,6 +284,10 @@ internal sealed class UnrealBridgeDiffService
                     : sourceChanged
                         ? UnrealBridgeChangeKind.Updated
                         : UnrealBridgeChangeKind.Unchanged;
+        }
+        else if (isMigrationSafePair && baseline is null)
+        {
+            kind = UnrealBridgeChangeKind.Unchanged;
         }
         else if (string.Equals(sourceItem.ContentHash, targetItem!.ContentHash, StringComparison.OrdinalIgnoreCase))
         {

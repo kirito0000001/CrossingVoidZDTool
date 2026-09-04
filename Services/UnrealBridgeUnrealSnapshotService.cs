@@ -64,6 +64,21 @@ internal sealed class UnrealBridgeUnrealSnapshotService
         return startInfo;
     }
 
+    public UnrealPythonTaskLaunch BuildScanLaunch(
+        string editorPath,
+        string projectPath,
+        string characterCode,
+        string outputPath)
+    {
+        var offlineStartInfo = BuildScanProcessStartInfo(editorPath, projectPath, characterCode, outputPath);
+        return new UnrealPythonTaskExecutionService().BuildLaunch(
+            editorPath,
+            projectPath,
+            GetScanScriptPath(),
+            Path.ChangeExtension(Path.GetFullPath(outputPath), ".remote-job.json"),
+            offlineStartInfo);
+    }
+
     public UnrealBridgeSnapshot LoadSnapshot(
         string manifestPath,
         UnrealBridgeSyncState? baseline)

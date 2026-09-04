@@ -2219,6 +2219,35 @@
                                             Text="先从左侧选择来源，再在右侧开始检测。检测结果会显示在这里。"
                                             TextAlignment="Center" />
                                     </StackPanel>
+                                    <StackPanel
+                                        Grid.Row="1"
+                                        HorizontalAlignment="Center"
+                                        VerticalAlignment="Center"
+                                        MaxWidth="620"
+                                        Spacing="10"
+                                        Visibility="{Binding UnrealProjectSync.DetectionResultVisibility, Mode=OneWay}">
+                                        <FontIcon
+                                            HorizontalAlignment="Center"
+                                            FontSize="30"
+                                            Foreground="{ThemeResource SystemFillColorSuccessBrush}"
+                                            Glyph="&#xE73E;" />
+                                        <TextBlock
+                                            HorizontalAlignment="Center"
+                                            FontSize="20"
+                                            FontWeight="SemiBold"
+                                            Text="{Binding UnrealProjectSync.DetectionResultTitle, Mode=OneWay}" />
+                                        <TextBlock
+                                            HorizontalAlignment="Center"
+                                            Style="{StaticResource SubtleTextStyle}"
+                                            Text="{Binding UnrealProjectSync.DetectionResultSummaryText, Mode=OneWay}"
+                                            TextAlignment="Center"
+                                            TextWrapping="Wrap" />
+                                        <TextBlock
+                                            HorizontalAlignment="Center"
+                                            Style="{StaticResource SubtleTextStyle}"
+                                            Text="当前没有需要处理的素材。"
+                                            TextAlignment="Center" />
+                                    </StackPanel>
                                     <ScrollViewer
                                         Grid.Row="1"
                                         HorizontalScrollBarVisibility="Disabled"
@@ -2258,12 +2287,17 @@
                                             </ItemsControl>
                                         </StackPanel>
                                     </ScrollViewer>
-                                    <ScrollViewer
-                                        Grid.Row="1"
-                                        HorizontalScrollBarVisibility="Disabled"
-                                        VerticalScrollBarVisibility="Auto"
-                                        Visibility="{Binding UnrealProjectSync.SelectionContentVisibility, Mode=OneWay}">
-                                        <ItemsControl ItemsSource="{Binding UnrealProjectSync.SelectionTreeRoots, Mode=OneWay}">
+                                        <ScrollViewer
+                                            Grid.Row="1"
+                                            HorizontalScrollBarVisibility="Disabled"
+                                            VerticalScrollBarVisibility="Auto"
+                                            Visibility="{Binding UnrealProjectSync.SelectionContentVisibility, Mode=OneWay}">
+                                        <StackPanel Spacing="10">
+                                            <TextBlock
+                                                Style="{StaticResource SubtleTextStyle}"
+                                                Text="{Binding UnrealProjectSync.DetectionResultSummaryText, Mode=OneWay}"
+                                                TextWrapping="Wrap" />
+                                            <ItemsControl ItemsSource="{Binding UnrealProjectSync.SelectionTreeRoots, Mode=OneWay}">
                                             <ItemsControl.ItemTemplate>
                                                 <DataTemplate>
                                                     <Expander Margin="0,0,0,6" IsExpanded="True">
@@ -2334,19 +2368,19 @@
                                                                     <TextBlock FontWeight="SemiBold" Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" />
                                                                     <TextBlock MaxLines="1" Style="{StaticResource SubtleTextStyle}" Text="{Binding DetailText}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" ToolTipService.ToolTip="{Binding DetailText}" />
                                                                 </StackPanel>
-                                                                <TextBlock Grid.Column="2" MinWidth="68" VerticalAlignment="Center" Style="{StaticResource SubtleTextStyle}" Text="{Binding StatusText}" TextAlignment="Right" TextWrapping="NoWrap" />
+                                                                <TextBlock Grid.Column="2" MinWidth="52" VerticalAlignment="Center" Style="{StaticResource SubtleTextStyle}" Text="{Binding StatusText}" TextAlignment="Right" TextWrapping="NoWrap" />
                                                             </Grid>
                                                         </Expander.Header>
                                                         <ItemsControl ItemsSource="{Binding VisibleChildren}">
                                                             <ItemsControl.ItemTemplate>
                                                                 <DataTemplate>
-                                                                    <Grid MinHeight="52" Margin="24,0,0,3" Padding="8,4" ColumnSpacing="10">
+                                                                    <Grid MinHeight="52" Margin="0,0,0,3" Padding="4,4,6,4" ColumnSpacing="6">
                                                                         <Grid.ColumnDefinitions>
                                                                             <ColumnDefinition Width="Auto" />
                                                                             <ColumnDefinition Width="*" />
                                                                             <ColumnDefinition Width="Auto" />
                                                                         </Grid.ColumnDefinitions>
-                                                                        <CheckBox VerticalAlignment="Center" IsChecked="{Binding IsChecked, Mode=TwoWay}" IsEnabled="{Binding IsSelectable}" />
+                                                                        <CheckBox Width="24" MinWidth="24" Padding="0" HorizontalAlignment="Center" VerticalAlignment="Center" IsChecked="{Binding IsChecked, Mode=TwoWay}" IsEnabled="{Binding IsSelectable}" />
                                                                         <Grid Grid.Column="1" MinWidth="0" VerticalAlignment="Center" RowSpacing="2">
                                                                             <Grid.RowDefinitions>
                                                                                 <RowDefinition Height="Auto" />
@@ -2355,7 +2389,7 @@
                                                                             <TextBlock MaxLines="1" Text="{Binding DisplayName}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" ToolTipService.ToolTip="{Binding DisplayName}" />
                                                                             <TextBlock Grid.Row="1" MaxLines="1" Style="{StaticResource SubtleTextStyle}" Text="{Binding DetailText}" TextTrimming="CharacterEllipsis" TextWrapping="NoWrap" ToolTipService.ToolTip="{Binding DetailText}" />
                                                                         </Grid>
-                                                                        <TextBlock Grid.Column="2" MinWidth="68" VerticalAlignment="Center" Style="{StaticResource SubtleTextStyle}" Text="{Binding StatusText}" TextAlignment="Right" TextWrapping="NoWrap" />
+                                                                        <TextBlock Grid.Column="2" MinWidth="52" VerticalAlignment="Center" Style="{StaticResource SubtleTextStyle}" Text="{Binding StatusText}" TextAlignment="Right" TextWrapping="NoWrap" />
                                                                     </Grid>
                                                                 </DataTemplate>
                                                             </ItemsControl.ItemTemplate>
@@ -2363,7 +2397,8 @@
                                                     </Expander>
                                                 </DataTemplate>
                                             </ItemsControl.ItemTemplate>
-                                        </ItemsControl>
+                                            </ItemsControl>
+                                        </StackPanel>
                                     </ScrollViewer>
                                     <Grid
                                         Grid.Row="1"
@@ -2511,7 +2546,8 @@
                                                         HorizontalAlignment="Stretch"
                                                         HorizontalContentAlignment="Center"
                                                         Click="UnrealSyncPreviousStepButton_Click"
-                                                        Content="上一步" />
+                                                        Content="上一步"
+                                                        IsEnabled="{Binding UnrealProjectSync.IsWorkflowOperationIdle, Mode=OneWay}" />
                                                     <Button
                                                         Grid.Column="1"
                                                         MinHeight="42"
@@ -2519,7 +2555,7 @@
                                                         HorizontalContentAlignment="Center"
                                                         Click="UnrealSyncNextStepButton_Click"
                                                         Content="{Binding UnrealProjectSync.WorkflowNextText, Mode=OneWay}"
-                                                        IsEnabled="{Binding UnrealProjectSync.CanAdvanceWorkflow, Mode=OneWay}"
+                                                        IsEnabled="{Binding UnrealProjectSync.WorkflowNextButtonEnabled, Mode=OneWay}"
                                                         Visibility="{Binding UnrealProjectSync.WorkflowNextButtonVisibility, Mode=OneWay}"
                                                         Style="{StaticResource AccentButtonStyle}" />
                                                  </Grid>
@@ -2527,6 +2563,7 @@
                                                     HorizontalAlignment="Stretch"
                                                     Click="ReloadUnrealWorkflowStepButton_Click"
                                                     Content="{Binding UnrealProjectSync.WorkflowReloadText, Mode=OneWay}"
+                                                    IsEnabled="{Binding UnrealProjectSync.IsWorkflowOperationIdle, Mode=OneWay}"
                                                     Visibility="{Binding UnrealProjectSync.PublishWorkspaceVisibility, Mode=OneWay}" />
                                              </StackPanel>
                                             <StackPanel Spacing="8" Visibility="{Binding UnrealProjectSync.FoundationDetailsVisibility, Mode=OneWay}">
@@ -2584,15 +2621,6 @@
                                                  <StackPanel Spacing="10" Visibility="{Binding UnrealProjectSync.WorkflowConfirmationVisibility, Mode=OneWay}">
                                                      <TextBlock FontWeight="SemiBold" Text="筛选同步内容" />
                                                      <ComboBox ItemsSource="{Binding UnrealProjectSync.PublishFilterOptions, Mode=OneWay}" SelectedItem="{Binding UnrealProjectSync.PublishFilter, Mode=TwoWay}" />
-                                                     <Grid ColumnSpacing="10" RowSpacing="4">
-                                                         <Grid.ColumnDefinitions>
-                                                             <ColumnDefinition Width="*" />
-                                                             <ColumnDefinition Width="*" />
-                                                         </Grid.ColumnDefinitions>
-                                                         <TextBlock Text="{Binding UnrealProjectSync.ReadyPublishText, Mode=OneWay}" />
-                                                         <TextBlock Grid.Column="1" Text="{Binding UnrealProjectSync.PendingRedirectText, Mode=OneWay}" />
-                                                         <TextBlock Grid.Row="1" Grid.ColumnSpan="2" Text="{Binding UnrealProjectSync.PublishConflictText, Mode=OneWay}" />
-                                                     </Grid>
                                                      <TextBlock FontWeight="SemiBold" Text="本次选择" />
                                                     <TextBlock FontSize="16" FontWeight="SemiBold" Text="{Binding UnrealProjectSync.ImportSelectionCountText, Mode=OneWay}" />
                                                     <Grid ColumnSpacing="12" RowSpacing="6">
@@ -2606,15 +2634,13 @@
                                                         </Grid.RowDefinitions>
                                                         <TextBlock Text="{Binding UnrealProjectSync.ImportAddedCountText, Mode=OneWay}" />
                                                         <TextBlock Grid.Column="1" Text="{Binding UnrealProjectSync.ImportUpdatedCountText, Mode=OneWay}" />
-                                                        <TextBlock Grid.Row="1" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.ImportAttentionCountText, Mode=OneWay}" />
-                                                         <TextBlock Grid.Row="1" Grid.Column="1" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.ImportSkippedCountText, Mode=OneWay}" />
-                                                     </Grid>
+                                                      </Grid>
                                                      <Button
                                                          MinHeight="44"
                                                          HorizontalAlignment="Stretch"
                                                          Click="PublishCurrentCharacterAssetsToUnrealButton_Click"
                                                          Content="同步到虚幻"
-                                                         IsEnabled="{Binding UnrealProjectSync.CanAdvanceWorkflow, Mode=OneWay}"
+                                                          IsEnabled="{Binding UnrealProjectSync.CanStartPublish, Mode=OneWay}"
                                                          Style="{StaticResource AccentButtonStyle}" />
                                                  </StackPanel>
                                                 <StackPanel Spacing="4" Visibility="{Binding UnrealProjectSync.ImportResultVisibility, Mode=OneWay}">

@@ -24,6 +24,7 @@ internal sealed class UnrealBridgeStateService
                 File.ReadAllText(path, Encoding.UTF8),
                 AppJsonSerializerContext.Default.UnrealBridgeSyncState);
             if (state is null ||
+                !string.Equals(state.HashScheme, UnrealBridgeSyncState.SourceFileHashScheme, StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(state.CharacterCode, character.Code, StringComparison.OrdinalIgnoreCase) ||
                 !string.Equals(NormalizeProjectPath(state.UnrealProjectPath), NormalizeProjectPath(unrealProjectPath), StringComparison.OrdinalIgnoreCase))
             {
@@ -44,6 +45,7 @@ internal sealed class UnrealBridgeStateService
         ArgumentNullException.ThrowIfNull(state);
         state.CharacterCode = character.Code;
         state.UnrealProjectPath = NormalizeProjectPath(unrealProjectPath);
+        state.HashScheme = UnrealBridgeSyncState.SourceFileHashScheme;
         state.LastVerifiedAt = DateTimeOffset.Now;
 
         var path = GetStatePath(character, unrealProjectPath);

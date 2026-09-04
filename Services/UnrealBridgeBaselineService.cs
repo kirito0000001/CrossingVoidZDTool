@@ -7,6 +7,39 @@ namespace CrossingVoidZDTool.Services;
 
 internal sealed class UnrealBridgeBaselineService
 {
+    public UnrealBridgeSyncState BuildFromChanges(
+        string characterCode,
+        string unrealProjectPath,
+        IReadOnlyList<UnrealBridgeChange> changes,
+        string templateCharacterCode = "")
+    {
+        var state = new UnrealBridgeSyncState
+        {
+            HashScheme = UnrealBridgeSyncState.SourceFileHashScheme,
+            CharacterCode = characterCode.Trim(),
+            UnrealProjectPath = string.IsNullOrWhiteSpace(unrealProjectPath)
+                ? string.Empty
+                : Path.GetFullPath(unrealProjectPath),
+            TemplateCharacterCode = templateCharacterCode.Trim(),
+            LastVerifiedAt = DateTimeOffset.Now
+        };
+
+        foreach (var change in changes.Where(change => change.ToolboxItem is not null && change.UnrealItem is not null))
+        {
+            var toolboxItem = change.ToolboxItem!;
+            var unrealItem = change.UnrealItem!;
+            state.Entries[change.StableId] = new UnrealBridgeSyncStateEntry(
+                toolboxItem.ContentHash,
+                unrealItem.ContentHash,
+                unrealItem.SourceObjectPath,
+                unrealItem.OriginIdentity,
+                toolboxItem.ToolboxRelativePath,
+                toolboxItem.NormalizedName);
+        }
+
+        return state;
+    }
+
     public UnrealBridgeSyncState Build(
         string characterCode,
         string unrealProjectPath,
@@ -18,6 +51,7 @@ internal sealed class UnrealBridgeBaselineService
         var unrealItems = unreal.Items.ToDictionary(item => item.StableId, StringComparer.OrdinalIgnoreCase);
         var state = new UnrealBridgeSyncState
         {
+            HashScheme = UnrealBridgeSyncState.SourceFileHashScheme,
             CharacterCode = characterCode.Trim(),
             UnrealProjectPath = string.IsNullOrWhiteSpace(unrealProjectPath)
                 ? string.Empty
@@ -75,6 +109,7 @@ internal sealed class UnrealBridgeBaselineService
 
         var state = new UnrealBridgeSyncState
         {
+            HashScheme = UnrealBridgeSyncState.SourceFileHashScheme,
             CharacterCode = completeState.CharacterCode,
             UnrealProjectPath = completeState.UnrealProjectPath,
             TemplateCharacterCode = completeState.TemplateCharacterCode,

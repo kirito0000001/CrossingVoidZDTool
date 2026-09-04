@@ -13,7 +13,7 @@ internal static class UnrealBridgeVoicePathPolicy
         out string targetObjectPath)
     {
         targetObjectPath = string.Empty;
-        if (!TryReadVoiceKind(payloadJson, out var kind) || kind == VoiceMaterialKind.Other)
+        if (!TryReadVoiceKind(payloadJson, out var kind))
         {
             return false;
         }
@@ -58,7 +58,7 @@ internal static class UnrealBridgeVoicePathPolicy
     private static string SanitizeUnrealName(string value)
     {
         return new string((value ?? string.Empty)
-            .Select(character => char.IsLetterOrDigit(character) || character == '_' ? character : '_')
+            .Select(character => char.IsLetterOrDigit(character) || character is '_' or '-' ? character : '_')
             .ToArray())
             .Trim('_');
     }
