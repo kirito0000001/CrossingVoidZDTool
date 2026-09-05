@@ -10,7 +10,9 @@ namespace CrossingVoidZDTool;
 internal enum UnrealProjectSyncExportScope
 {
     Full,
-    CharacterMaterials
+    Normalization,
+    CharacterMaterials,
+    CharacterSequences
 }
 
 internal sealed record UnrealProjectSyncCheckItem(

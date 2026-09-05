@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Text.Json;
 
 namespace CrossingVoidZDTool.Services;
 
@@ -34,9 +35,43 @@ internal sealed class UnrealBridgeDiffService
                     toolboxItems.TryGetValue(stableId, out var matchedToolboxItem) &&
                     unrealItems.TryGetValue(stableId, out var matchedUnrealItem) &&
                     IsMigrationSafePair(matchedToolboxItem, matchedUnrealItem, toolbox.CharacterCode)))
+            .SelectMany(ExpandSequenceChange)
             .OrderBy(change => change.Module)
             .ThenBy(change => change.StableId, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private static IEnumerable<UnrealBridgeChange> ExpandSequenceChange(UnrealBridgeChange change)
+    {
+        var sequenceGroupKey = ComputeSequenceGroupKey(change);
+
+        if (change.Module != UnrealBridgeModule.SequenceFrames ||
+            !change.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase) ||
+            change.ToolboxItem is null || change.UnrealItem is null ||
+            change.Kind is not (UnrealBridgeChangeKind.Updated or UnrealBridgeChangeKind.Conflict or UnrealBridgeChangeKind.Renamed))
+        {
+            yield return change with { SequenceGroupKey = sequenceGroupKey };
+            yield break;
+        }
+
+        yield return change with
+        {
+            StableId = $"{change.StableId}:delete",
+            DisplayName = $"{change.DisplayName}（旧）",
+            Kind = UnrealBridgeChangeKind.DeleteCandidate,
+            ToolboxItem = null,
+            IsSelected = change.IsSelected,
+            SequenceGroupKey = sequenceGroupKey
+        };
+        yield return change with
+        {
+            StableId = $"{change.StableId}:add",
+            DisplayName = $"{change.DisplayName}（新）",
+            Kind = UnrealBridgeChangeKind.Added,
+            UnrealItem = null,
+            IsSelected = change.IsSelected,
+            SequenceGroupKey = sequenceGroupKey
+        };
     }
 
     private static void AlignCanonicalMaterialItems(
@@ -305,7 +340,62 @@ internal sealed class UnrealBridgeDiffService
             kind,
             toolboxItem,
             unrealItem,
-            kind is UnrealBridgeChangeKind.Added or UnrealBridgeChangeKind.Updated or UnrealBridgeChangeKind.Renamed);
+            kind is UnrealBridgeChangeKind.Added or UnrealBridgeChangeKind.Updated or UnrealBridgeChangeKind.Renamed,
+            stableId);
+    }
+
+    private static string ComputeSequenceGroupKey(UnrealBridgeChange change)
+    {
+        if (change.Module != UnrealBridgeModule.SequenceFrames ||
+            !change.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase))
+        {
+            return change.StableId;
+        }
+
+        var payloadJson = change.ToolboxItem?.PayloadJson
+            ?? change.UnrealItem?.PayloadJson
+            ?? string.Empty;
+        var actionCode = ExtractActionCode(payloadJson);
+        return string.IsNullOrWhiteSpace(actionCode)
+            ? change.StableId
+            : $"sequence:{NormalizeId(actionCode)}";
+    }
+
+    private static string ExtractActionCode(string payloadJson)
+    {
+        if (string.IsNullOrWhiteSpace(payloadJson))
+        {
+            return string.Empty;
+        }
+
+        var trimmed = payloadJson.Trim();
+        if (trimmed.StartsWith("{", StringComparison.Ordinal))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(trimmed);
+                if (doc.RootElement.TryGetProperty("actionCode", out var element) &&
+                    element.ValueKind == JsonValueKind.String)
+                {
+                    return element.GetString() ?? string.Empty;
+                }
+            }
+            catch (JsonException)
+            {
+                // Fall through to the pipe-delimited format.
+            }
+        }
+
+        var parts = trimmed.Split('|', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length > 0 ? parts[0] : string.Empty;
+    }
+
+    private static string NormalizeId(string value)
+    {
+        var normalized = new string(value.Trim().ToLowerInvariant()
+            .Select(character => char.IsLetterOrDigit(character) || character is '-' or '_' ? character : '-')
+            .ToArray());
+        return string.IsNullOrWhiteSpace(normalized) ? "unnamed" : normalized;
     }
 
     private static bool IsRename(

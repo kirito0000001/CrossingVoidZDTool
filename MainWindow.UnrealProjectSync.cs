@@ -215,6 +215,7 @@ namespace CrossingVoidZDTool
 
             _isUnrealPublishRunning = true;
             _applicationViewModel.UnrealProjectSync.SetPublishRunning(true);
+            var isSequenceSynchronization = _applicationViewModel.UnrealProjectSync.WorkflowStep == 5;
             ShowGlobalProgress("同步前检测", character.Code);
             try
             {
@@ -226,13 +227,16 @@ namespace CrossingVoidZDTool
                 UnrealProjectSyncCharacterCandidate latestCandidate;
                 try
                 {
-                    _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code);
+                    if (isSequenceSynchronization)
+                        _applicationViewModel.UnrealProjectSync.ValidateSequenceCharacterFolders(_applicationViewModel.UnrealProjectSync.ProjectPath, character.Code);
+                    else
+                        _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code);
                     // 第三步执行前累计校验第一至第三步；不会检查尚未进入的后续阶段。
                     await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
                         [character.Code],
                         cancellationToken: GetGlobalProgressCancellationToken(),
-                        scope: UnrealProjectSyncExportScope.CharacterMaterials);
-                    _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code, requireAssetTypes: true);
+                        scope: isSequenceSynchronization ? UnrealProjectSyncExportScope.CharacterSequences : UnrealProjectSyncExportScope.CharacterMaterials);
+                    _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code, requireAssetTypes: !isSequenceSynchronization);
                     latestCandidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.FirstOrDefault(item =>
                         string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase))
                         ?? throw new InvalidOperationException(
@@ -246,7 +250,7 @@ namespace CrossingVoidZDTool
 
                 try
                 {
-                    if (!await _applicationViewModel.UnrealProjectSync.OpenNormalizationWorkspaceAsync())
+                    if (!isSequenceSynchronization && !await _applicationViewModel.UnrealProjectSync.OpenNormalizationWorkspaceAsync())
                     {
                         throw new InvalidOperationException("同步前无法重新加载素材规整状态。");
                     }
@@ -256,7 +260,7 @@ namespace CrossingVoidZDTool
                     _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(2);
                     throw;
                 }
-                if (_applicationViewModel.UnrealProjectSync.NormalizationItems.Any(item => !item.IsResolved))
+                if (!isSequenceSynchronization && _applicationViewModel.UnrealProjectSync.NormalizationItems.Any(item => !item.IsResolved))
                 {
                     _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(2);
                     CompleteGlobalProgress("需要重新确认规整", "检测发现部分重定向映射已失效，请完成第二步后再同步。");
@@ -264,10 +268,17 @@ namespace CrossingVoidZDTool
                     await HideGlobalProgressAfterDelayAsync();
                     return;
                 }
-                _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(3);
+                _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(isSequenceSynchronization ? 5 : 3);
+                var latestToolboxSnapshot = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character);
+                var latestUnrealSnapshot = new UnrealBridgeSemanticSnapshotService().Build(latestCandidate);
+                var latestAllowedModules = isSequenceSynchronization
+                    ? new[] { UnrealBridgeModule.SequenceFrames }
+                    : new[] { UnrealBridgeModule.BaseMaterials, UnrealBridgeModule.Voices };
+                latestToolboxSnapshot = latestToolboxSnapshot with { Items = latestToolboxSnapshot.Items.Where(item => latestAllowedModules.Contains(item.Module)).ToArray() };
+                latestUnrealSnapshot = latestUnrealSnapshot with { Items = latestUnrealSnapshot.Items.Where(item => latestAllowedModules.Contains(item.Module)).ToArray() };
                 var latestChanges = new UnrealBridgeDiffService().Compare(
-                    new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character),
-                    new UnrealBridgeSemanticSnapshotService().Build(latestCandidate),
+                    latestToolboxSnapshot,
+                    latestUnrealSnapshot,
                     UnrealBridgeDirection.PublishToUnreal,
                     baseline)
                     .Select(change => change with { IsSelected = change.IsSelected && UnrealBridgePublishSupportPolicy.CanExecute(change) })
@@ -301,7 +312,7 @@ namespace CrossingVoidZDTool
                 }
                 if (publishChangesChanged)
                 {
-                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(3);
+                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(isSequenceSynchronization ? 5 : 3);
                     CompleteGlobalProgress("同步内容发生变化", "已刷新第三步列表，请重新确认后再次同步。");
                     ShowFloatingTip(InfoBarSeverity.Warning, "同步内容已刷新", "最终检测发现素材发生变化，请重新确认本次选择。");
                     await HideGlobalProgressAfterDelayAsync();
@@ -323,7 +334,7 @@ namespace CrossingVoidZDTool
                             var configurationResult = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
                             _applicationViewModel.UnrealProjectSync.SetLightConfigurationResult(configurationResult);
                         }
-                        CompleteGlobalProgress("素材无需同步", "全部素材无差异，已进入基础配置。");
+                        CompleteGlobalProgress("序列无需同步", isSequenceSynchronization ? "全部序列无差异。" : "全部素材无差异，已进入基础配置。");
                         await HideGlobalProgressAfterDelayAsync();
                         return;
                     }
@@ -373,7 +384,7 @@ namespace CrossingVoidZDTool
                     character.Code,
                     projectPath,
                     changes,
-                    deletionsConfirmed: false,
+                    deletionsConfirmed: isSequenceSynchronization,
                     isFirstPublish: false,
                     templateCharacterCode: baseline?.TemplateCharacterCode ?? string.Empty,
                     baseline: baseline,
@@ -439,7 +450,7 @@ namespace CrossingVoidZDTool
                 await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
                     [character.Code],
                     cancellationToken: GetGlobalProgressCancellationToken(),
-                    scope: UnrealProjectSyncExportScope.CharacterMaterials);
+                    scope: isSequenceSynchronization ? UnrealProjectSyncExportScope.CharacterSequences : UnrealProjectSyncExportScope.CharacterMaterials);
                 var refreshedCandidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.First(item =>
                     string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase));
                 var rescanned = new UnrealBridgeSemanticSnapshotService().Build(refreshedCandidate);
@@ -469,22 +480,22 @@ namespace CrossingVoidZDTool
                         remainingChanges,
                         UnrealBridgePublishSupportPolicy.CanExecute,
                         GetGlobalProgressCancellationToken());
-                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(3);
-                    CompleteGlobalProgress("本次素材同步完成", $"已验证 {executableCount} 项；仍有 {deferredCount} 项需要处理。");
-                    ShowFloatingTip(InfoBarSeverity.Success, "本次素材已同步", $"仍有 {deferredCount} 项，完成后才能进入基础配置。");
+                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(isSequenceSynchronization ? 5 : 3);
+                    CompleteGlobalProgress(isSequenceSynchronization ? "本次序列同步完成" : "本次素材同步完成", $"已验证 {executableCount} 项；仍有 {deferredCount} 项需要处理。");
+                    ShowFloatingTip(InfoBarSeverity.Success, isSequenceSynchronization ? "本次序列已同步" : "本次素材已同步", isSequenceSynchronization ? $"仍有 {deferredCount} 项序列差异。" : $"仍有 {deferredCount} 项，完成后才能进入基础配置。");
                     await HideGlobalProgressAfterDelayAsync();
                     return;
                 }
 
                 _applicationViewModel.UnrealProjectSync.CompletePublishOperation(executableCount, deferredCount);
-                if (!_applicationViewModel.UnrealProjectSync.IsLightConfigurationLoaded)
+                if (!isSequenceSynchronization && !_applicationViewModel.UnrealProjectSync.IsLightConfigurationLoaded)
                 {
                     UpdateGlobalProgress("正在检测基础配置...", 94, character.Code, true);
                     var configurationResult = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
                     _applicationViewModel.UnrealProjectSync.SetLightConfigurationResult(configurationResult);
                 }
-                CompleteGlobalProgress("同步到虚幻完成", $"已验证 {executableCount} 项；另有 {deferredCount} 项未执行。");
-                ShowFloatingTip(InfoBarSeverity.Success, "同步到虚幻完成", $"已验证 {executableCount} 项。");
+                CompleteGlobalProgress(isSequenceSynchronization ? "序列同步到虚幻完成" : "同步到虚幻完成", $"已验证 {executableCount} 项；另有 {deferredCount} 项未执行。");
+                ShowFloatingTip(InfoBarSeverity.Success, isSequenceSynchronization ? "序列同步完成" : "同步到虚幻完成", $"已验证 {executableCount} 项。");
                 AppendLog(LogKind.User, $"同步所选内容到 Unreal：{character.Code}，Executed={executableCount}，Deferred={deferredCount}。");
                 await HideGlobalProgressAfterDelayAsync();
             }
@@ -632,15 +643,21 @@ namespace CrossingVoidZDTool
             try
             {
                 var baseline = new UnrealBridgeStateService().Load(character, _applicationViewModel.UnrealProjectSync.ProjectPath);
-                _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code);
+                if (_workflowStepAfterPublishDetection == 5)
+                    _applicationViewModel.UnrealProjectSync.ValidateSequenceCharacterFolders(_applicationViewModel.UnrealProjectSync.ProjectPath, character.Code);
+                else
+                    _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code);
                 ShowGlobalProgress("检测同步差异", character.Code);
+                var detectionExportScope = _applicationViewModel.UnrealProjectSync.WorkflowStep == 5 || _workflowStepAfterPublishDetection == 5
+                    ? UnrealProjectSyncExportScope.CharacterSequences
+                    : UnrealProjectSyncExportScope.CharacterMaterials;
                 await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
                     [character.Code],
                     new Progress<ProgressUpdate>(update =>
                         UpdateGlobalProgress(update.Message, Math.Min(70, update.Percent * 0.7), update.Detail, update.IsIndeterminate)),
                     GetGlobalProgressCancellationToken(),
-                    UnrealProjectSyncExportScope.CharacterMaterials);
-                _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code, requireAssetTypes: true);
+                    detectionExportScope);
+                _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code, requireAssetTypes: false);
                 var candidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.FirstOrDefault(item =>
                     string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase));
                 if (candidate is null)
@@ -651,9 +668,16 @@ namespace CrossingVoidZDTool
                         $"期望路径：/Game/ITems/CharItemS/Item_{character.Code}.Item_{character.Code}\n" +
                         $"请检查 Unreal 内容浏览器中的资产名称和路径是否正确。");
                 }
+                var toolboxSnapshot = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character);
+                var unrealSnapshot = new UnrealBridgeSemanticSnapshotService().Build(candidate);
+                var allowedModules = _workflowStepAfterPublishDetection == 5
+                    ? new[] { UnrealBridgeModule.SequenceFrames }
+                    : new[] { UnrealBridgeModule.BaseMaterials, UnrealBridgeModule.Voices };
+                toolboxSnapshot = toolboxSnapshot with { Items = toolboxSnapshot.Items.Where(item => allowedModules.Contains(item.Module)).ToArray() };
+                unrealSnapshot = unrealSnapshot with { Items = unrealSnapshot.Items.Where(item => allowedModules.Contains(item.Module)).ToArray() };
                 var changes = new UnrealBridgeDiffService().Compare(
-                    new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character),
-                    new UnrealBridgeSemanticSnapshotService().Build(candidate),
+                    toolboxSnapshot,
+                    unrealSnapshot,
                     UnrealBridgeDirection.PublishToUnreal,
                     baseline)
                     .Select(change => change with
@@ -661,6 +685,12 @@ namespace CrossingVoidZDTool
                         IsSelected = change.IsSelected && UnrealBridgePublishSupportPolicy.CanExecute(change)
                     })
                     .ToArray();
+                if (_workflowStepAfterPublishDetection == 5)
+                {
+                    _applicationViewModel.UnrealProjectSync.SelectedPublishStage =
+                        _applicationViewModel.UnrealProjectSync.PublishStages.First(stage =>
+                            stage.Stage == UnrealBridgePublishStage.ZdAnimationTracks);
+                }
                 changes = _applicationViewModel.UnrealProjectSync.FilterPublishChanges(changes).ToArray();
                 var matchedChanges = changes
                     .Where(change => change.ToolboxItem is not null && change.UnrealItem is not null)
@@ -694,6 +724,10 @@ namespace CrossingVoidZDTool
                 else if (targetWorkflowStep == 3)
                 {
                     _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(3);
+                }
+                else if (targetWorkflowStep == 5)
+                {
+                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(5);
                 }
                 else
                 {
@@ -935,6 +969,15 @@ namespace CrossingVoidZDTool
 
             if (sync.WorkflowStep == 4)
             {
+                if (!sync.CanAdvanceWorkflow)
+                {
+                    ShowFloatingTip(InfoBarSeverity.Informational, "第四步尚未完成", "请先完成基础配置。" );
+                    return;
+                }
+
+                sync.ReturnToWorkflowStep(5);
+                _workflowStepAfterPublishDetection = 5;
+                DetectUnrealPublishChangesButton_Click(sender, e);
                 return;
             }
 
@@ -980,6 +1023,13 @@ namespace CrossingVoidZDTool
                 return;
             }
 
+            if (sync.WorkflowStep == 5)
+            {
+                _workflowStepAfterPublishDetection = 5;
+                DetectUnrealPublishChangesButton_Click(sender, e);
+                return;
+            }
+
             ShowFloatingTip(
                 sync.ReloadPublishResult() ? InfoBarSeverity.Success : InfoBarSeverity.Warning,
                 "同步结果已重新加载",
@@ -1005,7 +1055,7 @@ namespace CrossingVoidZDTool
                 await sync.ExportProjectCharactersAsync(
                     [characterCode],
                     cancellationToken: GetGlobalProgressCancellationToken(),
-                    scope: UnrealProjectSyncExportScope.CharacterMaterials);
+                    scope: UnrealProjectSyncExportScope.Normalization);
                 if (!await sync.OpenNormalizationWorkspaceAsync())
                 {
                     throw new InvalidOperationException("无法读取当前角色的 Unreal 素材，请先检查项目和角色来源。");

@@ -32,6 +32,7 @@ internal sealed class UnrealProjectSyncService
     public const string LinkSkillLibraryObjectPath = "/Game/BaseC/ExCordLibrary/LB_Fucs.LB_Fucs";
     public const string ExportFolderName = "ZDToolboxExport";
     public const string ExportManifestFileName = "characters.json";
+    private const string SequenceExportManifestFileName = "characters-sequences.json";
     public const string ExportScriptRelativePath = @"Tools\Unreal\export_zd_assets.py";
 
     private static readonly string[] ExportTargetContentPaths =
@@ -208,6 +209,25 @@ internal sealed class UnrealProjectSyncService
                 (string.IsNullOrWhiteSpace(item.ExpectedType) ? string.Empty : $"；类型应为 {item.ExpectedType}") +
                 (string.IsNullOrWhiteSpace(item.ActualPath) ? string.Empty : $"；当前为 {item.ActualPath}") +
                 (string.IsNullOrWhiteSpace(item.ActualType) ? string.Empty : $"；当前类型 {item.ActualType}"))));
+    }
+
+    public void ValidateSequenceCharacterFolders(string projectPath, string characterCode)
+    {
+        static string ContentRelative(string unrealPath) =>
+            unrealPath.TrimStart('/').StartsWith("Game/", StringComparison.OrdinalIgnoreCase)
+                ? unrealPath.TrimStart('/')[5..]
+                : unrealPath.TrimStart('/');
+
+        var projectDirectory = Path.GetDirectoryName(Path.GetFullPath(projectPath))!;
+        var root = Path.Combine(projectDirectory, "Content", ContentRelative(TargetZdContentPath), characterCode);
+        var missing = new List<string>();
+        foreach (var path in new[] { root, Path.Combine(root, "AnimSequences"), Path.Combine(root, "Material") })
+        {
+            if (!Directory.Exists(path)) missing.Add(path);
+        }
+        var item = Path.Combine(projectDirectory, "Content", ContentRelative(TargetCharacterItemContentPath), $"Item_{characterCode}.uasset");
+        if (!File.Exists(item)) missing.Add(item);
+        if (missing.Count > 0) throw new InvalidOperationException("序列同步底层检查未通过：\n- " + string.Join("\n- ", missing));
     }
 
     public IReadOnlyList<UnrealPublishFoundationCheckItem> CheckPublishCharacterFolders(
@@ -451,7 +471,7 @@ internal sealed class UnrealProjectSyncService
 
         var exportDirectoryPath = GetExportDirectoryPath(normalizedProjectPath);
         Directory.CreateDirectory(exportDirectoryPath);
-        var manifestPath = Path.Combine(exportDirectoryPath, ExportManifestFileName);
+        var manifestPath = Path.Combine(exportDirectoryPath, GetExportManifestFileName(scope));
         var editorCommandPath = ResolveEditorCommandPath(normalizedEnginePath);
         var startInfo = new ProcessStartInfo
         {
@@ -473,6 +493,15 @@ internal sealed class UnrealProjectSyncService
         }
         return startInfo;
     }
+
+    private static string GetExportManifestFileName(UnrealProjectSyncExportScope scope) =>
+        scope switch
+        {
+            UnrealProjectSyncExportScope.CharacterSequences => SequenceExportManifestFileName,
+            UnrealProjectSyncExportScope.CharacterMaterials => "characters-materials.json",
+            UnrealProjectSyncExportScope.Normalization => "characters-normalization.json",
+            _ => ExportManifestFileName
+        };
 
     private static void ValidateProjectModuleBuildIds(string editorPath, string projectPath)
     {
@@ -593,7 +622,7 @@ internal sealed class UnrealProjectSyncService
         progress?.Report(new ProgressUpdate("正在校验虚幻同步定位...", 5, "检查引擎、项目和工具箱内置导出脚本。"));
         var selectedCodes = NormalizeSelectedCharacterCodes(selectedCharacterCodes);
         var normalizedProjectPath = NormalizePath(projectPath);
-        var manifestPath = Path.Combine(GetExportDirectoryPath(normalizedProjectPath), ExportManifestFileName);
+        var manifestPath = Path.Combine(GetExportDirectoryPath(normalizedProjectPath), GetExportManifestFileName(scope));
         var progressPath = GetExportProgressPath(manifestPath);
         var taskExecutionService = new UnrealPythonTaskExecutionService();
         var useRunningEditor = taskExecutionService.ShouldUseRunningEditor();

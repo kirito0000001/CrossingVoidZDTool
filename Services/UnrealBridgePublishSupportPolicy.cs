@@ -18,7 +18,8 @@ internal static class UnrealBridgePublishSupportPolicy
 
         if (change.Kind == UnrealBridgeChangeKind.DeleteCandidate)
         {
-            return false;
+            return change.Module == UnrealBridgeModule.SequenceFrames &&
+                !string.IsNullOrWhiteSpace(change.UnrealItem?.SourceObjectPath);
         }
 
         if (change.Kind == UnrealBridgeChangeKind.Added)

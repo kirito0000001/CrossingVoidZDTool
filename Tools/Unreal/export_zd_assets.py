@@ -3331,7 +3331,8 @@ def _export():
     selected_codes = _load_selected_character_codes()
     selected_code_keys = {code.lower() for code in selected_codes}
     export_scope = _load_export_scope()
-    material_scope = export_scope.lower() == "charactermaterials" and bool(selected_codes)
+    material_scope = export_scope.lower() in ("charactermaterials", "normalization") and bool(selected_codes)
+    sequence_scope = export_scope.lower() == "charactersequences" and bool(selected_codes)
     previous_manifest = _load_previous_manifest(manifest_path) if selected_codes else {}
     export_root = os.path.dirname(manifest_path)
     registry = unreal.AssetRegistryHelpers.get_asset_registry()
@@ -3351,6 +3352,13 @@ def _export():
             path for path, recursive in asset_scan_entries
             if recursive or path in (CHAR_ITEM_ROOT, TEAM_SELECT_ROOT)
         ]
+    elif sequence_scope:
+        asset_scan_entries = [
+            ("{}/{}/".format(CHARACTER_ACTOR_ROOT, code).rstrip("/"), True)
+            for code in sorted(selected_codes)
+        ]
+        asset_scan_entries.append((CHAR_ITEM_ROOT, False))
+        scan_paths = [path for path, _ in asset_scan_entries]
     else:
         asset_scan_entries = [(path, True) for path in target_paths]
         scan_paths = list(target_paths) + [CHAR_ITEM_ROOT]
@@ -3373,6 +3381,8 @@ def _export():
         found = [asset for asset in found if _is_top_level_asset(asset)]
         if material_scope and target_path != TEAM_SELECT_ROOT:
             found = [asset for asset in found if _include_material_scope_asset(asset, selected_codes)]
+        elif sequence_scope:
+            found = [asset for asset in found if "/sound/" not in _to_text(asset.package_path).lower() and "/buff/" not in _to_text(asset.package_path).lower()]
         elif selected_codes and target_path not in (SHARED_BUFF_ICON_ROOT, SHARED_BATTLE_EFFECT_ROOT, TEAM_SELECT_ROOT):
             found = [
                 asset for asset in found
@@ -3424,6 +3434,18 @@ def _export():
         character_items = []
         character_actors = []
         character_sequences = []
+        character_buffs = []
+        link_skill_library = {}
+        support_skill_library = {}
+    elif sequence_scope:
+        _write_progress("Unreal 正在整理角色序列清单...", 88, selected_detail, True)
+        character_items = _export_character_items(registry, project_path)
+        character_items = [
+            item for item in character_items
+            if _to_text(item.get("code", "")).strip().lower() in selected_code_keys
+        ]
+        character_actors = _export_character_actors(assets)
+        character_sequences = _export_character_sequences(character_actors, assets, project_path)
         character_buffs = []
         link_skill_library = {}
         support_skill_library = {}

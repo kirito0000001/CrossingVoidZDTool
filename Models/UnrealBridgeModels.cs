@@ -197,8 +197,11 @@ internal sealed record UnrealBridgeChange(
     UnrealBridgeChangeKind Kind,
     UnrealBridgeSnapshotItem? ToolboxItem,
     UnrealBridgeSnapshotItem? UnrealItem,
-    bool IsSelected)
+    bool IsSelected,
+    string SequenceGroupKey = "")
 {
+    public string ParentStableId => ToolboxItem?.ParentStableId ?? UnrealItem?.ParentStableId ?? string.Empty;
+
     public bool RequiresExplicitConfirmation => Kind is UnrealBridgeChangeKind.Conflict or UnrealBridgeChangeKind.DeleteCandidate;
 }
 

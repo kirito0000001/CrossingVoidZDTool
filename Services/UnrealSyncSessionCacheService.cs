@@ -68,22 +68,17 @@ internal sealed class UnrealSyncSessionCacheService
 
     public UnrealSyncSessionCacheLoadResult LoadStep(string projectPath, string characterCode, int workflowStep)
     {
-        if (workflowStep is < 1 or > 4 || string.IsNullOrWhiteSpace(characterCode))
+        if (workflowStep is < 1 or > 5 || string.IsNullOrWhiteSpace(characterCode))
         {
             return new(UnrealSyncSessionCacheLoadStatus.Missing);
         }
 
+        // 按步骤读取时只能读取目标步骤文件，不能回退到其他步骤的最新文件。
+        // 否则请求第三步缓存时可能误读第四步或第五步缓存。
         var path = GetStepPath(projectPath, characterCode, workflowStep);
-        var preferred = File.Exists(path)
+        return File.Exists(path)
             ? LoadFromPath(projectPath, path)
             : new UnrealSyncSessionCacheLoadResult(UnrealSyncSessionCacheLoadStatus.Missing);
-        if (preferred.Status == UnrealSyncSessionCacheLoadStatus.Loaded)
-        {
-            return preferred;
-        }
-
-        var fallback = Load(projectPath, characterCode);
-        return fallback.Status == UnrealSyncSessionCacheLoadStatus.Loaded ? fallback : preferred;
     }
 
     private UnrealSyncSessionCacheLoadResult LoadLegacyProjectCache(string projectPath, string characterCode)
@@ -153,7 +148,7 @@ internal sealed class UnrealSyncSessionCacheService
         var characterSuffix = string.IsNullOrWhiteSpace(characterCode)
             ? string.Empty
             : $"-{SanitizeFileName(characterCode)}";
-        return Path.Combine(GetFolderPath(), $"session-{GetProjectKey(projectPath)}{characterSuffix}-step{Math.Clamp(workflowStep, 1, 4)}.json");
+        return Path.Combine(GetFolderPath(), $"session-{GetProjectKey(projectPath)}{characterSuffix}-step{Math.Clamp(workflowStep, 1, 5)}.json");
     }
 
     private static string GetFolderPath() =>

@@ -5,6 +5,7 @@ using System.ComponentModel;
 using System.Linq;
 using System.IO;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using CrossingVoidZDTool.ViewModels;
 
 namespace CrossingVoidZDTool;
@@ -56,7 +57,10 @@ internal sealed class UnrealSyncSelectionTreeItem : ObservableObject
         bool isSelectable = true,
         UnrealBridgeModule? module = null,
         UnrealBridgeChange? change = null,
-        IEnumerable<UnrealSyncSelectionTreeItem>? children = null)
+        IEnumerable<UnrealSyncSelectionTreeItem>? children = null,
+        int deleteCount = 0,
+        int addCount = 0,
+        bool isSequenceGroup = false)
     {
         StableId = stableId;
         DisplayName = displayName;
@@ -64,6 +68,9 @@ internal sealed class UnrealSyncSelectionTreeItem : ObservableObject
         StatusText = statusText;
         _isChecked = isChecked;
         RequiresAttention = requiresAttention;
+        DeleteCount = deleteCount;
+        AddCount = addCount;
+        IsSequenceGroup = isSequenceGroup;
         IsSelectable = isSelectable;
         Module = module;
         Change = change;
@@ -89,6 +96,16 @@ internal sealed class UnrealSyncSelectionTreeItem : ObservableObject
     public string StatusText { get; }
 
     public bool RequiresAttention { get; }
+
+    public int DeleteCount { get; }
+
+    public int AddCount { get; }
+
+    public string DeleteCountText => $"删除 {DeleteCount} 项";
+
+    public string AddCountText => $"新增 {AddCount} 项";
+
+    public bool IsSequenceGroup { get; }
 
     public bool IsSelectable { get; }
 
@@ -250,6 +267,84 @@ internal static class UnrealSyncSelectionTreeBuilder
             .ToArray();
     }
 
+    public static IReadOnlyList<UnrealSyncSelectionTreeItem> FromSequenceChanges(
+        IReadOnlyCollection<UnrealBridgeChange> changes,
+        Func<UnrealBridgeChange, bool>? canExecute = null)
+    {
+        canExecute ??= change => !change.RequiresExplicitConfirmation;
+        var allChanges = changes.Where(change => change.Module == UnrealBridgeModule.SequenceFrames).ToArray();
+        var parentNames = allChanges
+            .Where(change => !change.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase))
+            .GroupBy(change => change.StableId, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First().DisplayName, StringComparer.OrdinalIgnoreCase);
+        var actionNameToKey = parentNames
+            .Where(pair => pair.Key.StartsWith("sequence:", StringComparison.OrdinalIgnoreCase))
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.Value))
+            .GroupBy(pair => pair.Value, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First().Key, StringComparer.OrdinalIgnoreCase);
+        return allChanges
+            .Where(change => change.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase) &&
+                change.Kind != UnrealBridgeChangeKind.Unchanged &&
+                change.Kind is UnrealBridgeChangeKind.Added or UnrealBridgeChangeKind.DeleteCandidate)
+            .GroupBy(change => ResolveSequenceGroupKey(change, actionNameToKey))
+            .Select(group =>
+            {
+                var deleteCount = group.Count(change => change.Kind == UnrealBridgeChangeKind.DeleteCandidate);
+                var addCount = group.Count(change => change.Kind == UnrealBridgeChangeKind.Added);
+                var representative = group.First();
+                var parentKey = group.Key;
+                var children = group
+                    .OrderBy(change => change.Kind)
+                    .ThenBy(change => change.DisplayName, StringComparer.OrdinalIgnoreCase)
+                    .Select(change => FromChange(change, canExecute, forceSelected: true))
+                    .ToArray();
+                var displayName = parentNames.GetValueOrDefault(parentKey, representative.DisplayName);
+                return new UnrealSyncSelectionTreeItem(
+                    group.Key,
+                    displayName,
+                    string.Empty,
+                    "待同步",
+                    true,
+                    false,
+                    children.Any(child => child.IsSelectable),
+                    UnrealBridgeModule.SequenceFrames,
+                    representative,
+                    children: children,
+                    deleteCount: deleteCount,
+                    addCount: addCount,
+                    isSequenceGroup: true);
+            })
+            .Where(item => item.DeleteCount > 0 || item.AddCount > 0)
+            .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+    }
+
+    private static string ResolveSequenceGroupKey(
+        UnrealBridgeChange change,
+        IReadOnlyDictionary<string, string> actionNameToKey)
+    {
+        if (change.Module != UnrealBridgeModule.SequenceFrames)
+        {
+            return change.StableId;
+        }
+
+        if (!string.IsNullOrWhiteSpace(change.SequenceGroupKey) &&
+            change.SequenceGroupKey.StartsWith("sequence:", StringComparison.OrdinalIgnoreCase) &&
+            actionNameToKey.Values.Contains(change.SequenceGroupKey, StringComparer.OrdinalIgnoreCase))
+        {
+            return change.SequenceGroupKey;
+        }
+
+        var match = Regex.Match(change.DisplayName ?? string.Empty, @"^(.*?)\s*第\s*\d+\s*帧\s*$");
+        if (match.Success &&
+            actionNameToKey.TryGetValue(match.Groups[1].Value.Trim(), out var key))
+        {
+            return key;
+        }
+
+        return change.StableId;
+    }
+
     public static IReadOnlyList<UnrealSyncSelectionTreeItem> FromSnapshot(UnrealBridgeSnapshot snapshot)
     {
         return snapshot.Items
@@ -298,7 +393,8 @@ internal static class UnrealSyncSelectionTreeBuilder
 
     private static UnrealSyncSelectionTreeItem FromChange(
         UnrealBridgeChange change,
-        Func<UnrealBridgeChange, bool> canExecute)
+        Func<UnrealBridgeChange, bool> canExecute,
+        bool forceSelected = false)
     {
         var isExecutable = canExecute(change);
         var requiresRedirect = !isExecutable && change.Kind != UnrealBridgeChangeKind.Conflict;
@@ -311,7 +407,7 @@ internal static class UnrealSyncSelectionTreeBuilder
                 ? $"Unreal 现有：{change.UnrealItem.SourceObjectPath}"
                 : $"工具箱来源：{change.ToolboxItem?.ToolboxRelativePath ?? string.Empty}",
             isExecutable ? ChangeKindName(change.Kind) : requiresRedirect ? "重定向" : "需要检查",
-            change.IsSelected && isExecutable,
+            (forceSelected || change.IsSelected) && isExecutable,
             requiresAttention,
             isExecutable || requiresRedirect,
             change.Module,
