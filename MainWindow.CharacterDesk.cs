@@ -217,7 +217,7 @@ namespace CrossingVoidZDTool
 
         private async void ContinueLastCharacterButton_Click(object sender, RoutedEventArgs e)
         {
-            AppendLog(LogKind.User, $"ContinueLastCharacter clicked. LastEdited={CharacterDesk.LastEditedCharacter?.Code ?? "<null>"} Current={CharacterDesk.CurrentCharacter?.Code ?? "<null>"} LastModule={Settings.LastEditedModuleTag ?? "<null>"}");
+            LogUserOperation($"继续上次编辑：LastEdited={CharacterDesk.LastEditedCharacter?.Code ?? "<null>"} Current={CharacterDesk.CurrentCharacter?.Code ?? "<null>"} LastModule={Settings.LastEditedModuleTag ?? "<null>"}");
             try
             {
                 if (CharacterDesk.LastEditedCharacter is not null)
@@ -256,7 +256,7 @@ namespace CrossingVoidZDTool
             }
 
             ShowCharacterDetail(character);
-            AppendLog(LogKind.User, $"打开角色详情：{character.Name} / {character.Code}");
+            LogUserOperation($"打开角色详情：{character.Name} / {character.Code}");
         }
 
         private void ShowCharacterDetail(CharacterCard character)
@@ -327,7 +327,7 @@ namespace CrossingVoidZDTool
                     character = await CharacterDesk.ReopenCompletedCharacterAsync(character);
                     _characterDetailCharacter = character;
                     PersistCurrentCharacterSelection();
-                    AppendLog(LogKind.User, $"恢复角色草稿：{character.Name} / {character.Code} -> {character.FolderPath}");
+                    LogUserOperation($"恢复角色草稿：{character.Name} / {character.Code}");
                 }
                 catch (Exception ex)
                 {
@@ -342,7 +342,7 @@ namespace CrossingVoidZDTool
                 {
                     await CharacterDesk.SetCurrentCharacterAsync(character);
                     PersistCurrentCharacterSelection();
-                    AppendLog(LogKind.User, $"继续编辑角色：{character.Name} / {character.Code}");
+                    LogUserOperation($"继续编辑角色：{character.Name} / {character.Code}");
                 }
                 catch (Exception ex)
                 {

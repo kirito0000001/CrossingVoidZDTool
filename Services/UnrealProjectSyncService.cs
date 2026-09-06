@@ -673,10 +673,10 @@ internal sealed class UnrealProjectSyncService
             }
 
             var elapsed = DateTime.UtcNow - waitStartedAt;
-            if (elapsed >= TimeSpan.FromMinutes(30))
+            if (elapsed >= TimeSpan.FromMinutes(10))
             {
                 KillProcessTree(process);
-                throw new TimeoutException("Unreal Editor 导出超过 30 分钟，已终止进程。");
+                throw new TimeoutException("Unreal Editor 扫描超过 10 分钟，已终止进程，避免工具箱长时间无响应。");
             }
 
             if ((DateTime.UtcNow - lastProgressReportAt).TotalSeconds >= 2)

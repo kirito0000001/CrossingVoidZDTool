@@ -209,6 +209,45 @@ def _discover_character_packages(registry, assets_by_package, roots, character_c
     return selected, options
 
 
+def _scan_plugin_sequences(source_path):
+    if not source_path:
+        return [], {"enabled": False, "sourcePath": "", "sequenceCount": 0, "excludedGeneratedSequenceCount": 0}
+    source = unreal.EditorAssetLibrary.load_asset(source_path)
+    if source is None or not hasattr(unreal, "ZDBridgeLibrary"):
+        return [], {"enabled": False, "sourcePath": source_path, "sequenceCount": 0, "excludedGeneratedSequenceCount": 0}
+    raw = unreal.ZDBridgeLibrary.scan_animation_source(source)
+    payload = json.loads(str(raw))
+    if payload.get("error"):
+        raise RuntimeError("ZDBridge 动画扫描失败：%s" % payload["error"])
+    plugin_items = []
+    for item in payload.get("sequences", []):
+        name = _text(item.get("name"))
+        object_path = _text(item.get("assetPath"))
+        plugin_items.append({
+            "syncId": "",
+            "parentStableId": "",
+            "module": MODULE_SEQUENCE_FRAMES,
+            "displayName": name,
+            "contentHash": hashlib.sha256(json.dumps(item, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest().upper(),
+            "payloadJson": json.dumps({"source": "ZDBridge.AnimationSourceScan", **item}, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            "objectPath": object_path,
+            "packageName": object_path.split(".", 1)[0],
+            "originIdentity": "object:" + object_path.lower(),
+            "assetClass": _text(item.get("assetClass")),
+            "normalizedName": name,
+            "referencers": [],
+            "dependencies": [],
+        })
+    return plugin_items, {
+        "enabled": True,
+        "sourcePath": source_path,
+        "sequenceCount": int(payload.get("sequenceCount", len(plugin_items))),
+        "excludedGeneratedSequenceCount": int(payload.get("excludedGeneratedSequenceCount", 0)),
+        "protocolName": payload.get("protocolName", "ZDBridge.AnimationSourceScan"),
+        "protocolVersion": int(payload.get("protocolVersion", 2)),
+    }
+
+
 def _scan():
     character_code = os.environ.get("ZD_BRIDGE_CHARACTER_CODE", "").strip()
     output_path = os.environ.get("ZD_BRIDGE_SCAN_OUTPUT", "").strip()
@@ -220,17 +259,16 @@ def _scan():
 
     roots = _load_roots()
     registry = unreal.AssetRegistryHelpers.get_asset_registry()
-    try:
-        registry.search_all_assets(True)
-    except Exception:
-        pass
+    unreal.log('[ZD Bridge Scan] stage=asset_registry_ready character=%s mode=nonblocking' % character_code)
     assets_by_package = _assets_under_roots(registry, roots)
+    unreal.log('[ZD Bridge Scan] stage=discover_packages_start character=%s rootAssets=%d' % (character_code, len(assets_by_package)))
     selected_packages, options = _discover_character_packages(
         registry,
         assets_by_package,
         roots,
         character_code,
     )
+    unreal.log('[ZD Bridge Scan] stage=discover_packages_ready character=%s packages=%d' % (character_code, len(selected_packages)))
 
     items = []
     for package_key in sorted(selected_packages):
@@ -264,11 +302,30 @@ def _scan():
             "dependencies": dependencies,
         })
 
+    unreal.log('[ZD Bridge Scan] stage=asset_items_ready character=%s items=%d' % (character_code, len(items)))
+    animation_source_path = os.environ.get(
+        "ZD_BRIDGE_ANIMATION_SOURCE_PATH",
+        "/Game/GameActor2D/%s/%s_AnimMaps" % (character_code, character_code),
+    ).strip()
+    unreal.log('[ZD Bridge Scan] stage=plugin_sequence_start source=%s' % animation_source_path)
+    plugin_items, plugin_scan = _scan_plugin_sequences(animation_source_path)
+    unreal.log('[ZD Bridge Scan] stage=plugin_sequence_ready sequences=%d excluded=%d' % (len(plugin_items), plugin_scan.get('excludedGeneratedSequenceCount', 0)))
+    if plugin_scan.get("enabled"):
+        # 插件扫描只负责正式 AnimSequence；不能把 Material 下旧 Sprite、Flipbook
+        # 一并从标准资产扫描结果删除，否则第五步永远看不到需要清理的旧资产。
+        items = [item for item in items if not (
+            item["module"] == MODULE_SEQUENCE_FRAMES and
+            "/animsequences/" in item.get("objectPath", "").lower()
+        )]
+        items.extend(plugin_items)
+
+    unreal.log('[ZD Bridge Scan] stage=write_result path=%s items=%d' % (output_path, len(items)))
     _write_json_atomic(output_path, {
         "protocolVersion": PROTOCOL_VERSION,
         "characterCode": character_code,
         "projectPath": project_path,
         "generatedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        "sequenceScan": plugin_scan,
         "items": items,
     })
     unreal.log("ZD Bridge scan completed: %s assets" % len(items))

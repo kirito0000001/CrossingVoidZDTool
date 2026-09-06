@@ -255,11 +255,13 @@ def _meta_member(document_text, class_name, label):
         return None
 
 
-def _member_page(member, label):
+def _member_page(member, label, allow_empty=False):
     if member is None:
         raise RuntimeError("MetaSound 缺少{}默认值对象".format(label))
     defaults = list(_read_property(member, "Defaults", []))
     if not defaults:
+        if allow_empty:
+            return [], None
         raise RuntimeError("MetaSound 的{}没有 Default 页面".format(label))
     return defaults, defaults[0]
 
@@ -296,10 +298,10 @@ def _read_meta_arrays(asset, asset_path):
         document_text,
         "MetasoundEditorGraphMemberDefaultFloatArray",
         "Weights")
-    _, object_page = _member_page(object_member, "Wave Asset")
-    _, float_page = _member_page(float_member, "Weights")
-    object_values = list(_read_property(object_page, "Value", []))
-    float_values = [float(value) for value in _read_property(float_page, "Value", [])]
+    _, object_page = _member_page(object_member, "Wave Asset", allow_empty=True)
+    _, float_page = _member_page(float_member, "Weights", allow_empty=True)
+    object_values = list(_read_property(object_page, "Value", [])) if object_page is not None else []
+    float_values = [float(value) for value in _read_property(float_page, "Value", [])] if float_page is not None else []
     return object_member, float_member, object_values, float_values
 
 
@@ -347,6 +349,50 @@ def _collect_context(request):
     return context
 
 
+def _append_meta_error_entries(request, entries, error):
+    """Keep MetaSound diagnostics visible even when another foundation asset fails."""
+    meta_path = _get(request, "MetaSoundObjectPath", "metaSoundObjectPath", default="")
+    for stable_id, display, field in (
+            ("meta.concurrency", "受击 MetaSound 并发", "MetaSoundSource.ConcurrencySet"),
+            ("meta.waves", "受击语音数组", "Wave Asset:WaveAsset:Array"),
+            ("meta.weights", "受击语音权重", "Weights:Float:Array")):
+        entries.append(_error_entry(
+            stable_id, "受击 MetaSound", display, meta_path, field,
+            "工具箱 Hurt 语音", error))
+
+
+def _build_meta_entries(request):
+    """Scan MetaSound independently so unrelated Item/UI errors cannot hide it."""
+    meta_path = _get(request, "MetaSoundObjectPath", "metaSoundObjectPath", default="")
+    meta_asset = _load_asset(meta_path, "角色受击 MetaSound", "MetaSoundSource")
+    hurt_concurrency_path = _get(request, "HurtConcurrencyObjectPath", "hurtConcurrencyObjectPath", default="")
+    hurt_concurrency = _load_asset(hurt_concurrency_path, "受击并发", "SoundConcurrency")
+    current_concurrency = sorted(_path_list(_read_property(meta_asset, "ConcurrencySet", [])))
+    entries = [_entry(
+        "meta.concurrency", "受击 MetaSound", "受击 MetaSound 并发", meta_path,
+        "MetaSoundSource.ConcurrencySet", "当前角色 Con_Ondm",
+        current_concurrency, [hurt_concurrency_path],
+        _same_paths(current_concurrency, [hurt_concurrency_path]))]
+    object_member, float_member, object_values, float_values = _read_meta_arrays(meta_asset, meta_path)
+    current_waves = [_literal_object_path(value) for value in object_values]
+    hurt_paths = list(_get(request, "HurtVoiceObjectPaths", "hurtVoiceObjectPaths", default=[]))
+    for index, path in enumerate(hurt_paths, start=1):
+        _load_asset(path, "受击语音 #{}".format(index), "SoundWave")
+    target_waves = [""] + hurt_paths
+    target_weights = [0.3] + [0.1] * len(hurt_paths)
+    entries.append(_entry(
+        "meta.waves", "受击 MetaSound", "受击语音数组", meta_path,
+        "Wave Asset:WaveAsset:Array", "Hurt 按编号升序，索引 0 留空",
+        current_waves, target_waves, _same_paths(current_waves, target_waves)))
+    weights_equal = len(float_values) == len(target_weights) and all(
+        abs(left - right) < 0.0001 for left, right in zip(float_values, target_weights))
+    entries.append(_entry(
+        "meta.weights", "受击 MetaSound", "受击语音权重", meta_path,
+        "Weights:Float:Array", "索引 0 为 0.3，其余为 0.1",
+        [str(value) for value in float_values], [str(value) for value in target_weights], weights_equal))
+    return entries
+
+
 def _build_entries(request):
     entries = []
     character_name = _get(request, "CharacterName", "characterName", default="")
@@ -358,9 +404,14 @@ def _build_entries(request):
         context = _collect_context(request)
     except Exception as error:
         message = str(error)
-        return [
-            _error_entry("foundation.assets", "依赖检查", "基础配置依赖", item_path, "资产和默认对象", "第一步至第三步产物", message)
-        ]
+        entries.append(_error_entry(
+            "foundation.assets", "依赖检查", "基础配置依赖", item_path,
+            "资产和默认对象", "第一步至第三步产物", message))
+        try:
+            entries.extend(_build_meta_entries(request))
+        except Exception as meta_error:
+            _append_meta_error_entries(request, entries, meta_error)
+        return entries
 
     try:
         team_voice = _load_asset(team_voice_path, "编队语音", "SoundWave")
@@ -456,44 +507,9 @@ def _build_entries(request):
             "item.type", "Item 配置", "角色物品类型", item_path, "ItemData.Type", "固定 Chara_Type", error))
 
     try:
-        meta_asset = context["meta_asset"]
-        hurt_concurrency_path = _get(request, "HurtConcurrencyObjectPath", "hurtConcurrencyObjectPath", default="")
-        hurt_concurrency = _load_asset(hurt_concurrency_path, "受击并发", "SoundConcurrency")
-        current_concurrency = sorted(_path_list(_read_property(meta_asset, "ConcurrencySet", [])))
-        target_concurrency = [hurt_concurrency_path]
-        entries.append(_entry(
-            "meta.concurrency", "受击 MetaSound", "受击 MetaSound 并发", meta_path,
-            "MetaSoundSource.ConcurrencySet", "当前角色 Con_Ondm",
-            current_concurrency, target_concurrency, _same_paths(current_concurrency, target_concurrency)))
-        object_member, float_member, object_values, float_values = _read_meta_arrays(meta_asset, meta_path)
-        current_waves = [_literal_object_path(value) for value in object_values]
-        hurt_paths = list(_get(request, "HurtVoiceObjectPaths", "hurtVoiceObjectPaths", default=[]))
-        for index, path in enumerate(hurt_paths, start=1):
-            _load_asset(path, "受击语音 #{}".format(index), "SoundWave")
-        target_waves = [""] + hurt_paths
-        target_weights = [0.3] + [0.1] * len(hurt_paths)
-        entries.append(_entry(
-            "meta.waves", "受击 MetaSound", "受击语音数组", meta_path,
-            "Wave Asset:WaveAsset:Array", "Hurt 按编号升序，索引 0 留空",
-            current_waves, target_waves, _same_paths(current_waves, target_waves)))
-        weights_equal = len(float_values) == len(target_weights) and all(
-            abs(left - right) < 0.0001 for left, right in zip(float_values, target_weights))
-        entries.append(_entry(
-            "meta.weights", "受击 MetaSound", "受击语音权重", meta_path,
-            "Weights:Float:Array", "索引 0 为 0.3，其余为 0.1",
-            [str(value) for value in float_values], [str(value) for value in target_weights], weights_equal))
-        if len(target_waves) != len(target_weights):
-            raise RuntimeError("Wave Asset 与 Weights 目标数组长度不一致")
-        context["meta_members"] = (object_member, float_member, object_values, target_weights)
-        context["hurt_concurrency"] = hurt_concurrency
+        entries.extend(_build_meta_entries(request))
     except Exception as error:
-        existing = {item["stableId"] for item in entries}
-        for stable_id, display, field in (
-                ("meta.concurrency", "受击 MetaSound 并发", "MetaSoundSource.ConcurrencySet"),
-                ("meta.waves", "受击语音数组", "Wave Asset:WaveAsset:Array"),
-                ("meta.weights", "受击语音权重", "Weights:Float:Array")):
-            if stable_id not in existing:
-                entries.append(_error_entry(stable_id, "受击 MetaSound", display, meta_path, field, "工具箱 Hurt 语音", error))
+        _append_meta_error_entries(request, entries, error)
 
     try:
         talk_concurrency_path = _get(request, "TalkConcurrencyObjectPath", "talkConcurrencyObjectPath", default="")

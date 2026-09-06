@@ -72,7 +72,7 @@ var tests = new (string Name, Action Run)[]
     ("虚幻项目角色获取使用离线条目扫描", UnrealProjectCharacterRefreshUsesOfflineItemScan),
     ("虚幻详情导出拒绝 Unreal 非零退出", UnrealProjectDetailExportRejectsFailedProcess),
     ("虚幻详情导出提前识别项目模块版本不匹配", UnrealProjectDetailExportRejectsMismatchedModuleBuildIds),
-    ("虚幻双向差异新增和更新默认选中", UnrealBridgeChangesSelectSafeUpdatesByDefault),
+    ("虚幻双向差异与选择状态分离", UnrealBridgeChangesDoNotSelectByDefault),
     ("虚幻双向差异冲突和删除默认不选", UnrealBridgeChangesProtectConflictsAndDeletes),
     ("虚幻双向差异按同步方向识别目标端改动", UnrealBridgeChangesRespectSyncDirection),
     ("虚幻同步台方向切换整套工作区", UnrealSyncWorkspaceSwitchesWholeDirection),
@@ -3776,7 +3776,7 @@ static string CreateWorkspaceCharacterFolder(
     return characterPath;
 }
 
-static void UnrealBridgeChangesSelectSafeUpdatesByDefault()
+static void UnrealBridgeChangesDoNotSelectByDefault()
 {
     var toolbox = CreateUnrealBridgeSnapshot(
         ("character:info", UnrealBridgeModule.CharacterInfo, "角色信息", "info-new"),
@@ -3798,9 +3798,9 @@ static void UnrealBridgeChangesSelectSafeUpdatesByDefault()
         state);
 
     AssertEqual(UnrealBridgeChangeKind.Updated, changes.Single(item => item.StableId == "character:info").Kind);
-    AssertEqual(true, changes.Single(item => item.StableId == "character:info").IsSelected);
+    AssertEqual(false, changes.Single(item => item.StableId == "character:info").IsSelected);
     AssertEqual(UnrealBridgeChangeKind.Added, changes.Single(item => item.StableId == "material:portrait:main").Kind);
-    AssertEqual(true, changes.Single(item => item.StableId == "material:portrait:main").IsSelected);
+    AssertEqual(false, changes.Single(item => item.StableId == "material:portrait:main").IsSelected);
 }
 
 static void UnrealSyncCharacterSelectorUsesSummaryAndFlyoutList()
@@ -4152,7 +4152,7 @@ static void UnrealSyncSelectionTreeProtectsUnsafeChanges()
         StableId = "material:conflict",
         DisplayName = "冲突头像"
     };
-    var roots = UnrealSyncSelectionTreeBuilder.FromChanges([safe, conflict]);
+    var roots = UnrealSyncSelectionTreeBuilder.FromChanges([safe, conflict], selectPendingByDefault: true);
     var leaves = roots.SelectMany(root => root.Children).ToArray();
 
     AssertEqual(true, leaves.Single(item => item.StableId == safe.StableId).IsChecked);

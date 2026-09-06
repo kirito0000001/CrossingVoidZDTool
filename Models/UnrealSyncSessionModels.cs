@@ -37,6 +37,7 @@ internal sealed class UnrealSyncSessionCache
     public UnrealBridgeSnapshot? ImportSnapshot { get; set; }
     public List<UnrealBridgeChange> PublishChanges { get; set; } = [];
     public HashSet<string> SelectedStableIds { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public HashSet<string> SelectedGroupStableIds { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public Dictionary<string, string> NormalizationDecisions { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public List<UnrealSyncNormalizationCacheItem> NormalizationItems { get; set; } = [];
     public bool IsNormalizationStepLoaded { get; set; }

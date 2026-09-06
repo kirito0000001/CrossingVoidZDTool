@@ -50,6 +50,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     private int _importSelectedCount;
     private int _importAddedCount;
     private int _importUpdatedCount;
+    private int _importDeletedCount;
     private int _importAttentionCount;
     private int _importSkippedCount;
     private string _importOperationTitle = "等待内容检测";
@@ -57,6 +58,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     private string _importSelectionCountText = "尚未检测";
     private string _importAddedCountText = "新增 0 项";
     private string _importUpdatedCountText = "更新 0 项";
+    private string _importDeletedCountText = "删除旧资产 0 项";
     private string _importAttentionCountText = "需检查 0 项";
     private string _importSkippedCountText = "未选 0 项";
     private string _importPrimaryActionText = "导入所选到草稿";
@@ -744,6 +746,12 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         private set => SetProperty(ref _importUpdatedCountText, value);
     }
 
+    public string ImportDeletedCountText
+    {
+        get => _importDeletedCountText;
+        private set => SetProperty(ref _importDeletedCountText, value);
+    }
+
     public string ImportAttentionCountText
     {
         get => _importAttentionCountText;
@@ -1374,17 +1382,19 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             {
                 var changes = FilterCachedPublishChanges(cache, SelectedSource?.DraftCharacter).ToArray();
                 var roots = step == 5
-                    ? UnrealSyncSelectionTreeBuilder.FromSequenceChanges(changes, UnrealBridgePublishSupportPolicy.CanExecute)
-                    : UnrealSyncSelectionTreeBuilder.FromChanges(changes, UnrealBridgePublishSupportPolicy.CanExecute);
-                if (step != 5)
-                {
-                    var selectedIds = cache.SelectedStableIds.Count > 0
-                        ? cache.SelectedStableIds
-                        : cache.PublishChanges.Where(change => change.IsSelected)
-                            .Select(change => change.StableId)
-                            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                    ApplySelection(roots, selectedIds);
-                }
+                    ? UnrealSyncSelectionTreeBuilder.FromSequenceChanges(changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: false)
+                    : UnrealSyncSelectionTreeBuilder.FromChanges(changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: true);
+                var selectedIds = cache.SelectedStableIds.Count > 0
+                    ? cache.SelectedStableIds
+                    : cache.PublishChanges.Where(change => change.IsSelected)
+                        .Select(change => change.StableId)
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                var selectedGroupIds = cache.SelectedGroupStableIds.Count > 0
+                    ? cache.SelectedGroupStableIds
+                    : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                var restoreIds = selectedIds.Union(selectedGroupIds, StringComparer.OrdinalIgnoreCase)
+                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                ApplySelection(roots, restoreIds);
                 SetPublishSelectionTree(roots, changes);
             }
         }
@@ -1553,12 +1563,13 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     public async Task SetPublishSelectionTreeAsync(
         IReadOnlyCollection<UnrealBridgeChange> changes,
         Func<UnrealBridgeChange, bool>? canExecute = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool selectPendingByDefault = true)
     {
         var roots = await Task.Run(
             () => WorkflowStep == 5 || SelectedPublishStage?.Stage == UnrealBridgePublishStage.ZdAnimationTracks
-                ? UnrealSyncSelectionTreeBuilder.FromSequenceChanges(changes, canExecute)
-                : UnrealSyncSelectionTreeBuilder.FromChanges(changes, canExecute),
+                ? UnrealSyncSelectionTreeBuilder.FromSequenceChanges(changes, canExecute, selectPendingByDefault)
+                : UnrealSyncSelectionTreeBuilder.FromChanges(changes, canExecute, selectPendingByDefault),
             cancellationToken);
         cancellationToken.ThrowIfCancellationRequested();
         SetPublishSelectionTree(roots, changes);
@@ -1881,6 +1892,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     public IReadOnlySet<string> GetSelectedStableIds() =>
         UnrealSyncSelectionTreeBuilder.SelectedStableIds(SelectionTreeRoots);
 
+    public IReadOnlySet<string> GetSelectedGroupAndLeafStableIds() =>
+        UnrealSyncSelectionTreeBuilder.SelectedGroupAndLeafStableIds(SelectionTreeRoots);
+
     private void ImportSelectionItem_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(UnrealSyncSelectionTreeItem.IsChecked))
@@ -2033,15 +2047,12 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                     var cachedComparison = FilterPublishChanges(cache.PublishChanges).ToArray();
                     var cachedChanges = FilterCachedPublishChanges(cache, source.DraftCharacter).ToArray();
                     var roots = cache.WorkflowStep == 5
-                        ? UnrealSyncSelectionTreeBuilder.FromSequenceChanges(cachedChanges, UnrealBridgePublishSupportPolicy.CanExecute)
-                        : UnrealSyncSelectionTreeBuilder.FromChanges(cachedChanges, UnrealBridgePublishSupportPolicy.CanExecute);
-                    if (cache.WorkflowStep != 5)
-                    {
-                        var selectedIds = cache.SelectedStableIds.Count > 0
-                            ? cache.SelectedStableIds
-                            : cache.PublishChanges.Where(change => change.IsSelected).Select(change => change.StableId).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                        ApplySelection(roots, selectedIds);
-                    }
+                        ? UnrealSyncSelectionTreeBuilder.FromSequenceChanges(cachedChanges, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: false)
+                        : UnrealSyncSelectionTreeBuilder.FromChanges(cachedChanges, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: true);
+                    var selectedIds = cache.SelectedStableIds.Count > 0
+                        ? cache.SelectedStableIds
+                        : cache.PublishChanges.Where(change => change.IsSelected).Select(change => change.StableId).ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    ApplySelection(roots, selectedIds);
                     if (cache.DetectionTotalCount == 0 && cachedChanges.Length > 0)
                     {
                         SetPublishDetectionSummary(cachedChanges);
@@ -2144,9 +2155,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
     private static void ApplySelection(IEnumerable<UnrealSyncSelectionTreeItem> roots, IReadOnlySet<string> selectedIds)
     {
-        foreach (var leaf in roots.SelectMany(root => root.Children))
+        foreach (var root in roots)
         {
-            leaf.IsChecked = selectedIds.Contains(leaf.StableId);
+            root.RestoreCheckedState(selectedIds);
         }
     }
 
@@ -2215,6 +2226,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             // 不能用空列表覆盖尚未执行完的第三步缓存。
             PublishChanges = changes.Count > 0 ? changes : existingForSelectedCharacter?.PublishChanges ?? [],
             SelectedStableIds = selectedIds,
+            SelectedGroupStableIds = UnrealSyncSelectionTreeBuilder.SelectedGroupAndLeafStableIds(SelectionTreeRoots)
+                .Where(id => SelectionTreeRoots.SelectMany(root => root.Children).All(item => !string.Equals(item.StableId, id, StringComparison.OrdinalIgnoreCase)))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase),
             NormalizationDecisions = NormalizationItems.Count == 0
                 ? existingForSelectedCharacter?.NormalizationDecisions ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
                 : NormalizationItems
@@ -2322,6 +2336,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             _importAddedCount = selected.Count(item => item.Change?.Kind == UnrealBridgeChangeKind.Added);
             _importUpdatedCount = selected.Count(item => item.Change?.Kind is
                 UnrealBridgeChangeKind.Updated or UnrealBridgeChangeKind.Renamed);
+            _importDeletedCount = selected.Count(item => item.Change?.Kind == UnrealBridgeChangeKind.DeleteCandidate);
             _importAttentionCount = leaves.Count(item => item.RequiresAttention ||
                 item.Change is not null && !UnrealBridgePublishSupportPolicy.CanExecute(item.Change));
         }
@@ -2330,6 +2345,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         ImportSelectionCountText = $"已选择 {_importSelectedCount} / {leaves.Length} 项";
         ImportAddedCountText = $"新增 {_importAddedCount} 项";
         ImportUpdatedCountText = $"更新 {_importUpdatedCount} 项";
+        ImportDeletedCountText = $"删除旧资产 {_importDeletedCount} 项";
         ImportAttentionCountText = $"需检查 {_importAttentionCount} 项";
         ImportSkippedCountText = $"{(IsEngineToToolbox ? "未选" : "未执行")} {_importSkippedCount} 项";
         ImportPrimaryActionText = _importSelectedCount > 0
@@ -2383,6 +2399,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         _importSelectedCount = 0;
         _importAddedCount = 0;
         _importUpdatedCount = 0;
+        _importDeletedCount = 0;
         _importAttentionCount = 0;
         _importSkippedCount = 0;
         ImportOperationTitle = IsEngineToToolbox ? "等待内容检测" : "等待差异检测";
@@ -2392,6 +2409,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         ImportSelectionCountText = "尚未检测";
         ImportAddedCountText = "新增 0 项";
         ImportUpdatedCountText = "更新 0 项";
+        ImportDeletedCountText = "删除旧资产 0 项";
         ImportAttentionCountText = "需检查 0 项";
         ImportSkippedCountText = IsEngineToToolbox ? "未选 0 项" : "未执行 0 项";
         ImportPrimaryActionText = IsEngineToToolbox ? "导入所选到草稿" : "同步所选到虚幻";

@@ -317,6 +317,45 @@ namespace CrossingVoidZDTool
             return Settings.ShouldWriteLog(kind);
         }
 
+        private void LogUserOperation(string action)
+        {
+            if (string.IsNullOrWhiteSpace(action))
+            {
+                return;
+            }
+
+            _recentOperations.Enqueue((DateTime.Now, action));
+            while (_recentOperations.Count > MaxRecentOperationCount)
+            {
+                _recentOperations.Dequeue();
+            }
+
+            AppendLog(LogKind.User, $"[操作] {action}");
+        }
+
+        private void AppendRuntimeLog(string line)
+        {
+            if (string.IsNullOrWhiteSpace(line))
+            {
+                return;
+            }
+
+            try
+            {
+                lock (_runtimeLogLock)
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(_runtimeLogPath)!);
+                    File.AppendAllText(
+                        _runtimeLogPath,
+                        $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {line}{Environment.NewLine}");
+                }
+            }
+            catch
+            {
+                // 运行日志写入失败不能影响同步主流程。
+            }
+        }
+
         private void AppendLog(LogKind kind, string message, Exception? exception = null)
         {
             if (!ShouldWriteLog(kind))
@@ -333,6 +372,7 @@ namespace CrossingVoidZDTool
                 copyText += $"{Environment.NewLine}{FormatExceptionForLog(exception, stackTraceLineLimit: 8)}";
             }
 
+            AppendRuntimeLog(displayText.Replace(Environment.NewLine, " | "));
             _logLines.Enqueue((kind, displayText, copyText));
 
             const int maxLogCount = 300;

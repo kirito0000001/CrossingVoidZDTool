@@ -45,16 +45,16 @@ internal sealed class SequenceFrameService
         new("死亡", "Death", false),
         new("反击", "DefAtk", false),
         new("失败", "Defeat", false),
-        new("防御", "Defense", false),
+        new("防御", "Defence", false),
         new("闪避", "Dodge", false),
-        new("坠落", "Flydown", false),
+        new("坠落", "FlyDown", false),
         new("飞行", "Flying", false),
-        new("击飞", "Flystart", false),
+        new("击飞", "FlyStart", false),
         new("站街", "Idle", false),
         new("落地", "Land", false),
         new("移动", "Move", false),
-        new("受伤", "Ondm", false),
-        new("站起", "Standup", false),
+        new("受伤", "OnDamage", false),
+        new("站起", "StandUP", false),
         new("胜利", "Victory", false)
     ];
 
@@ -899,6 +899,7 @@ internal sealed class SequenceFrameService
     private SequenceFrameManifest LoadOrCreateManifest(CharacterCard character, SequenceFrameAction action)
     {
         var folderPath = GetActionFolderPath(character, action);
+        MigrateLegacyActionFolderPath(character, action, folderPath);
         Directory.CreateDirectory(folderPath);
         Directory.CreateDirectory(GetFramesFolderPath(character, action));
         var manifestPath = GetManifestPath(character, action);
@@ -917,6 +918,27 @@ internal sealed class SequenceFrameService
         catch (JsonException ex)
         {
             throw new InvalidDataException($"序列帧清单读取失败：{manifestPath}", ex);
+        }
+    }
+
+    private static void MigrateLegacyActionFolderPath(CharacterCard character, SequenceFrameAction action, string canonicalFolderPath)
+    {
+        if (Directory.Exists(canonicalFolderPath)) return;
+        var aliases = action.Code switch
+        {
+            "OnDamage" => new[] { "Ondm", "OnDM" },
+            "Defence" => new[] { "Defense" },
+            "FlyDown" => new[] { "Flydown" },
+            "FlyStart" => new[] { "Flystart" },
+            "StandUP" => new[] { "Standup" },
+            _ => Array.Empty<string>()
+        };
+        foreach (var alias in aliases)
+        {
+            var legacyPath = Path.Combine(character.FolderPath, ZdMaterialFolderName, alias);
+            if (!Directory.Exists(legacyPath)) continue;
+            Directory.Move(legacyPath, canonicalFolderPath);
+            return;
         }
     }
 
@@ -956,7 +978,8 @@ internal sealed class SequenceFrameService
     private SequenceFrameManifest NormalizeManifest(CharacterCard character, SequenceFrameAction action, SequenceFrameManifest manifest)
     {
         manifest.SchemaVersion = 3;
-        manifest.ActionCode = string.IsNullOrWhiteSpace(manifest.ActionCode) ? action.Code : manifest.ActionCode;
+        MigrateActionCodeAliases(manifest, action);
+        manifest.ActionCode = action.Code;
         manifest.Fps = Math.Clamp(manifest.Fps <= 0 ? DefaultFps : manifest.Fps, 1, 60);
         manifest.Frames ??= [];
         for (var index = manifest.Frames.Count - 1; index >= 0; index--)
@@ -990,6 +1013,19 @@ internal sealed class SequenceFrameService
 
         SaveManifest(character, action, manifest);
         return manifest;
+    }
+
+    private static void MigrateActionCodeAliases(SequenceFrameManifest manifest, SequenceFrameAction action)
+    {
+        if (string.IsNullOrWhiteSpace(manifest.ActionCode) || string.Equals(manifest.ActionCode, action.Code, StringComparison.OrdinalIgnoreCase))
+            return;
+        var aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Ondm"] = "OnDamage", ["OnDM"] = "OnDamage", ["Defense"] = "Defence",
+            ["Flydown"] = "FlyDown", ["Flystart"] = "FlyStart", ["Standup"] = "StandUP"
+        };
+        if (aliases.TryGetValue(manifest.ActionCode.Trim(), out var canonical) && string.Equals(canonical, action.Code, StringComparison.OrdinalIgnoreCase))
+            manifest.ActionCode = action.Code;
     }
 
     private SequenceFrameManifest CreateManifest(SequenceFrameAction action)

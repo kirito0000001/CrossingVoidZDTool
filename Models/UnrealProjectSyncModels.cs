@@ -948,6 +948,12 @@ internal sealed class UnrealProjectExportSequenceAction
     [JsonPropertyName("flipbookCount")]
     public int FlipbookCount { get; set; }
 
+    [JsonPropertyName("flipbookPaths")]
+    public List<string> FlipbookPaths { get; set; } = [];
+
+    [JsonPropertyName("orderedSpritePaths")]
+    public List<string> OrderedSpritePaths { get; set; } = [];
+
     [JsonPropertyName("framesPerSecond")]
     public double FramesPerSecond { get; set; }
 

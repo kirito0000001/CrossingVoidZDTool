@@ -21,11 +21,13 @@ def _load_job(path):
 def _find_matching_node(remote, project_path, engine_root, timeout_seconds):
     expected_project_root = _normalized(os.path.dirname(project_path))
     expected_engine_root = _normalized(engine_root)
+    expected_engine_roots = {expected_engine_root, _normalized(os.path.join(engine_root, "Engine"))}
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
         for node in remote.remote_nodes:
+            node_engine_root = _normalized(node.get("engine_root"))
             if (_normalized(node.get("project_root")) == expected_project_root and
-                    _normalized(node.get("engine_root")) == expected_engine_root):
+                    node_engine_root in expected_engine_roots):
                 return node
         time.sleep(0.2)
     return None
@@ -46,13 +48,13 @@ def main():
     job_path = os.path.abspath(args.job)
     job = _load_job(job_path)
     engine_root = os.path.abspath(job["engineRoot"])
-    remote_module_path = os.path.join(
-        engine_root,
-        "Plugins",
-        "Experimental",
-        "PythonScriptPlugin",
-        "Content",
-        "Python")
+    remote_module_candidates = [
+        os.path.join(engine_root, "Engine", "Plugins", "Experimental", "PythonScriptPlugin", "Content", "Python"),
+        os.path.join(engine_root, "Plugins", "Experimental", "PythonScriptPlugin", "Content", "Python"),
+    ]
+    remote_module_path = next((path for path in remote_module_candidates if os.path.isfile(os.path.join(path, "remote_execution.py"))), None)
+    if remote_module_path is None:
+        raise RuntimeError("Unreal Python remote_execution.py was not found under engine root: " + engine_root)
     sys.path.insert(0, remote_module_path)
     try:
         import remote_execution

@@ -81,10 +81,6 @@ internal sealed class UnrealSyncSelectionTreeItem : ObservableObject
             child.PropertyChanged += Child_PropertyChanged;
         }
 
-        if (Children.Count > 0)
-        {
-            UpdateCheckedStateFromChildren();
-        }
     }
 
     public string StableId { get; }
@@ -149,6 +145,47 @@ internal sealed class UnrealSyncSelectionTreeItem : ObservableObject
     public bool IsIndeterminate => _isChecked is null;
 
     public bool IsGroupUnchecked => _isChecked == false;
+
+    public void SetInitialCheckedState(bool? value)
+    {
+        _isChecked = value;
+        OnPropertyChanged(nameof(IsChecked));
+        OnPropertyChanged(nameof(IsGroupChecked));
+        OnPropertyChanged(nameof(IsIndeterminate));
+        OnPropertyChanged(nameof(IsGroupUnchecked));
+    }
+
+    public void RestoreCheckedState(IReadOnlySet<string> selectedStableIds)
+    {
+        if (Children.Count == 0)
+        {
+            SetInitialCheckedState(IsSelectable && selectedStableIds.Contains(StableId));
+            return;
+        }
+
+        // 组节点也必须参与恢复。以前这里只恢复叶子 ID，
+        // 用户只勾选“ 一技能 ”组时，刷新后会变成全未勾选。
+        var groupWasSelected = selectedStableIds.Contains(StableId);
+        if (groupWasSelected)
+        {
+            _isUpdatingChildren = true;
+            foreach (var child in Children.Where(child => child.IsSelectable))
+            {
+                child.RestoreCheckedState(selectedStableIds);
+                child.SetInitialCheckedState(true);
+            }
+            _isUpdatingChildren = false;
+            UpdateCheckedStateFromChildren();
+            return;
+        }
+
+        foreach (var child in Children)
+        {
+            child.RestoreCheckedState(selectedStableIds);
+        }
+
+        UpdateCheckedStateFromChildren();
+    }
 
     public bool? IsChecked
     {
@@ -236,7 +273,8 @@ internal static class UnrealSyncSelectionTreeBuilder
 {
     public static IReadOnlyList<UnrealSyncSelectionTreeItem> FromChanges(
         IReadOnlyCollection<UnrealBridgeChange> changes,
-        Func<UnrealBridgeChange, bool>? canExecute = null)
+        Func<UnrealBridgeChange, bool>? canExecute = null,
+        bool selectPendingByDefault = false)
     {
         canExecute ??= change => !change.RequiresExplicitConfirmation;
         return changes
@@ -247,7 +285,7 @@ internal static class UnrealSyncSelectionTreeBuilder
             {
                 var children = group
                     .OrderBy(change => change.DisplayName, StringComparer.OrdinalIgnoreCase)
-                    .Select(change => FromChange(change, canExecute))
+                    .Select(change => FromChange(change, canExecute, selectPendingByDefault))
                     .ToArray();
                 return new UnrealSyncSelectionTreeItem(
                     $"module:{group.Key}",
@@ -258,7 +296,7 @@ internal static class UnrealSyncSelectionTreeBuilder
                         : children.Any(child => child.RequiresAttention)
                             ? "需要检查"
                             : "可同步",
-                    children.Length > 0 && children.All(child => child.IsChecked == true),
+                    false,
                     children.Any(child => child.RequiresAttention),
                     children.Any(child => child.IsSelectable),
                     group.Key,
@@ -269,7 +307,8 @@ internal static class UnrealSyncSelectionTreeBuilder
 
     public static IReadOnlyList<UnrealSyncSelectionTreeItem> FromSequenceChanges(
         IReadOnlyCollection<UnrealBridgeChange> changes,
-        Func<UnrealBridgeChange, bool>? canExecute = null)
+        Func<UnrealBridgeChange, bool>? canExecute = null,
+        bool selectPendingByDefault = false)
     {
         canExecute ??= change => !change.RequiresExplicitConfirmation;
         var allChanges = changes.Where(change => change.Module == UnrealBridgeModule.SequenceFrames).ToArray();
@@ -282,11 +321,24 @@ internal static class UnrealSyncSelectionTreeBuilder
             .Where(pair => !string.IsNullOrWhiteSpace(pair.Value))
             .GroupBy(pair => pair.Value, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First().Key, StringComparer.OrdinalIgnoreCase);
+        var actionCodeToKey = allChanges
+            .Select(change => (change, actionCode: ExtractSequenceActionCode(change)))
+            .Where(pair => !string.IsNullOrWhiteSpace(pair.actionCode))
+            .GroupBy(pair => NormalizeActionCode(pair.actionCode), StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group =>
+            {
+                var toolboxParent = group.Select(pair => pair.change)
+                    .FirstOrDefault(change => change.ToolboxItem is not null &&
+                        !change.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase));
+                return toolboxParent is not null
+                    ? $"sequence:{NormalizeActionCode(group.Key)}"
+                    : group.First().change.SequenceGroupKey;
+            }, StringComparer.OrdinalIgnoreCase);
         return allChanges
             .Where(change => change.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase) &&
                 change.Kind != UnrealBridgeChangeKind.Unchanged &&
                 change.Kind is UnrealBridgeChangeKind.Added or UnrealBridgeChangeKind.DeleteCandidate)
-            .GroupBy(change => ResolveSequenceGroupKey(change, actionNameToKey))
+            .GroupBy(change => ResolveSequenceGroupKey(change, actionNameToKey, actionCodeToKey))
             .Select(group =>
             {
                 var deleteCount = group.Count(change => change.Kind == UnrealBridgeChangeKind.DeleteCandidate);
@@ -296,7 +348,7 @@ internal static class UnrealSyncSelectionTreeBuilder
                 var children = group
                     .OrderBy(change => change.Kind)
                     .ThenBy(change => change.DisplayName, StringComparer.OrdinalIgnoreCase)
-                    .Select(change => FromChange(change, canExecute, forceSelected: true))
+                    .Select(change => FromChange(change, canExecute, selectPendingByDefault))
                     .ToArray();
                 var displayName = parentNames.GetValueOrDefault(parentKey, representative.DisplayName);
                 return new UnrealSyncSelectionTreeItem(
@@ -304,7 +356,7 @@ internal static class UnrealSyncSelectionTreeBuilder
                     displayName,
                     string.Empty,
                     "待同步",
-                    true,
+                    false,
                     false,
                     children.Any(child => child.IsSelectable),
                     UnrealBridgeModule.SequenceFrames,
@@ -321,11 +373,20 @@ internal static class UnrealSyncSelectionTreeBuilder
 
     private static string ResolveSequenceGroupKey(
         UnrealBridgeChange change,
-        IReadOnlyDictionary<string, string> actionNameToKey)
+        IReadOnlyDictionary<string, string> actionNameToKey,
+        IReadOnlyDictionary<string, string> actionCodeToKey)
     {
         if (change.Module != UnrealBridgeModule.SequenceFrames)
         {
             return change.StableId;
+        }
+
+        var actionCode = ExtractSequenceActionCode(change);
+        if (!string.IsNullOrWhiteSpace(actionCode) &&
+            actionCodeToKey.TryGetValue(NormalizeActionCode(actionCode), out var actionKey) &&
+            !string.IsNullOrWhiteSpace(actionKey))
+        {
+            return actionKey;
         }
 
         if (!string.IsNullOrWhiteSpace(change.SequenceGroupKey) &&
@@ -344,6 +405,54 @@ internal static class UnrealSyncSelectionTreeBuilder
 
         return change.StableId;
     }
+
+    private static string ExtractSequenceActionCode(UnrealBridgeChange change)
+    {
+        var payload = change.ToolboxItem?.PayloadJson
+            ?? change.UnrealItem?.PayloadJson
+            ?? string.Empty;
+        var sourcePath = change.UnrealItem?.SourceObjectPath ?? change.ToolboxItem?.SourceObjectPath ?? string.Empty;
+        var package = sourcePath.Split('.', 2)[0].TrimEnd('/');
+        var segments = package.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var materialIndex = Array.FindIndex(segments, segment =>
+            string.Equals(segment, "Material", StringComparison.OrdinalIgnoreCase));
+        if (materialIndex >= 0 && materialIndex + 1 < segments.Length)
+        {
+            return segments[materialIndex + 1];
+        }
+
+        if (payload.Contains("AnimSequences/", StringComparison.OrdinalIgnoreCase) ||
+            sourcePath.Contains("/AnimSequences/", StringComparison.OrdinalIgnoreCase))
+        {
+            return segments.Length == 0 ? string.Empty : segments[^1];
+        }
+
+        if (payload.TrimStart().StartsWith("{", StringComparison.Ordinal))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(payload);
+                if (document.RootElement.TryGetProperty("actionCode", out var actionCode) &&
+                    actionCode.ValueKind == JsonValueKind.String)
+                {
+                    return actionCode.GetString() ?? string.Empty;
+                }
+            }
+            catch (JsonException)
+            {
+                // Fall through to the legacy pipe-delimited payload format.
+            }
+        }
+
+        var parts = payload.Split('|', StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length > 0 ? parts[0] : string.Empty;
+    }
+
+    private static string NormalizeActionCode(string value) =>
+        new string((value ?? string.Empty).Trim()
+            .Where(char.IsLetterOrDigit)
+            .Select(char.ToLowerInvariant)
+            .ToArray());
 
     public static IReadOnlyList<UnrealSyncSelectionTreeItem> FromSnapshot(UnrealBridgeSnapshot snapshot)
     {
@@ -386,15 +495,45 @@ internal static class UnrealSyncSelectionTreeBuilder
     }
 
     public static IReadOnlySet<string> SelectedStableIds(IEnumerable<UnrealSyncSelectionTreeItem> roots) =>
-        roots.SelectMany(root => root.Children)
-            .Where(item => item.IsChecked == true)
+        roots.SelectMany(EnumerateSelectedItems)
             .Select(item => item.StableId)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    public static IReadOnlySet<string> SelectedGroupAndLeafStableIds(IEnumerable<UnrealSyncSelectionTreeItem> roots) =>
+        roots.SelectMany(EnumerateSelectedGroupsAndLeaves)
+            .Select(item => item.StableId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+    private static IEnumerable<UnrealSyncSelectionTreeItem> EnumerateSelectedGroupsAndLeaves(UnrealSyncSelectionTreeItem item)
+    {
+        if (item.IsChecked == true)
+        {
+            yield return item;
+        }
+
+        foreach (var child in item.Children.SelectMany(EnumerateSelectedGroupsAndLeaves))
+        {
+            yield return child;
+        }
+    }
+
+    private static IEnumerable<UnrealSyncSelectionTreeItem> EnumerateSelectedItems(UnrealSyncSelectionTreeItem item)
+    {
+        if (item.IsChecked == true && item.IsLeaf)
+        {
+            yield return item;
+        }
+
+        foreach (var child in item.Children.SelectMany(EnumerateSelectedItems))
+        {
+            yield return child;
+        }
+    }
 
     private static UnrealSyncSelectionTreeItem FromChange(
         UnrealBridgeChange change,
         Func<UnrealBridgeChange, bool> canExecute,
-        bool forceSelected = false)
+        bool selectPendingByDefault = false)
     {
         var isExecutable = canExecute(change);
         var requiresRedirect = !isExecutable && change.Kind != UnrealBridgeChangeKind.Conflict;
@@ -407,7 +546,8 @@ internal static class UnrealSyncSelectionTreeBuilder
                 ? $"Unreal 现有：{change.UnrealItem.SourceObjectPath}"
                 : $"工具箱来源：{change.ToolboxItem?.ToolboxRelativePath ?? string.Empty}",
             isExecutable ? ChangeKindName(change.Kind) : requiresRedirect ? "重定向" : "需要检查",
-            (forceSelected || change.IsSelected) && isExecutable,
+            selectPendingByDefault && isExecutable && change.Kind is
+                UnrealBridgeChangeKind.Added or UnrealBridgeChangeKind.Updated or UnrealBridgeChangeKind.Renamed,
             requiresAttention,
             isExecutable || requiresRedirect,
             change.Module,

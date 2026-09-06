@@ -35,6 +35,17 @@ internal sealed class UnrealBridgeExecutorService
         string progressPath,
         string resultPath)
     {
+        return BuildProcessStartInfo(editorPath, projectPath, planPath, progressPath, resultPath, GetExecuteScriptPath());
+    }
+
+    public ProcessStartInfo BuildProcessStartInfo(
+        string editorPath,
+        string projectPath,
+        string planPath,
+        string progressPath,
+        string resultPath,
+        string scriptPath)
+    {
         var normalizedEditorPath = Path.GetFullPath(editorPath);
         var normalizedProjectPath = Path.GetFullPath(projectPath);
         var normalizedPlanPath = Path.GetFullPath(planPath);
@@ -56,10 +67,10 @@ internal sealed class UnrealBridgeExecutorService
             throw new FileNotFoundException("虚幻同步执行计划不存在。", normalizedPlanPath);
         }
 
-        var scriptPath = GetExecuteScriptPath();
-        if (!File.Exists(scriptPath))
+        var normalizedScriptPath = Path.GetFullPath(scriptPath);
+        if (!File.Exists(normalizedScriptPath))
         {
-            throw new FileNotFoundException("工具箱内置的虚幻同步执行脚本不存在。", scriptPath);
+            throw new FileNotFoundException("工具箱内置的虚幻同步执行脚本不存在。", normalizedScriptPath);
         }
 
         Directory.CreateDirectory(Path.GetDirectoryName(normalizedProgressPath)!);
@@ -68,7 +79,7 @@ internal sealed class UnrealBridgeExecutorService
         var startInfo = new ProcessStartInfo
         {
             FileName = commandPath,
-            Arguments = $"{Quote(normalizedProjectPath)} -run=pythonscript -script={Quote(scriptPath)} -unattended -nop4 -nosplash",
+            Arguments = $"{Quote(normalizedProjectPath)} -run=pythonscript -script={Quote(normalizedScriptPath)} -unattended -nop4 -nosplash",
             UseShellExecute = false,
             CreateNoWindow = true,
             WorkingDirectory = Path.GetDirectoryName(commandPath) ?? string.Empty,

@@ -33,14 +33,21 @@ internal sealed class UnrealBridgeSemanticSnapshotService
             }
         }
 
-        foreach (var slot in candidate.SkillsPreview.CoreSlots.Append(candidate.SkillsPreview.SupportSkillSlot))
+        for (var slotIndex = 0; slotIndex < candidate.SkillsPreview.CoreSlots.Count; slotIndex++)
         {
-            AddSkillSlot(items, candidate.Code, slot);
+            AddSkillSlot(items, candidate.Code, candidate.SkillsPreview.CoreSlots[slotIndex], $"core:{slotIndex}");
         }
 
-        foreach (var link in candidate.SkillsPreview.LinkSkills)
+        AddSkillSlot(items, candidate.Code, candidate.SkillsPreview.SupportSkillSlot, "support");
+
+        for (var linkIndex = 0; linkIndex < candidate.SkillsPreview.LinkSkills.Count; linkIndex++)
         {
-            AddSkillSlot(items, candidate.Code, link.SkillSlot, link.SupportCharacterCode);
+            var link = candidate.SkillsPreview.LinkSkills[linkIndex];
+            AddSkillSlot(
+                items,
+                candidate.Code,
+                link.SkillSlot,
+                $"link:{linkIndex}:{link.SupportCharacterCode}:{link.SkillIndex}");
         }
 
         foreach (var action in candidate.SequenceFramesPreview.Actions.Where(action => action.HasData))
@@ -102,7 +109,7 @@ internal sealed class UnrealBridgeSemanticSnapshotService
         for (var index = 0; index < slot.Stages.Count; index++)
         {
             var stage = slot.Stages[index];
-            var identity = CreateOriginIdentity($"{characterCode}|skill|{slot.SlotKey}|{suffix}|{index}");
+            var identity = CreateOriginIdentity($"{characterCode}|skill|{suffix}|{slot.SlotKey}|{index}");
             Add(items, $"skill:{identity}", $"skill:{slot.SlotKey}", UnrealBridgeModule.Skills,
                 stage.Title, string.Empty,
                 Join(slot.SlotKey, suffix, index, stage.PositionName, stage.TrueName, stage.Description,

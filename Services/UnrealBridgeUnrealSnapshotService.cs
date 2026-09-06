@@ -120,9 +120,11 @@ internal sealed class UnrealBridgeUnrealSnapshotService
             throw new InvalidDataException("虚幻扫描结果缺少角色代码。");
         }
 
-        var items = manifest.Items.Select(item =>
+        var usedStableIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var items = manifest.Items.Select((item, index) =>
         {
-            var stableId = ResolveStableId(item, baseline);
+            var stableId = ResolveStableId(item, baseline, usedStableIds, index);
+            usedStableIds.Add(stableId);
             var payload = string.IsNullOrWhiteSpace(item.PayloadJson) ? "{}" : item.PayloadJson;
             var contentHash = string.IsNullOrWhiteSpace(item.ContentHash)
                 ? ComputeFallbackHash(item.ObjectPath, payload)
@@ -142,35 +144,71 @@ internal sealed class UnrealBridgeUnrealSnapshotService
                 string.Empty,
                 item.NormalizedName);
         }).ToArray();
+
+        var duplicateGroups = items
+            .GroupBy(item => item.StableId, StringComparer.OrdinalIgnoreCase)
+            .Where(group => group.Count() > 1)
+            .ToArray();
+        if (duplicateGroups.Length > 0)
+        {
+            var details = string.Join(
+                Environment.NewLine,
+                duplicateGroups.SelectMany(group => group.Select(item =>
+                    $"StableId={item.StableId}, Module={item.Module}, DisplayName={item.DisplayName}, ObjectPath={item.SourceObjectPath}, OriginIdentity={item.OriginIdentity}")));
+            throw new InvalidDataException($"虚幻扫描结果包含重复稳定 ID：{Environment.NewLine}{details}");
+        }
+
         return new UnrealBridgeSnapshot(manifest.CharacterCode, items);
     }
 
     private static string ResolveStableId(
         UnrealBridgeScanItem item,
-        UnrealBridgeSyncState? baseline)
+        UnrealBridgeSyncState? baseline,
+        ISet<string> usedStableIds,
+        int itemIndex)
     {
-        if (!string.IsNullOrWhiteSpace(item.SyncId))
-        {
-            return item.SyncId;
-        }
+        var stableId = !string.IsNullOrWhiteSpace(item.SyncId)
+            ? item.SyncId
+            : string.Empty;
 
-        if (baseline is not null)
+        if (string.IsNullOrWhiteSpace(stableId) && baseline is not null)
         {
             var match = baseline.Entries.FirstOrDefault(pair =>
-                !string.IsNullOrWhiteSpace(item.OriginIdentity) &&
-                string.Equals(pair.Value.UnrealIdentity, item.OriginIdentity, StringComparison.OrdinalIgnoreCase) ||
-                !string.IsNullOrWhiteSpace(item.ObjectPath) &&
-                string.Equals(pair.Value.UnrealObjectPath, item.ObjectPath, StringComparison.OrdinalIgnoreCase));
-            if (!string.IsNullOrWhiteSpace(match.Key))
-            {
-                return match.Key;
-            }
+                !usedStableIds.Contains(pair.Key) &&
+                ((!string.IsNullOrWhiteSpace(item.OriginIdentity) &&
+                  string.Equals(pair.Value.UnrealIdentity, item.OriginIdentity, StringComparison.OrdinalIgnoreCase)) ||
+                 (!string.IsNullOrWhiteSpace(item.ObjectPath) &&
+                  string.Equals(pair.Value.UnrealObjectPath, item.ObjectPath, StringComparison.OrdinalIgnoreCase))));
+            stableId = match.Key ?? string.Empty;
         }
 
-        var origin = !string.IsNullOrWhiteSpace(item.OriginIdentity)
-            ? item.OriginIdentity
-            : item.ObjectPath;
-        return $"unreal:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(origin))).ToLowerInvariant()}";
+        if (string.IsNullOrWhiteSpace(stableId))
+        {
+            var origin = !string.IsNullOrWhiteSpace(item.OriginIdentity)
+                ? item.OriginIdentity
+                : !string.IsNullOrWhiteSpace(item.ObjectPath)
+                    ? item.ObjectPath
+                    : $"{item.Module}|{item.DisplayName}|{item.PayloadJson}|{itemIndex}";
+            stableId = $"unreal:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(origin))).ToLowerInvariant()}";
+        }
+
+        if (!usedStableIds.Contains(stableId))
+        {
+            return stableId;
+        }
+
+        var disambiguator = !string.IsNullOrWhiteSpace(item.ObjectPath)
+            ? item.ObjectPath
+            : $"{item.Module}|{item.DisplayName}|{itemIndex}";
+        var suffix = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(disambiguator))).ToLowerInvariant()[..16];
+        var uniqueStableId = $"{stableId}:duplicate-{suffix}";
+        var counter = 2;
+        while (!usedStableIds.Add(uniqueStableId))
+        {
+            uniqueStableId = $"{stableId}:duplicate-{suffix}-{counter++}";
+        }
+
+        return uniqueStableId;
     }
 
     private static string ComputeFallbackHash(string objectPath, string payload) =>

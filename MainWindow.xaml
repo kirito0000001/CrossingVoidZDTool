@@ -2500,7 +2500,8 @@
                                                                         IsEnabled="{Binding IsSelectable}"
                                                                         IsThreeState="True"
                                                                         Opacity="0"
-                                                                        ToolTipService.ToolTip="全选或取消本组" />
+                                                                        ToolTipService.ToolTip="全选或取消本组"
+                                                                        Click="UnrealSyncSelectionCheckBox_Click" />
                                                                     <Border
                                                                         x:Name="UnrealSyncUncheckedIndicator"
                                                                         Width="20"
@@ -2573,7 +2574,7 @@
                                                                             <ColumnDefinition Width="*" />
                                                                             <ColumnDefinition Width="Auto" />
                                                                         </Grid.ColumnDefinitions>
-                                                                        <CheckBox Width="24" MinWidth="24" Padding="0" HorizontalAlignment="Center" VerticalAlignment="Center" IsChecked="{Binding IsChecked, Mode=TwoWay}" IsEnabled="{Binding IsSelectable}" />
+                                                                        <CheckBox Width="24" MinWidth="24" Padding="0" HorizontalAlignment="Center" VerticalAlignment="Center" IsChecked="{Binding IsChecked, Mode=TwoWay}" IsEnabled="{Binding IsSelectable}" Click="UnrealSyncSelectionCheckBox_Click" />
                                                                         <Grid Grid.Column="1" MinWidth="0" VerticalAlignment="Center" RowSpacing="2">
                                                                             <Grid.RowDefinitions>
                                                                                 <RowDefinition Height="Auto" />
@@ -2824,10 +2825,12 @@
                                                         <Grid.RowDefinitions>
                                                             <RowDefinition Height="Auto" />
                                                             <RowDefinition Height="Auto" />
+                                                            <RowDefinition Height="Auto" />
                                                         </Grid.RowDefinitions>
                                                         <TextBlock Text="{Binding UnrealProjectSync.ImportAddedCountText, Mode=OneWay}" />
                                                         <TextBlock Grid.Column="1" Text="{Binding UnrealProjectSync.ImportUpdatedCountText, Mode=OneWay}" />
                                                         <TextBlock Grid.Row="1" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.ImportSkippedCountText, Mode=OneWay}" />
+                                                        <TextBlock Grid.Row="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.ImportDeletedCountText, Mode=OneWay}" />
                                                         <TextBlock Grid.Row="1" Grid.Column="1" Style="{StaticResource SubtleTextStyle}" Text="重复导入会更新原素材" TextWrapping="Wrap" />
                                                     </Grid>
                                                     <Button

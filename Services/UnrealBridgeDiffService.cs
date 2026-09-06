@@ -22,8 +22,9 @@ internal sealed class UnrealBridgeDiffService
         if (direction == UnrealBridgeDirection.PublishToUnreal)
         {
             AlignCanonicalMaterialItems(toolboxItems, unrealItems, toolbox.CharacterCode);
+            AlignCanonicalSequenceItems(toolboxItems, unrealItems, toolbox.CharacterCode);
         }
-        return toolboxItems.Keys
+        var changes = toolboxItems.Keys
             .Union(unrealItems.Keys, StringComparer.OrdinalIgnoreCase)
             .Select(stableId => BuildChange(
                 stableId,
@@ -36,9 +37,91 @@ internal sealed class UnrealBridgeDiffService
                     unrealItems.TryGetValue(stableId, out var matchedUnrealItem) &&
                     IsMigrationSafePair(matchedToolboxItem, matchedUnrealItem, toolbox.CharacterCode)))
             .SelectMany(ExpandSequenceChange)
+            .Where(change => !ShouldHideSequenceAlreadyPublished(change, unrealItems, direction))
             .OrderBy(change => change.Module)
             .ThenBy(change => change.StableId, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+        return changes;
+    }
+
+    private static void AlignCanonicalSequenceItems(
+        IDictionary<string, UnrealBridgeSnapshotItem> toolboxItems,
+        IDictionary<string, UnrealBridgeSnapshotItem> unrealItems,
+        string characterCode)
+    {
+        var sequenceAssets = unrealItems
+            .Where(pair => pair.Value.Module == UnrealBridgeModule.SequenceFrames &&
+                IsCanonicalSequencePath(pair.Value.SourceObjectPath, characterCode))
+            .ToArray();
+        foreach (var toolboxPair in toolboxItems.Where(pair =>
+            pair.Value.Module == UnrealBridgeModule.SequenceFrames &&
+            pair.Key.StartsWith("sequence:", StringComparison.OrdinalIgnoreCase)).ToArray())
+        {
+            var actionCode = NormalizeSequenceActionCode(ExtractActionCode(toolboxPair.Value.PayloadJson));
+            var match = sequenceAssets.FirstOrDefault(pair =>
+                string.Equals(NormalizeSequenceActionCode(GetSequenceActionCode(pair.Value.SourceObjectPath)), actionCode, StringComparison.OrdinalIgnoreCase));
+            if (string.IsNullOrWhiteSpace(match.Key))
+            {
+                continue;
+            }
+
+            // 正式 AnimSequence 使用工具箱动作节点的稳定 ID；帧节点仍由后续过滤/聚合处理。
+            unrealItems.Remove(match.Key);
+            // 正式序列的扫描元数据与工具箱动作 payload 不是同一哈希算法；
+            // 这里仅把“正式序列已存在”对齐为动作节点已同步，帧内容由序列同步计划负责。
+            unrealItems[toolboxPair.Key] = match.Value with
+            {
+                StableId = toolboxPair.Key,
+                ContentHash = toolboxPair.Value.ContentHash,
+                ParentStableId = toolboxPair.Value.ParentStableId
+            };
+        }
+    }
+
+    private static bool IsCanonicalSequencePath(string path, string characterCode) =>
+        !string.IsNullOrWhiteSpace(path) &&
+        path.Contains($"/Game/GameActor2D/{characterCode}/AnimSequences/", StringComparison.OrdinalIgnoreCase);
+
+    private static string GetSequenceActionCode(string path)
+    {
+        var package = NormalizeObjectPath(path);
+        var slash = package.LastIndexOf('/');
+        return slash >= 0 ? package[(slash + 1)..] : string.Empty;
+    }
+
+    private static string NormalizeSequenceActionCode(string value) =>
+        value.Equals("Ondm", StringComparison.OrdinalIgnoreCase) ? "ondamage" :
+        value.Equals("Flydown", StringComparison.OrdinalIgnoreCase) ? "flydown" :
+        value.Equals("Flystart", StringComparison.OrdinalIgnoreCase) ? "flystart" :
+        value.Equals("Standup", StringComparison.OrdinalIgnoreCase) ? "standup" :
+        value.Equals("Defense", StringComparison.OrdinalIgnoreCase) ? "defence" :
+        NormalizeId(value);
+
+    private static bool ShouldHideSequenceAlreadyPublished(
+        UnrealBridgeChange change,
+        IReadOnlyDictionary<string, UnrealBridgeSnapshotItem> unrealItems,
+        UnrealBridgeDirection direction)
+    {
+        if (direction != UnrealBridgeDirection.PublishToUnreal ||
+            change.Module != UnrealBridgeModule.SequenceFrames ||
+            change.Kind != UnrealBridgeChangeKind.Added ||
+            change.ToolboxItem is null ||
+            !change.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var payload = change.ToolboxItem.PayloadJson ?? string.Empty;
+        var actionCode = ExtractActionCode(payload);
+        if (string.IsNullOrWhiteSpace(actionCode))
+        {
+            return false;
+        }
+
+        return unrealItems.Values.Any(item =>
+            item.Module == UnrealBridgeModule.SequenceFrames &&
+            item.SourceObjectPath.Contains("/AnimSequences/", StringComparison.OrdinalIgnoreCase) &&
+            item.SourceObjectPath.EndsWith("/" + actionCode + "." + actionCode, StringComparison.OrdinalIgnoreCase));
     }
 
     private static IEnumerable<UnrealBridgeChange> ExpandSequenceChange(UnrealBridgeChange change)
@@ -268,10 +351,13 @@ internal sealed class UnrealBridgeDiffService
                 throw new InvalidOperationException($"{sourceName}快照包含空的稳定 ID。");
             }
 
-            if (!result.TryAdd(item.StableId, item))
+            if (result.ContainsKey(item.StableId))
             {
-                throw new InvalidOperationException($"{sourceName}快照包含重复稳定 ID：{item.StableId}。");
+                throw new InvalidOperationException(
+                    $"{sourceName}快照包含重复稳定 ID：{item.StableId}。请检查快照生成和稳定 ID 规范化逻辑。");
             }
+
+            result[item.StableId] = item;
         }
 
         return result;
@@ -340,7 +426,7 @@ internal sealed class UnrealBridgeDiffService
             kind,
             toolboxItem,
             unrealItem,
-            kind is UnrealBridgeChangeKind.Added or UnrealBridgeChangeKind.Updated or UnrealBridgeChangeKind.Renamed,
+            false,
             stableId);
     }
 

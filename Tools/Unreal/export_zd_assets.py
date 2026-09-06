@@ -1894,8 +1894,14 @@ def _sequence_related_flipbook_assets(bucket, all_assets):
     if not sequence_assets:
         return []
 
+    direct_flipbooks = _sequence_anim_data_flipbook_assets(sequence_assets, all_assets)
+    if direct_flipbooks:
+        # The formal PaperZD sequence's AnimData is the source of truth. Older
+        # dependency/property fallbacks can discover stale Flipbooks from prior
+        # syncs and inflate one action into multiple frame sets.
+        return _unique_assets(direct_flipbooks)
+
     related_assets = []
-    related_assets.extend(_sequence_anim_data_flipbook_assets(sequence_assets, all_assets))
     related_assets.extend(_sequence_dependency_assets(sequence_assets, all_assets))
     related_assets.extend(_sequence_property_assets(sequence_assets, all_assets))
 
@@ -2009,7 +2015,7 @@ def _ordered_flipbook_frame_assets(flipbook_assets, texture_assets, all_assets):
             if texture_asset is None:
                 continue
             ordered_frames.extend(_sequence_asset_export_item(texture_asset) for _ in range(frame_run))
-    return ordered_frames, len(sprite_paths)
+    return ordered_frames, len(sprite_paths), sorted(sprite_paths, key=str.lower)
 
 
 def _sequence_sound_notifies(sequence_assets, all_assets, character_code, frames_per_second, frame_count):
@@ -2153,14 +2159,15 @@ def _build_sequence_actions(code, obj, actor_asset, actor_asset_map, manifest_as
         ]
         sequence_flipbook_assets = _sequence_related_flipbook_assets(bucket, all_actor_assets)
         playback_flipbook_assets = _unique_assets(sequence_flipbook_assets + flipbook_assets)
-        ordered_frames, ordered_sprite_count = _ordered_flipbook_frame_assets(flipbook_assets, texture_assets, all_actor_assets)
-        sequence_ordered_frames, sequence_ordered_sprite_count = _ordered_flipbook_frame_assets(
+        ordered_frames, ordered_sprite_count, ordered_sprite_paths = _ordered_flipbook_frame_assets(flipbook_assets, texture_assets, all_actor_assets)
+        sequence_ordered_frames, sequence_ordered_sprite_count, sequence_ordered_sprite_paths = _ordered_flipbook_frame_assets(
             sequence_flipbook_assets,
             texture_assets,
             all_actor_assets)
         if sequence_ordered_frames:
             ordered_frames = sequence_ordered_frames
             ordered_sprite_count = sequence_ordered_sprite_count
+            ordered_sprite_paths = sequence_ordered_sprite_paths
         if not ordered_frames:
             ordered_frames = [_sequence_asset_export_item(asset) for asset in _sorted_sequence_frame_assets(texture_assets)]
         preview_frames = ordered_frames[:3]
@@ -2188,6 +2195,8 @@ def _build_sequence_actions(code, obj, actor_asset, actor_asset_map, manifest_as
             "textureCount": len(ordered_frames),
             "spriteCount": max(len(sprite_assets), ordered_sprite_count),
             "flipbookCount": len(playback_flipbook_assets),
+            "flipbookPaths": [asset.get("objectPath", "") for asset in playback_flipbook_assets],
+            "orderedSpritePaths": ordered_sprite_paths,
             "framesPerSecond": frames_per_second,
             "orderedFrames": ordered_frames,
             "previewFrames": preview_frames,

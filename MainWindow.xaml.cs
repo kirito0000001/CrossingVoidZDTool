@@ -42,6 +42,14 @@ namespace CrossingVoidZDTool
         private readonly DispatcherQueueTimer _baseMaterialRefreshTimer;
         private readonly Dictionary<InfoBar, DispatcherQueueTimer> _floatingTipTimers = new();
         private readonly Queue<(LogKind Kind, string DisplayText, string CopyText)> _logLines = new();
+        private readonly Queue<(DateTime Timestamp, string Text)> _recentOperations = new();
+        private const int MaxRecentOperationCount = 50;
+        private readonly object _runtimeLogLock = new();
+        private readonly string _runtimeLogPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "CrossingVoidZDTool",
+            "Logs",
+            "runtime.log");
         private readonly PageScrollPositionStore _pageScrollPositions = new();
         private FileSystemWatcher? _baseMaterialWatcher;
         private FileSystemWatcher? _voiceMaterialWatcher;
