@@ -479,7 +479,8 @@ internal sealed record UnrealProjectSyncSequenceActionPreview(
     double FramesPerSecond,
     IReadOnlyList<UnrealProjectSyncExportAssetView> OrderedFrames,
     IReadOnlyList<UnrealProjectSyncExportAssetView> PreviewFrames,
-    IReadOnlyList<UnrealProjectSyncSequenceSoundNotifyPreview>? SoundNotifies = null)
+    IReadOnlyList<UnrealProjectSyncSequenceSoundNotifyPreview>? SoundNotifies = null,
+    IReadOnlyList<UnrealProjectSyncExportAssetView>? OwnedAssets = null)
 {
     public int FormIndex => FormIndexes.Count == 0 ? 1 : FormIndexes[0];
 
@@ -956,6 +957,10 @@ internal sealed class UnrealProjectExportSequenceAction
 
     [JsonPropertyName("framesPerSecond")]
     public double FramesPerSecond { get; set; }
+
+    /// <summary>该动作在 Unreal 里占用的全部资产，用于发现已经断开引用的旧素材。</summary>
+    [JsonPropertyName("ownedAssets")]
+    public List<UnrealProjectExportSequenceAsset> OwnedAssets { get; set; } = [];
 
     [JsonPropertyName("orderedFrames")]
     public List<UnrealProjectExportSequenceAsset> OrderedFrames { get; set; } = [];

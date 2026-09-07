@@ -34,13 +34,20 @@ namespace CrossingVoidZDTool
 
         private void LogSequenceChanges(string prefix, IEnumerable<UnrealBridgeChange> changes)
         {
+            var count = 0;
             foreach (var change in changes.Where(item => item.Module == UnrealBridgeModule.SequenceFrames))
             {
                 var canExecute = UnrealBridgePublishSupportPolicy.CanExecute(change);
                 var toolboxValue = FormatSyncLogValue(change.ToolboxItem?.PayloadJson);
                 var unrealValue = FormatSyncLogValue(change.UnrealItem?.PayloadJson);
-                AppendLog(LogKind.Info,
+                AppendDiagnosticLog(LogKind.Info,
                     $"{prefix} stableId={change.StableId} kind={change.Kind} selected={change.IsSelected} canExecute={canExecute} group={FormatSyncLogValue(change.SequenceGroupKey)} display={FormatSyncLogValue(change.DisplayName)} toolbox={toolboxValue} unreal={unrealValue}");
+                count++;
+            }
+
+            if (count > 0)
+            {
+                AppendLog(LogKind.Info, $"{prefix} 共 {count} 条明细，已写入 runtime.log。");
             }
         }
 
@@ -242,6 +249,8 @@ namespace CrossingVoidZDTool
             _isUnrealPublishRunning = true;
             _applicationViewModel.UnrealProjectSync.SetPublishRunning(true);
             var isSequenceSynchronization = _applicationViewModel.UnrealProjectSync.WorkflowStep == 5;
+            // 百分比按各阶段实测耗时分配；备份开着时它会占掉大半条，这是事实。
+            var progressPlan = WorkflowProgressPlan.ForSequenceSync(Settings.BackupBeforeUnrealSync);
             ShowGlobalProgress("同步前检测", character.Code);
             try
             {
@@ -264,8 +273,14 @@ namespace CrossingVoidZDTool
                     // 第三步执行前累计校验第一至第三步；不会检查尚未进入的后续阶段。
                     await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
                         [character.Code],
-                        cancellationToken: GetGlobalProgressCancellationToken(),
-                        scope: isSequenceSynchronization ? UnrealProjectSyncExportScope.CharacterSequences : UnrealProjectSyncExportScope.CharacterMaterials);
+                        // 这一段以前完全没有进度回调，十几秒里进度条一动不动。
+                        new Progress<ProgressUpdate>(update => UpdateGlobalProgress(
+                            $"阶段 1/4 · {update.Message}",
+                            progressPlan[WorkflowProgressPlan.PreflightExport].At(update.Percent),
+                            update.Detail,
+                            update.IsIndeterminate)),
+                        GetGlobalProgressCancellationToken(),
+                        isSequenceSynchronization ? UnrealProjectSyncExportScope.CharacterSequences : UnrealProjectSyncExportScope.CharacterMaterials);
                     _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code, requireAssetTypes: !isSequenceSynchronization);
                     latestCandidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.FirstOrDefault(item =>
                         string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase))
@@ -336,11 +351,13 @@ namespace CrossingVoidZDTool
                     latestChanges,
                     UnrealBridgePublishSupportPolicy.CanExecute,
                     GetGlobalProgressCancellationToken(),
-                    selectPendingByDefault: _workflowStepAfterPublishDetection != 5);
-                foreach (var root in _applicationViewModel.UnrealProjectSync.SelectionTreeRoots)
-                {
-                    root.RestoreCheckedState(selectionBeforeRefresh);
-                }
+                    // 同步路径里 _workflowStepAfterPublishDetection 早已被检测流程清零，
+                    // 用它判断会恒传 true，把第五步默认勾选成"全选"，和检测路径语义相反。
+                    selectPendingByDefault: !isSequenceSynchronization);
+                _applicationViewModel.UnrealProjectSync.RestoreSelectionState(selectionBeforeRefresh);
+                // 重建树时写过一次缓存，那时勾选还是默认态。恢复完必须再存一次，
+                // 否则后面任何一次「读缓存重建」都会拿到默认态而不是用户的勾选。
+                _applicationViewModel.UnrealProjectSync.SaveSelectionStateToSessionCache();
                 var restoredSelection = _applicationViewModel.UnrealProjectSync.GetSelectedStableIds();
                 AppendLog(LogKind.Info, $"[Pre-Sync Restore Result] restored={restoredSelection.Count} ids={string.Join(",", restoredSelection.Take(12))}");
                 if (publishChangesChanged)
@@ -362,21 +379,15 @@ namespace CrossingVoidZDTool
                 var deferredCount = changes.Count(change => change.Kind != UnrealBridgeChangeKind.Unchanged && !change.IsSelected);
                 var selectionWasLost = selectionBeforeRefresh.Count > 0 && restoredSelection.Count == 0;
                 AppendLog(LogKind.Info, $"[Pre-Sync Selection] character={character.Code} leaves={selectionLeaves.Length} executable={executableCount} deferred={deferredCount} selectionBeforeRefresh={selectionBeforeRefresh.Count} restored={restoredSelection.Count} sequence={isSequenceSynchronization}");
-                if (selectionWasLost)
-                {
-                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(isSequenceSynchronization ? 5 : 3);
-                    CompleteGlobalProgress("同步已停止", "刷新后未能恢复原来的勾选，未修改 Unreal。请重新检测差异并确认选择。");
-                    ShowFloatingTip(InfoBarSeverity.Warning, "未恢复同步选择", "刷新后的勾选集合与同步前不一致，已停止执行，未修改 Unreal。");
-                    await HideGlobalProgressAfterDelayAsync();
-                    return;
-                }
                 LogSequenceChanges("[Pre-Sync Selection Item]", changes.Where(change => change.IsSelected));
                 if (changes.Length == 0)
                 {
                     if (_applicationViewModel.UnrealProjectSync.HasNoPublishChanges)
                     {
                         _applicationViewModel.UnrealProjectSync.CompletePublishOperation(0, 0);
-                        if (!_applicationViewModel.UnrealProjectSync.IsLightConfigurationLoaded)
+                        // 第五步不进基础配置，和 653 行的收尾保持一致。
+                        if (!isSequenceSynchronization &&
+                            !_applicationViewModel.UnrealProjectSync.IsLightConfigurationLoaded)
                         {
                             UpdateGlobalProgress("正在检测基础配置...", 90, character.Code, true);
                             var configurationResult = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
@@ -387,7 +398,20 @@ namespace CrossingVoidZDTool
                         return;
                     }
 
+                    CompleteGlobalProgress("尚未检测差异", "请先检测差异，再勾选需要同步的内容。");
                     ShowFloatingTip(InfoBarSeverity.Warning, "尚未检测差异", "请先检测差异，再勾选需要同步的内容。");
+                    await HideGlobalProgressAfterDelayAsync();
+                    return;
+                }
+
+                // 这个判断必须排在「无差异」之后：全部同步完成时叶子本来就归零，
+                // 早退在前会把「已经做完了」误报成「勾选失效」。
+                if (selectionWasLost)
+                {
+                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(isSequenceSynchronization ? 5 : 3);
+                    CompleteGlobalProgress("同步已停止", "刷新后未能恢复原来的勾选，未修改 Unreal。请重新检测差异并确认选择。");
+                    ShowFloatingTip(InfoBarSeverity.Warning, "未恢复同步选择", "刷新后的勾选集合与同步前不一致，已停止执行，未修改 Unreal。");
+                    await HideGlobalProgressAfterDelayAsync();
                     return;
                 }
 
@@ -395,7 +419,9 @@ namespace CrossingVoidZDTool
                     !_applicationViewModel.UnrealProjectSync.CanExecutePublishChange(change)).ToArray();
                 if (unsupported.Length > 0)
                 {
+                    CompleteGlobalProgress("包含尚未完成重定向的同步项", "请先完成第二步素材规整后再同步。");
                     ShowFloatingTip(InfoBarSeverity.Warning, "包含尚未完成重定向的同步项", $"请先完成规整：{string.Join("、", unsupported.Select(item => item.DisplayName))}");
+                    await HideGlobalProgressAfterDelayAsync();
                     return;
                 }
 
@@ -426,16 +452,31 @@ namespace CrossingVoidZDTool
 
                 if (isSequenceSynchronization)
                 {
-                    var sequencePlan = new UnrealBridgeSequencePublishService().BuildSequenceSyncPlan(character, projectPath, changes);
+                    var sequencePublishService = new UnrealBridgeSequencePublishService();
+                    var sequencePlan = sequencePublishService.BuildSequenceSyncPlan(character, projectPath, changes);
+                    if (sequencePublishService.SkippedActionCodes.Count > 0)
+                    {
+                        AppendLog(LogKind.Warning, $"[Sequence Plan Skipped] character={character.Code} actions={string.Join("、", sequencePublishService.SkippedActionCodes)}（工具箱侧没有序列帧数据）");
+                        ShowFloatingTip(InfoBarSeverity.Warning, "部分动作已跳过",
+                            $"以下动作在工具箱里没有序列帧：{string.Join("、", sequencePublishService.SkippedActionCodes)}");
+                    }
                     AppendLog(LogKind.User, $"[Sequence Plan] character={character.Code} actions={sequencePlan.Actions.Count} animMaps={sequencePlan.AnimMapsPath}");
                     foreach (var action in sequencePlan.Actions)
                     {
                         AppendLog(LogKind.Info, $"[Sequence Plan Action] code={action.ActionCode} display={FormatSyncLogValue(action.DisplayName)} targetSequence={action.TargetSequencePath} frames={action.Frames.Count} fps={action.Fps}");
                     }
+                    // 第五步会重命名并删除历史序列资产，备份策略与第三步一致：
+                    // 整体设置开启，或本批包含更新、改名、冲突、删除时都先备份。
+                    await BackupUnrealProjectIfRequestedAsync(
+                        enginePath,
+                        projectPath,
+                        character.Code,
+                        UnrealBridgeBackupPolicy.ShouldBackupByDefault(changes),
+                        progressPlan[WorkflowProgressPlan.Backup]);
                     var sequenceFolder = Path.Combine(Path.GetDirectoryName(projectPath)!, "Intermediate", "ZDToolboxBridge", character.Code);
                     var sequencePlanPath = Path.Combine(sequenceFolder, "sequence-sync-plan.json");
                     var sequenceResultPath = Path.Combine(sequenceFolder, "sequence-sync-result.json");
-                    new UnrealBridgeSequencePublishService().Save(sequencePlanPath, sequencePlan);
+                    sequencePublishService.Save(sequencePlanPath, sequencePlan);
                     var sequenceProgressPath = Path.Combine(sequenceFolder, "sequence-sync-progress.json");
                     var sequenceExecutor = new UnrealBridgeExecutorService();
                     var sequenceStartInfo = sequenceExecutor.BuildProcessStartInfo(
@@ -449,18 +490,24 @@ namespace CrossingVoidZDTool
                         Path.Combine(AppContext.BaseDirectory, "Tools", "UnrealBridge", "sync_character_sequences.py"),
                         Path.Combine(sequenceFolder, "sequence-sync.remote-job.json"),
                         sequenceStartInfo);
-                    if (sequenceLaunch.UsesRunningEditor)
-                    {
-                        UpdateGlobalProgress("阶段 3/5 · 正在连接已打开的 Unreal Editor", 58, "已发现运行中的编辑器 · 等待桥接任务开始", true);
-                    }
+                    UpdateGlobalProgress(
+                        sequenceLaunch.UsesRunningEditor
+                            ? "阶段 3/4 · 正在连接已打开的 Unreal Editor"
+                            : "阶段 3/4 · 正在启动 Unreal 执行序列同步",
+                        progressPlan[WorkflowProgressPlan.BridgeExecute].At(0),
+                        sequenceLaunch.UsesRunningEditor
+                            ? "已发现运行中的编辑器 · 等待桥接任务开始"
+                            : $"待执行 {sequencePlan.Actions.Count} 个动作 · 首次启动编辑器约需十几秒",
+                        true);
                     var sequenceResult = await sequenceExecutor.ExecuteAsync(
                         sequenceLaunch.StartInfo,
                         sequenceProgressPath,
                         sequenceResultPath,
                         new Progress<UnrealBridgeExecutionProgress>(value =>
                             UpdateGlobalProgress(
-                                $"阶段 3/5 · 执行序列动作：{value.Message}",
-                                58 + value.CompletedCount * 24d / Math.Max(1, value.TotalCount),
+                                $"阶段 3/4 · 执行序列动作：{value.Message}",
+                                progressPlan[WorkflowProgressPlan.BridgeExecute].At(
+                                    value.CompletedCount * 100d / Math.Max(1, value.TotalCount)),
                                 $"动作进度：{value.CompletedCount}/{value.TotalCount} · {value.StableId}")),
                         GetGlobalProgressCancellationToken());
                     AppendLog(sequenceResult.Succeeded ? LogKind.Info : LogKind.Error, $"[Sequence Execution] character={character.Code} succeeded={sequenceResult.Succeeded} items={sequenceResult.Items.Count} error={FormatSyncLogValue(sequenceResult.ErrorMessage)}");
@@ -468,15 +515,32 @@ namespace CrossingVoidZDTool
                     {
                         AppendLog(item.Succeeded ? LogKind.Info : LogKind.Error, $"[Sequence Execution Item] stableId={item.StableId} succeeded={item.Succeeded} objectPath={FormatSyncLogValue(item.ObjectPath)} message={FormatSyncLogValue(item.Message)}");
                     }
-                    if (!sequenceResult.Succeeded)
+                    // Python 是逐动作串行执行的：失败之前的动作已经改了 Unreal。
+                    // 以前这里直接抛异常，复扫、写基线、刷新树全被跳过，
+                    // 已经写进去的动作既不落基线也不从列表里消失。
+                    var succeededActionCodes = sequenceResult.Items
+                        .Where(item => item.Succeeded && !string.IsNullOrWhiteSpace(item.StableId))
+                        .Select(item => item.StableId)
+                        .ToArray();
+                    if (!sequenceResult.Succeeded && succeededActionCodes.Length == 0)
                     {
                         throw new InvalidOperationException($"第五步序列同步失败：{sequenceResult.ErrorMessage}");
                     }
-                    UpdateGlobalProgress("阶段 4/5 · 正在复扫验证序列资产", 86, $"角色：{character.Code} · 重新读取 Unreal 动画资源", true);
+                    UpdateGlobalProgress(
+                        "阶段 4/4 · 正在复扫验证序列资产",
+                        progressPlan[WorkflowProgressPlan.RescanExport].At(0),
+                        $"角色：{character.Code} · 重新读取 Unreal 动画资源",
+                        true);
                     await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
                         [character.Code],
-                        cancellationToken: GetGlobalProgressCancellationToken(),
-                        scope: UnrealProjectSyncExportScope.CharacterSequences);
+                        // 同样补上：复扫也是一次完整的 Unreal 导出，不该静默十几秒。
+                        new Progress<ProgressUpdate>(update => UpdateGlobalProgress(
+                            $"阶段 4/4 · {update.Message}",
+                            progressPlan[WorkflowProgressPlan.RescanExport].At(update.Percent),
+                            update.Detail,
+                            update.IsIndeterminate)),
+                        GetGlobalProgressCancellationToken(),
+                        UnrealProjectSyncExportScope.CharacterSequences);
 
                     // 序列同步后必须用最新 Unreal 快照重新计算差异，不能直接清空选择树；
                     // 否则只同步一个动作时，剩余动作也会被误判为“全部完成”。
@@ -484,11 +548,20 @@ namespace CrossingVoidZDTool
                         string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase));
                     var sequenceRescanned = new UnrealBridgeSemanticSnapshotService().Build(sequenceRefreshedCandidate);
                     var sequenceBaseline = new UnrealBridgeStateService().Load(character, projectPath);
+                    // 只有真正执行成功的动作才允许刷新基线；失败的动作保留原有条目。
+                    var executedActionStableIds = succeededActionCodes
+                        .Select(code => SequenceFrameIdentity.BuildActionStableId(code))
+                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+                    // 复扫必须剔除本次执行动作的旧基线条目：那些条目记的是执行前的 Unreal 哈希，
+                    // 拿它比较会把刚同步成功的帧全部判成冲突。
+                    var rescanBaseline = new UnrealBridgeBaselineService().WithoutActions(
+                        sequenceBaseline,
+                        executedActionStableIds);
                     var remainingChanges = new UnrealBridgeDiffService().Compare(
                             new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character),
                             sequenceRescanned,
                             UnrealBridgeDirection.PublishToUnreal,
-                            sequenceBaseline)
+                            rescanBaseline)
                         .Where(change => change.Module == UnrealBridgeModule.SequenceFrames)
                         .Select(change => change with
                         {
@@ -501,13 +574,34 @@ namespace CrossingVoidZDTool
                         GetGlobalProgressCancellationToken(),
                         selectPendingByDefault: false);
 
-                    var remainingActionCount = remainingChanges
-                        .Where(change => change.Kind != UnrealBridgeChangeKind.Unchanged)
-                        .Select(change => change.SequenceGroupKey ?? change.StableId)
-                        .Distinct(StringComparer.OrdinalIgnoreCase)
-                        .Count();
+                    // 增量提交基线：只覆盖本次执行过的动作，未执行的动作保留原有条目。
+                    var verifiedSequenceState = new UnrealBridgeBaselineService().MergeVerifiedSequenceState(
+                        sequenceBaseline,
+                        character.Code,
+                        projectPath,
+                        executedActionStableIds,
+                        remainingChanges);
+                    new UnrealBridgeStateService().Save(character, projectPath, verifiedSequenceState);
+                    AppendLog(LogKind.Info, $"[Sequence Baseline] character={character.Code} actions={executedActionStableIds.Count} entries={verifiedSequenceState.Entries.Count}");
+
+                    // 按选择树实际展示的分组统计。直接数 Kind != Unchanged 会把动作级节点
+                    // （例如 Unreal 侧缺 Flipbook 导致帧率对不上）也算进来，而这类节点
+                    // 既不在树里也不可勾选，会让界面永远显示"仍有 N 个动作差异"。
+                    var remainingActionCount = _applicationViewModel.UnrealProjectSync.SelectionTreeRoots.Count;
                     AppendLog(LogKind.Info, $"[Post-Sync Rescan] character={character.Code} remainingChanges={remainingChanges.Length} remainingActionGroups={remainingActionCount}");
                     LogSequenceChanges("[Post-Sync Rescan Item]", remainingChanges);
+                    if (!sequenceResult.Succeeded)
+                    {
+                        CompleteGlobalProgress(
+                            "部分序列同步失败",
+                            $"已成功 {succeededActionCodes.Length} 个动作并写入基线；其余失败：{sequenceResult.ErrorMessage}");
+                        ShowFloatingTip(InfoBarSeverity.Warning, "部分序列同步失败",
+                            $"已成功 {succeededActionCodes.Length} 个动作，剩余请查看日志后重试。");
+                        LogUserOperation($"第五步序列部分同步：{character.Code}，Succeeded={succeededActionCodes.Length}，Error={sequenceResult.ErrorMessage}");
+                        await HideGlobalProgressAfterDelayAsync();
+                        return;
+                    }
+
                     if (remainingActionCount == 0)
                     {
                         _applicationViewModel.UnrealProjectSync.CompletePublishOperation(executableCount, 0);
@@ -534,26 +628,11 @@ namespace CrossingVoidZDTool
                     templateCharacterCode: baseline?.TemplateCharacterCode ?? string.Empty,
                     baseline: baseline,
                     normalizationItems: _applicationViewModel.UnrealProjectSync.NormalizationItems);
-                if (plan.BackupRequired || Settings.BackupBeforeUnrealSync)
-                {
-                    UpdateGlobalProgress("正在压缩备份 Unreal 项目...", 40, projectPath, true);
-                    var backupPath = Path.Combine(
-                        Path.GetDirectoryName(projectPath)!,
-                        "Saved",
-                        "ZDToolboxBackups",
-                        $"{character.Code}-{DateTime.Now:yyyyMMdd-HHmmss}.zip");
-                    var backupInfo = new UnrealBridgeBackupService().BuildZipProjectStartInfo(enginePath, projectPath, backupPath);
-                    using var backupProcess = Process.Start(backupInfo)
-                        ?? throw new InvalidOperationException("无法启动 Unreal 项目备份进程。");
-                    var backupOutput = backupProcess.StandardOutput.ReadToEndAsync();
-                    var backupError = backupProcess.StandardError.ReadToEndAsync();
-                    await backupProcess.WaitForExitAsync(GetGlobalProgressCancellationToken());
-                    if (backupProcess.ExitCode != 0)
-                    {
-                        throw new InvalidOperationException(
-                            $"Unreal 项目备份失败，退出码 {backupProcess.ExitCode}。\n{await backupOutput}\n{await backupError}");
-                    }
-                }
+                await BackupUnrealProjectIfRequestedAsync(
+                    enginePath,
+                    projectPath,
+                    character.Code,
+                    plan.BackupRequired);
 
                 UpdateGlobalProgress("阶段 3/5 · 正在写入 Unreal 素材", 58, $"待执行：{executableCount} 项 · 正在启动桥接任务", true);
                 var workFolder = Path.Combine(
@@ -894,10 +973,10 @@ namespace CrossingVoidZDTool
                     UnrealBridgePublishSupportPolicy.CanExecute,
                     GetGlobalProgressCancellationToken(),
                     selectPendingByDefault: _workflowStepAfterPublishDetection != 5);
-                foreach (var root in _applicationViewModel.UnrealProjectSync.SelectionTreeRoots)
-                {
-                    root.RestoreCheckedState(selectionBeforeDetection);
-                }
+                _applicationViewModel.UnrealProjectSync.RestoreSelectionState(selectionBeforeDetection);
+                // 与同步路径对称：建树时写入的是默认勾选态，恢复完必须再存一次，
+                // 否则紧接着的 ReturnToWorkflowStep 会用默认态重建这棵树。
+                _applicationViewModel.UnrealProjectSync.SaveSelectionStateToSessionCache();
                 AppendLog(LogKind.Info, $"[Refresh Selection Result] restored={_applicationViewModel.UnrealProjectSync.GetSelectedStableIds().Count}");
                 var changedCount = changes.Count(change => change.Kind != UnrealBridgeChangeKind.Unchanged);
                 CompleteGlobalProgress("差异检测完成", $"发现 {changedCount} 项变化；冲突和重定向项未默认勾选。");
@@ -1459,6 +1538,111 @@ namespace CrossingVoidZDTool
                 launch.StartInfo,
                 resultPath,
                 GetGlobalProgressCancellationToken());
+        }
+
+        /// <summary>
+        /// 按整体设置备份 Unreal 项目。第三步和第五步共用同一份实现，
+        /// 整体设置对两步都是唯一开关：关掉就一律不备份。
+        /// </summary>
+
+        /// <summary>
+        /// 备份没有可读的百分比，只能看产物长了多少。
+        /// 这一段实测一分多钟，静止不动的进度条会让人以为卡死。
+        /// </summary>
+        private async Task ReportBackupProgressWhileRunningAsync(
+            Process backupProcess,
+            string backupPath,
+            WorkflowProgressBand band)
+        {
+            var token = GetGlobalProgressCancellationToken();
+            var startedAt = DateTime.UtcNow;
+            while (!backupProcess.HasExited && !token.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(700, token);
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+
+                var elapsed = DateTime.UtcNow - startedAt;
+                var writtenMb = 0L;
+                try
+                {
+                    var info = new FileInfo(backupPath);
+                    if (info.Exists)
+                    {
+                        writtenMb = info.Length / (1024 * 1024);
+                    }
+                }
+                catch (IOException)
+                {
+                    // 压缩进程正持有这个文件，读不到大小就只报用时。
+                }
+
+                // 以实测约 66 秒为参照推进，封顶 95% 免得压完前就顶到头。
+                var ratio = Math.Min(95d, elapsed.TotalSeconds / 66d * 100d);
+                UpdateGlobalProgress(
+                    "阶段 2/4 · 正在压缩备份 Unreal 项目",
+                    band.At(ratio),
+                    writtenMb > 0
+                        ? $"已写入 {writtenMb} MB · 用时 {elapsed.Minutes:00}:{elapsed.Seconds:00}"
+                        : $"用时 {elapsed.Minutes:00}:{elapsed.Seconds:00}",
+                    false);
+            }
+        }
+
+        private async Task BackupUnrealProjectIfRequestedAsync(
+            string enginePath,
+            string projectPath,
+            string characterCode,
+            bool planTouchesExistingAssets,
+            WorkflowProgressBand band = default)
+        {
+            var decision = UnrealBridgeBackupPolicy.Decide(
+                Settings.BackupBeforeUnrealSync,
+                planTouchesExistingAssets);
+            if (decision != UnrealBridgeBackupDecision.Backup)
+            {
+                if (decision == UnrealBridgeBackupDecision.SkipWithRiskWarning)
+                {
+                    // 关了开关就不拦，但这一批会改写或删除既有资产，留一条记录便于事后追。
+                    AppendLog(LogKind.Warning,
+                        $"[Backup] character={characterCode} 已跳过备份：整体设置已关闭「同步前备份」，而本批包含更新或删除项。");
+                }
+
+                return;
+            }
+
+            if (band.End <= band.Start)
+            {
+                band = new WorkflowProgressBand(40, 55);
+            }
+
+            UpdateGlobalProgress("阶段 2/4 · 正在压缩备份 Unreal 项目", band.At(0), projectPath, true);
+            var backupPath = Path.Combine(
+                Path.GetDirectoryName(projectPath)!,
+                "Saved",
+                "ZDToolboxBackups",
+                $"{characterCode}-{DateTime.Now:yyyyMMdd-HHmmss}.zip");
+            var backupInfo = new UnrealBridgeBackupService().BuildZipProjectStartInfo(enginePath, projectPath, backupPath);
+            using var backupProcess = Process.Start(backupInfo)
+                ?? throw new InvalidOperationException("无法启动 Unreal 项目备份进程。");
+            var backupOutput = backupProcess.StandardOutput.ReadToEndAsync();
+            var backupError = backupProcess.StandardError.ReadToEndAsync();
+            // 压缩整个工程实测约一分钟，是这条流程里最长的一段。
+            // 没有可读的百分比，就报已经写出多少 MB，至少让人看得出它在动。
+            await ReportBackupProgressWhileRunningAsync(backupProcess, backupPath, band);
+            await backupProcess.WaitForExitAsync(GetGlobalProgressCancellationToken());
+            if (backupProcess.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Unreal 项目备份失败，退出码 {backupProcess.ExitCode}。\n{await backupOutput}\n{await backupError}");
+            }
+
+            AppendLog(LogKind.Info, $"[Backup] character={characterCode} path={backupPath}");
         }
 
         private async Task CreateUnrealProjectBackupAsync(

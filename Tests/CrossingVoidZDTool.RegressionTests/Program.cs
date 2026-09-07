@@ -7,6 +7,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
 using CrossingVoidZDTool;
@@ -84,6 +85,7 @@ var tests = new (string Name, Action Run)[]
     ("虚幻同步状态按角色和项目隔离", UnrealBridgeStateIsScopedToCharacterAndProject),
     ("部分导入只更新选中项同步基线", UnrealBridgePartialImportUpdatesOnlySelectedBaselineEntries),
     ("虚幻同步仅在更新删除时默认备份", UnrealBridgeBackupPolicyProtectsRiskyChanges),
+    ("同步前备份开关对每一步都生效", BackupSettingGovernsEveryStep),
     ("虚幻项目备份使用当前引擎 ZipProjectUp", UnrealBridgeBackupUsesEngineAutomationTool),
     ("虚幻发布快照拒绝草稿角色", UnrealBridgeToolboxSnapshotRejectsDraftCharacter),
     ("虚幻工具箱快照覆盖角色六类模块", UnrealBridgeToolboxSnapshotCoversAllModules),
@@ -205,7 +207,32 @@ var tests = new (string Name, Action Run)[]
     ("语音同步分析计算顶替和序列结束帧差", SequenceVoiceSyncAnalysisCalculatesFrameDifferences),
     ("语音同步分析跟随 FPS 即时重算", SequenceVoiceSyncAnalysisRefreshesWhenFpsChanges),
     ("语音同步结果显示在右侧和时间轴", SequenceVoiceSyncResultsAppearInInspectorAndTimeline),
-    ("主项目资源排除测试构建输出", MainProjectExcludesTestBuildOutputsFromResources)
+    ("主项目资源排除测试构建输出", MainProjectExcludesTestBuildOutputsFromResources),
+    ("序列动作目录与导出脚本代号表一致", SequenceActionCatalogMatchesExporterSpecs),
+    ("序列动作目录识别历史命名和形态后缀", SequenceActionCatalogResolvesLegacyNamesAndForms),
+    ("序列动作目录产出统一的规范资产命名", SequenceActionCatalogProducesCanonicalAssetNames),
+    ("工具箱动作代号全部能解析到规范动作", ToolboxSequenceActionCodesResolveThroughCatalog),
+    ("清理令牌不会命中角色名里的同名片段", SequenceActionLegacyTokensDoNotMatchCharacterName),
+    ("同步计划字段全部被桥接脚本读取", SequenceSyncPlanFieldsAreReadByBridgeScript),
+    ("序列快照在历史拼写下仍然两侧对齐", SequenceSnapshotsAlignAcrossLegacySpellings),
+    ("已发布序列帧判为无差异并可建立基线", SequenceFramesAlreadyPublishedCountAsUnchanged),
+    ("序列帧数量变化产生新增和删除", SequenceFrameCountChangesProduceAddAndDelete),
+    ("序列帧区分工具箱更新和虚幻侧冲突", SequenceFrameEditsSeparateUpdateFromConflict),
+    ("序列基线只提交本次执行的动作", SequenceBaselineCommitsOnlyExecutedActions),
+    ("动作目录里的多余素材列为待删除", StaleSequenceAssetsBecomeDeleteCandidates),
+    ("缓存恢复后序列分组标题仍是动作名", SequenceGroupTitleSurvivesCacheRestore),
+    ("同步前比较忽略两侧口径差异不误报变化", PublishChangeComparisonIgnoresUnchangedSubset),
+    ("建立迁移基线不会翻转序列差异类型", MigrationBaselineDoesNotFlipSequenceKinds),
+    ("同步计划携带勾选的待删资产路径", SequencePlanCarriesSelectedStaleAssetPaths),
+    ("零帧动作被跳过而不是整批失败", SequencePlanSkipsActionsWithoutFrames),
+    ("基线只刷新执行成功的动作", SequenceBaselineSkipsFailedActions),
+    ("在线执行只认当前选中的项目", OnlineExecutionOnlyMatchesSelectedProject),
+    ("会话缓存落盘不会卡死 UI 线程", SessionCacheFlushDoesNotDeadlockUiThread),
+    ("批量恢复勾选只重算一次", BulkSelectionRestoreRecomputesOnce),
+    ("资产类名不会把内存地址带进哈希", AssetClassNeverCarriesPointerIntoHash),
+    ("导出帧列表一个关键帧一项", ExportedFrameListIsOneEntryPerKeyframe),
+    ("同步进度分段覆盖每个阶段", SyncProgressBandsCoverEveryPhase),
+    ("导出跳过未变化的 PNG", ExportSkipsUnchangedPngFiles)
 };
 
 var failed = 0;
@@ -4334,6 +4361,39 @@ static void UnrealBridgeBackupPolicyProtectsRiskyChanges()
     AssertEqual(false, UnrealBridgeBackupPolicy.ShouldBackupByDefault([unselectedConflict]));
 }
 
+static void BackupSettingGovernsEveryStep()
+{
+    // 整体设置是唯一开关。以前只要计划里含更新/改名/删除就会绕过设置强制备份，
+    // 而第五步必然带删除项 —— 等于这个开关对第五步完全无效：
+    // 关着开关点同步，照样先压一份几个 G 的工程出来。
+    AssertEqual(
+        UnrealBridgeBackupDecision.Skip,
+        UnrealBridgeBackupPolicy.Decide(backupEnabledInSettings: false, planTouchesExistingAssets: false));
+
+    // 第五步的典型情形：开关关着，但这一批要删历史资产 —— 依然不备份，只记一条警告。
+    AssertEqual(
+        UnrealBridgeBackupDecision.SkipWithRiskWarning,
+        UnrealBridgeBackupPolicy.Decide(backupEnabledInSettings: false, planTouchesExistingAssets: true));
+
+    // 开关打开就一定备份，跟这批改了什么无关。
+    AssertEqual(
+        UnrealBridgeBackupDecision.Backup,
+        UnrealBridgeBackupPolicy.Decide(backupEnabledInSettings: true, planTouchesExistingAssets: false));
+    AssertEqual(
+        UnrealBridgeBackupDecision.Backup,
+        UnrealBridgeBackupPolicy.Decide(backupEnabledInSettings: true, planTouchesExistingAssets: true));
+
+    // 第五步整批删除项走进来时，计划侧仍然应判定「会动既有资产」，
+    // 这样关着开关时才会留下那条警告。
+    var sequenceDeletes = new[]
+    {
+        CreateUnrealBridgeChange(UnrealBridgeChangeKind.DeleteCandidate, isSelected: true)
+    };
+    AssertEqual(
+        UnrealBridgeBackupDecision.SkipWithRiskWarning,
+        UnrealBridgeBackupPolicy.Decide(false, UnrealBridgeBackupPolicy.ShouldBackupByDefault(sequenceDeletes)));
+}
+
 static void UnrealBridgeBackupUsesEngineAutomationTool()
 {
     var root = CreateTemporaryTestFolder();
@@ -6592,5 +6652,1129 @@ static void AssertSequence<T>(T[] expected, T[] actual)
     if (!expected.SequenceEqual(actual))
     {
         throw new InvalidOperationException($"期望 [{string.Join(", ", expected)}]，实际 [{string.Join(", ", actual)}]。");
+    }
+}
+
+static void SequenceActionCatalogMatchesExporterSpecs()
+{
+    var script = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "Tools", "Unreal", "export_zd_assets.py"))
+        .ReplaceLineEndings("\n");
+    var start = script.IndexOf("SEQUENCE_ACTION_SPECS = [", StringComparison.Ordinal);
+    AssertEqual(true, start >= 0);
+    var end = script.IndexOf("]\n", start, StringComparison.Ordinal);
+    AssertEqual(true, end > start);
+    var block = script[start..end];
+    var specs = System.Text.RegularExpressions.Regex
+        .Matches(block, """\("([^"]*)", "([^"]+)", "([^"]+)", "([^"]+)", \[([^\]]*)\]\)""")
+        .Select(match => (
+            SourceProperty: match.Groups[1].Value,
+            Code: match.Groups[2].Value,
+            DisplayName: match.Groups[3].Value,
+            Category: match.Groups[4].Value,
+            Aliases: System.Text.RegularExpressions.Regex.Matches(match.Groups[5].Value, @"""([^""]+)""")
+                .Select(alias => alias.Groups[1].Value)
+                .ToArray()))
+        .ToArray();
+
+    AssertEqual(SequenceActionCatalog.Definitions.Count, specs.Length);
+    AssertSequence(
+        specs.Select(spec => spec.Code).ToArray(),
+        SequenceActionCatalog.Definitions.Select(definition => definition.Code).ToArray());
+    for (var index = 0; index < specs.Length; index++)
+    {
+        var spec = specs[index];
+        var definition = SequenceActionCatalog.Definitions[index];
+        AssertEqual(spec.DisplayName, definition.DisplayName);
+        AssertEqual(
+            spec.Category.Equals("skill", StringComparison.Ordinal)
+                ? SequenceActionCategory.Skill
+                : SequenceActionCategory.Base,
+            definition.Category);
+        AssertSequence(spec.Aliases, definition.Aliases.ToArray());
+        // 技能槽 SkillSlot1..4 是 FSkillData2D 数值结构，不是序列数组，所以目录里必须留空。
+        AssertEqual(
+            true,
+            definition.BlueprintSequenceArrayProperty.Length == 0 ||
+            definition.BlueprintSequenceArrayProperty.Equals(spec.SourceProperty, StringComparison.Ordinal));
+    }
+}
+
+static void SequenceActionCatalogResolvesLegacyNamesAndForms()
+{
+    var cases = new (string Raw, string Code, int Form)[]
+    {
+        ("Dead", "Death", 1),
+        ("Death", "Death", 1),
+        ("Defense", "Defence", 1),
+        ("Defatk", "DefAtk", 1),
+        ("Ondm", "OnDamage", 1),
+        ("OnDM", "OnDamage", 1),
+        ("Standup", "StandUP", 1),
+        ("Ko", "KO", 1),
+        ("SK2", "Sk2", 1),
+        ("Sk1", "Sk1", 1),
+        ("Fly", "Flying", 1),
+        ("Flydown", "FlyDown", 1),
+        ("Victor", "Victory", 1),
+        ("Defeated", "Defeat", 1),
+        ("Idle02", "Idle", 2),
+        ("Sk102", "Sk1", 2),
+        ("Click2", "Click", 2),
+        ("Sk1_Shape2", "Sk1", 2),
+        ("Sk2_Shape2", "Sk2", 2)
+    };
+    foreach (var (raw, code, form) in cases)
+    {
+        AssertEqual(true, SequenceActionCatalog.TryResolve(raw, out var definition, out var formIndex));
+        AssertEqual(code, definition!.Code);
+        AssertEqual(form, formIndex);
+    }
+
+    AssertEqual(false, SequenceActionCatalog.TryResolve("Link", out _, out _));
+    AssertEqual(false, SequenceActionCatalog.TryResolve("12Sao_Asuna", out _, out _));
+    AssertEqual(false, SequenceActionCatalog.TryResolve(string.Empty, out _, out _));
+
+    // 历史写法与规范写法必须落到同一个分组键，否则同一个动作会被拆成两行。
+    AssertEqual(SequenceActionCatalog.NormalizeActionKey("OnDamage"), SequenceActionCatalog.NormalizeActionKey("Ondm"));
+    AssertEqual(SequenceActionCatalog.NormalizeActionKey("Defence"), SequenceActionCatalog.NormalizeActionKey("Defense"));
+    AssertEqual(SequenceActionCatalog.NormalizeActionKey("Death"), SequenceActionCatalog.NormalizeActionKey("Dead"));
+    AssertEqual(SequenceActionCatalog.NormalizeActionKey("KO"), SequenceActionCatalog.NormalizeActionKey("Ko"));
+    AssertEqual(SequenceActionCatalog.NormalizeActionKey("Idle02"), SequenceActionCatalog.NormalizeActionKey("Idle_Shape2"));
+    AssertEqual(false, SequenceActionCatalog.NormalizeActionKey("Idle") == SequenceActionCatalog.NormalizeActionKey("Idle02"));
+}
+
+static void SequenceActionCatalogProducesCanonicalAssetNames()
+{
+    var onDamage = SequenceActionCatalog.Resolve("Ondm", out var onDamageForm);
+    AssertEqual("OnDamage", SequenceActionCatalog.GetAnimSequenceName(onDamage, onDamageForm));
+    AssertEqual("OnDamage", SequenceActionCatalog.GetMaterialFolderName(onDamage, onDamageForm));
+    AssertEqual("OnDamage_Flipbook", SequenceActionCatalog.GetFlipbookName(onDamage, onDamageForm));
+
+    // 虚幻侧帧号从 0 开始，位宽跟随总帧数：个位数不补零，十位数补到两位，百位数补到三位。
+    AssertEqual("OnDamage_Frame0", SequenceActionCatalog.GetFrameTextureName(onDamage, onDamageForm, 0, 6));
+    AssertEqual("OnDamage_Frame5", SequenceActionCatalog.GetFrameTextureName(onDamage, onDamageForm, 5, 6));
+    AssertEqual("OnDamage_Frame00", SequenceActionCatalog.GetFrameTextureName(onDamage, onDamageForm, 0, 13));
+    AssertEqual("OnDamage_Frame12", SequenceActionCatalog.GetFrameTextureName(onDamage, onDamageForm, 12, 13));
+    AssertEqual("OnDamage_Frame000", SequenceActionCatalog.GetFrameTextureName(onDamage, onDamageForm, 0, 100));
+    AssertEqual("OnDamage_Frame099", SequenceActionCatalog.GetFrameTextureName(onDamage, onDamageForm, 99, 100));
+    AssertEqual("OnDamage_Frame09_Sprite", SequenceActionCatalog.GetFrameSpriteName(onDamage, onDamageForm, 9, 10));
+
+    // 边界：10 张素材是两位数，所以第一张是 00 而不是 0。
+    AssertEqual("00", SequenceActionCatalog.FormatFrameOrdinal(0, 10));
+    AssertEqual("8", SequenceActionCatalog.FormatFrameOrdinal(8, 9));
+    AssertEqual("099", SequenceActionCatalog.FormatFrameOrdinal(99, 100));
+
+    var outOfRange = false;
+    try
+    {
+        SequenceActionCatalog.FormatFrameOrdinal(6, 6);
+    }
+    catch (ArgumentOutOfRangeException)
+    {
+        outOfRange = true;
+    }
+
+    AssertEqual(true, outOfRange);
+
+    var idleShape2 = SequenceActionCatalog.Resolve("Idle02", out var idleForm);
+    AssertEqual("Idle_Shape2", SequenceActionCatalog.GetAnimSequenceName(idleShape2, idleForm));
+    AssertEqual("Idle_Shape2_Frame02", SequenceActionCatalog.GetFrameTextureName(idleShape2, idleForm, 2, 20));
+    AssertEqual("Idle_Shape2_Flipbook", SequenceActionCatalog.GetFlipbookName(idleShape2, idleForm));
+
+    // 生成的名字必须能被自己重新解析，否则复扫时会认不出刚写进去的资产。
+    foreach (var definition in SequenceActionCatalog.Definitions)
+    {
+        foreach (var form in new[] { 1, 2 })
+        {
+            AssertEqual(
+                true,
+                SequenceActionCatalog.TryResolve(
+                    SequenceActionCatalog.GetAnimSequenceName(definition, form),
+                    out var roundTrip,
+                    out var roundTripForm));
+            AssertEqual(definition.Code, roundTrip!.Code);
+            AssertEqual(form, roundTripForm);
+        }
+    }
+}
+
+static void ToolboxSequenceActionCodesResolveThroughCatalog()
+{
+    var skills = new CharacterSkillsData();
+    foreach (var action in SequenceFrameService.BuildActions(skills, formLimit: 3))
+    {
+        if (action.IsCombo)
+        {
+            // 连携技尚未纳入规范动作目录，第五步也还不发布它。
+            AssertEqual(false, SequenceActionCatalog.TryResolve(action.Code, out _, out _));
+            continue;
+        }
+
+        AssertEqual(true, SequenceActionCatalog.TryResolve(action.Code, out var definition, out var formIndex));
+        AssertEqual(action.FormIndex, formIndex);
+        // 工具箱代号写作 Idle / Idle02，规范代号写作 Idle / Idle_Shape2；两者必须指向同一个动作。
+        var expectedToolboxCode = formIndex > 1
+            ? definition!.Code + formIndex.ToString("00")
+            : definition!.Code;
+        AssertEqual(
+            SequenceActionCatalog.NormalizeToken(expectedToolboxCode),
+            SequenceActionCatalog.NormalizeToken(action.Code));
+    }
+}
+
+static void SequenceSyncPlanFieldsAreReadByBridgeScript()
+{
+    var script = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"));
+    // 计划里新增的字段如果没有加进 _load 的归一化列表，Python 只会看到 PascalCase 键，
+    // action.get('camelCase') 会静默取到默认值。
+    foreach (var type in new[] { typeof(UnrealBridgeSequenceSyncAction), typeof(UnrealBridgeSequenceSyncFrame) })
+    {
+        foreach (var property in type.GetProperties())
+        {
+            var camelCase = char.ToLowerInvariant(property.Name[0]) + property.Name[1..];
+            if (!script.Contains("'" + camelCase + "'", StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException($"同步脚本没有读取计划字段 {camelCase}。");
+            }
+        }
+    }
+}
+
+static void SequenceActionLegacyTokensDoNotMatchCharacterName()
+{
+    var ko = SequenceActionCatalog.Resolve("KO", out var koForm);
+    AssertSequence(["ko"], SequenceActionCatalog.GetLegacyNameTokens(ko, koForm).ToArray());
+
+    var onDamage = SequenceActionCatalog.Resolve("OnDamage", out var onDamageForm);
+    AssertSequence(["ondamage", "ondm"], SequenceActionCatalog.GetLegacyNameTokens(onDamage, onDamageForm).ToArray());
+
+    // fly 只用于识别历史 Material/Fly 文件夹；拿去删除会连 FlyStart、FlyDown 的资产一起删掉。
+    var flying = SequenceActionCatalog.Resolve("Flying", out var flyingForm);
+    AssertSequence(["flying"], SequenceActionCatalog.GetLegacyNameTokens(flying, flyingForm).ToArray());
+    AssertEqual(true, flying.Aliases.Contains("fly"));
+    AssertSequence(
+        ["flystart"],
+        SequenceActionCatalog.GetLegacyNameTokens(
+            SequenceActionCatalog.Resolve("FlyStart", out var flyStartForm), flyStartForm).ToArray());
+
+    // 清理必须按资产名分段比较；用整条路径做子串匹配时，
+    // 角色 Origin_Ako 同步 KO 会命中该角色的每一个资产。
+    var script = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"));
+    AssertEqual(true, script.Contains("legacy_tokens & _name_tokens(_asset_name_of(path))", StringComparison.Ordinal));
+    AssertEqual(false, script.Contains("alias in lowered", StringComparison.Ordinal));
+}
+
+static UnrealBridgeSnapshot BuildToolboxSequenceSnapshot(
+    string characterCode,
+    string actionCode,
+    int frameCount)
+{
+    var actionId = SequenceFrameIdentity.BuildActionStableId(actionCode);
+    var items = new List<UnrealBridgeSnapshotItem>
+    {
+        new(actionId,
+            $"module:{UnrealBridgeModule.SequenceFrames}",
+            UnrealBridgeModule.SequenceFrames, actionCode,
+            SequenceFrameIdentity.BuildActionPayload(actionCode, 12),
+            SequenceFrameIdentity.BuildActionPayload(actionCode, 12), string.Empty)
+    };
+    for (var ordinal = 0; ordinal < frameCount; ordinal++)
+    {
+        var payload = "{\"actionCode\":\"" + actionCode + "\",\"durationFrames\":\"1\",\"index\":\"" +
+            (ordinal + 1) + "\",\"isBlank\":\"false\",\"voiceFileName\":\"\"}";
+        items.Add(new UnrealBridgeSnapshotItem(
+            SequenceFrameIdentity.BuildFrameStableId(actionCode, ordinal),
+            actionId,
+            UnrealBridgeModule.SequenceFrames,
+            $"{actionCode} 第 {ordinal + 1} 帧",
+            $"TOOLBOX-{ordinal}",
+            payload,
+            string.Empty));
+    }
+
+    return new UnrealBridgeSnapshot(characterCode, items);
+}
+
+static UnrealBridgeSnapshot BuildUnrealSequenceSnapshot(
+    string characterCode,
+    string unrealActionCode,
+    string[] frameObjectPaths)
+{
+    var separator = ((char)0x1F).ToString();
+    var actionId = SequenceFrameIdentity.BuildActionStableId(unrealActionCode);
+    var items = new List<UnrealBridgeSnapshotItem>
+    {
+        new(actionId, $"module:{UnrealBridgeModule.SequenceFrames}", UnrealBridgeModule.SequenceFrames,
+            unrealActionCode,
+            SequenceFrameIdentity.BuildActionPayload(unrealActionCode, 12),
+            SequenceFrameIdentity.BuildActionPayload(unrealActionCode, 12), string.Empty,
+            $"/Game/GameActor2D/{characterCode}/{characterCode}_AnimMaps.{characterCode}_AnimMaps")
+    };
+    for (var ordinal = 0; ordinal < frameObjectPaths.Length; ordinal++)
+    {
+        items.Add(new UnrealBridgeSnapshotItem(
+            SequenceFrameIdentity.BuildFrameStableId(unrealActionCode, ordinal),
+            actionId,
+            UnrealBridgeModule.SequenceFrames,
+            $"{unrealActionCode} 第 {ordinal + 1} 帧",
+            $"UNREAL-{ordinal}",
+            string.Join(separator, unrealActionCode, "1", (ordinal + 1).ToString(), "False"),
+            string.Empty,
+            frameObjectPaths[ordinal]));
+    }
+
+    return new UnrealBridgeSnapshot(characterCode, items);
+}
+
+static void SequenceSnapshotsAlignAcrossLegacySpellings()
+{
+    // 工具箱代号 OnDamage，Unreal 目录是 Ondm；两侧必须落到同一批稳定 ID。
+    var toolbox = BuildToolboxSequenceSnapshot("Misaka", "OnDamage", 4);
+    var unreal = BuildUnrealSequenceSnapshot("Misaka", "Ondm",
+    [
+        "/Game/GameActor2D/Misaka/Material/OnDM/Origin_Misaka_Ondm_1.Origin_Misaka_Ondm_1",
+        "/Game/GameActor2D/Misaka/Material/OnDM/Origin_Misaka_Ondm_2.Origin_Misaka_Ondm_2",
+        "/Game/GameActor2D/Misaka/Material/OnDM/Origin_Misaka_Ondm_3.Origin_Misaka_Ondm_3",
+        "/Game/GameActor2D/Misaka/Material/OnDM/Origin_Misaka_Ondm_4.Origin_Misaka_Ondm_4"
+    ]);
+
+    AssertSequence(
+        toolbox.Items.Select(item => item.StableId).OrderBy(value => value, StringComparer.Ordinal).ToArray(),
+        unreal.Items.Select(item => item.StableId).OrderBy(value => value, StringComparer.Ordinal).ToArray());
+
+    var changes = new UnrealBridgeDiffService()
+        .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, null)
+        .ToArray();
+
+    // 历史命名的帧要判成改名并拆成旧/新两行，不能判成冲突——冲突在第五步不可执行。
+    var frameRows = changes
+        .Where(change => change.SequenceGroupKey == SequenceFrameIdentity.BuildActionStableId("OnDamage"))
+        .ToArray();
+    frameRows = frameRows.Where(change => SequenceFrameIdentity.IsFrameStableId(change.StableId)).ToArray();
+    AssertEqual(8, frameRows.Length);
+    AssertEqual(4, frameRows.Count(change => change.Kind == UnrealBridgeChangeKind.DeleteCandidate));
+    AssertEqual(4, frameRows.Count(change => change.Kind == UnrealBridgeChangeKind.Added));
+    AssertEqual(0, changes.Count(change => change.Kind == UnrealBridgeChangeKind.Conflict));
+}
+
+static void SequenceFramesAlreadyPublishedCountAsUnchanged()
+{
+    var toolbox = BuildToolboxSequenceSnapshot("Misaka", "Sk1", 13);
+    // 13 帧是两位数，规范贴图名从 Sk1_Frame00 开始。
+    var unreal = BuildUnrealSequenceSnapshot("Misaka", "Sk1",
+        Enumerable.Range(0, 13)
+            .Select(ordinal => $"/Game/GameActor2D/Misaka/Material/Sk1/Sk1_Frame{ordinal:00}.Sk1_Frame{ordinal:00}")
+            .ToArray());
+
+    var changes = new UnrealBridgeDiffService()
+        .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, null)
+        .ToArray();
+
+    AssertEqual(14, changes.Length);
+    AssertEqual(14, changes.Count(change => change.Kind == UnrealBridgeChangeKind.Unchanged));
+
+    // 已同步的帧两侧都在，可以直接迁移成基线；这是第五步能记录同步状态的前提。
+    var baseline = new UnrealBridgeBaselineService().BuildFromChanges(
+        "Misaka",
+        @"C:\Unreal\CrossingVoid.uproject",
+        changes.Where(change => change.ToolboxItem is not null && change.UnrealItem is not null).ToArray());
+    AssertEqual(14, baseline.Entries.Count);
+}
+
+static void SequenceFrameCountChangesProduceAddAndDelete()
+{
+    var toolbox = BuildToolboxSequenceSnapshot("Misaka", "Idle", 8);
+    var unreal = BuildUnrealSequenceSnapshot("Misaka", "Idle",
+        Enumerable.Range(0, 6)
+            .Select(ordinal => $"/Game/GameActor2D/Misaka/Material/Idle/Idle_Frame{ordinal}.Idle_Frame{ordinal}")
+            .ToArray());
+
+    var changes = new UnrealBridgeDiffService()
+        .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, null)
+        .Where(change => SequenceFrameIdentity.IsFrameStableId(change.StableId))
+        .ToArray();
+
+    // 两侧都是个位数宽度，所以前 6 帧命名一致、判为无差异；多出来的两帧是新增。
+    AssertEqual(6, changes.Count(change => change.Kind == UnrealBridgeChangeKind.Unchanged));
+    AssertEqual(2, changes.Count(change => change.Kind == UnrealBridgeChangeKind.Added));
+    AssertEqual(0, changes.Count(change => change.Kind == UnrealBridgeChangeKind.DeleteCandidate));
+}
+
+static void SequenceFrameEditsSeparateUpdateFromConflict()
+{
+    var toolbox = BuildToolboxSequenceSnapshot("Misaka", "Click", 4);
+    var unreal = BuildUnrealSequenceSnapshot("Misaka", "Click",
+        Enumerable.Range(0, 4)
+            .Select(ordinal => $"/Game/GameActor2D/Misaka/Material/Click/Click_Frame{ordinal}.Click_Frame{ordinal}")
+            .ToArray());
+    var baseline = new UnrealBridgeBaselineService().BuildFromChanges(
+        "Misaka",
+        @"C:\Unreal\CrossingVoid.uproject",
+        new UnrealBridgeDiffService()
+            .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, null)
+            .Where(change => change.ToolboxItem is not null && change.UnrealItem is not null)
+            .ToArray());
+
+    var editedFrameId = SequenceFrameIdentity.BuildFrameStableId("Click", 2);
+
+    // 工具箱侧改了第 3 帧：应该是可执行的更新，拆成旧/新两行。
+    var toolboxEdited = toolbox with
+    {
+        Items = toolbox.Items
+            .Select(item => item.StableId == editedFrameId ? item with { ContentHash = "TOOLBOX-EDITED" } : item)
+            .ToArray()
+    };
+    var updated = new UnrealBridgeDiffService()
+        .Compare(toolboxEdited, unreal, UnrealBridgeDirection.PublishToUnreal, baseline)
+        .ToArray();
+    AssertEqual(2, updated.Count(change => change.StableId.StartsWith(editedFrameId, StringComparison.Ordinal)));
+    AssertEqual(0, updated.Count(change => change.Kind == UnrealBridgeChangeKind.Conflict));
+    AssertEqual(
+        true,
+        updated.Any(change =>
+            change.StableId == editedFrameId + ":add" &&
+            UnrealBridgePublishSupportPolicy.CanExecute(change with { ToolboxItem = null }) == false));
+
+    // Unreal 侧被改动：必须判成冲突，交给人处理，不能自动覆盖。
+    var unrealEdited = unreal with
+    {
+        Items = unreal.Items
+            .Select(item => item.StableId == editedFrameId ? item with { ContentHash = "UNREAL-EDITED" } : item)
+            .ToArray()
+    };
+    var conflicted = new UnrealBridgeDiffService()
+        .Compare(toolbox, unrealEdited, UnrealBridgeDirection.PublishToUnreal, baseline)
+        .ToArray();
+    AssertEqual(
+        1,
+        conflicted.Count(change =>
+            change.StableId == editedFrameId + ":delete" &&
+            change.Kind == UnrealBridgeChangeKind.DeleteCandidate));
+    AssertEqual(4, conflicted.Count(change => change.Kind == UnrealBridgeChangeKind.Unchanged));
+}
+
+static void SequenceBaselineCommitsOnlyExecutedActions()
+{
+    var project = @"C:\Unreal\CrossingVoid.uproject";
+    var clickToolbox = BuildToolboxSequenceSnapshot("Misaka", "Click", 4);
+    var clickUnreal = BuildUnrealSequenceSnapshot("Misaka", "Click",
+        Enumerable.Range(0, 4)
+            .Select(ordinal => $"/Game/GameActor2D/Misaka/Material/Click/Click_Frame{ordinal}.Click_Frame{ordinal}")
+            .ToArray());
+    var clickChanges = new UnrealBridgeDiffService()
+        .Compare(clickToolbox, clickUnreal, UnrealBridgeDirection.PublishToUnreal, null)
+        .ToArray();
+
+    var service = new UnrealBridgeBaselineService();
+    var previous = service.BuildFromChanges("Misaka", project, clickChanges);
+    AssertEqual(5, previous.Entries.Count);
+
+    // 这一轮只同步 Idle：Click 的既有基线必须原样保留。
+    var idleToolbox = BuildToolboxSequenceSnapshot("Misaka", "Idle", 8);
+    var idleUnreal = BuildUnrealSequenceSnapshot("Misaka", "Idle",
+        Enumerable.Range(0, 8)
+            .Select(ordinal => $"/Game/GameActor2D/Misaka/Material/Idle/Idle_Frame{ordinal}.Idle_Frame{ordinal}")
+            .ToArray());
+    var idleChanges = new UnrealBridgeDiffService()
+        .Compare(idleToolbox, idleUnreal, UnrealBridgeDirection.PublishToUnreal, previous)
+        .ToArray();
+
+    var merged = service.MergeVerifiedSequenceState(
+        previous,
+        "Misaka",
+        project,
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { SequenceFrameIdentity.BuildActionStableId("Idle") },
+        idleChanges);
+
+    AssertEqual(true, merged.Entries.ContainsKey(SequenceFrameIdentity.BuildFrameStableId("Click", 3)));
+    AssertEqual(true, merged.Entries.ContainsKey(SequenceFrameIdentity.BuildFrameStableId("Idle", 7)));
+    AssertEqual(14, merged.Entries.Count);
+
+    // 再同步一次 Idle，但这次只剩 5 帧：多出来的旧基线条目必须被清掉。
+    var shorterToolbox = BuildToolboxSequenceSnapshot("Misaka", "Idle", 5);
+    var shorterUnreal = BuildUnrealSequenceSnapshot("Misaka", "Idle",
+        Enumerable.Range(0, 5)
+            .Select(ordinal => $"/Game/GameActor2D/Misaka/Material/Idle/Idle_Frame{ordinal}.Idle_Frame{ordinal}")
+            .ToArray());
+    var shrunk = service.MergeVerifiedSequenceState(
+        merged,
+        "Misaka",
+        project,
+        new HashSet<string>(StringComparer.OrdinalIgnoreCase) { SequenceFrameIdentity.BuildActionStableId("Idle") },
+        new UnrealBridgeDiffService()
+            .Compare(shorterToolbox, shorterUnreal, UnrealBridgeDirection.PublishToUnreal, merged)
+            .ToArray());
+
+    AssertEqual(false, shrunk.Entries.ContainsKey(SequenceFrameIdentity.BuildFrameStableId("Idle", 7)));
+    AssertEqual(true, shrunk.Entries.ContainsKey(SequenceFrameIdentity.BuildFrameStableId("Idle", 4)));
+    AssertEqual(true, shrunk.Entries.ContainsKey(SequenceFrameIdentity.BuildFrameStableId("Click", 3)));
+    AssertEqual(UnrealBridgeSyncState.SourceFileHashScheme, shrunk.HashScheme);
+}
+
+static UnrealBridgeSnapshot AppendOwnedSequenceAssets(
+    UnrealBridgeSnapshot snapshot,
+    string unrealActionCode,
+    string[] ownedObjectPaths)
+{
+    var separator = ((char)0x1F).ToString();
+    var actionId = SequenceFrameIdentity.BuildActionStableId(unrealActionCode);
+    var items = snapshot.Items.ToList();
+    foreach (var objectPath in ownedObjectPaths)
+    {
+        var package = objectPath.Split('.', 2)[0];
+        var assetName = package[(package.LastIndexOf('/') + 1)..];
+        items.Add(new UnrealBridgeSnapshotItem(
+            SequenceFrameIdentity.BuildOwnedAssetStableId(unrealActionCode, objectPath),
+            actionId,
+            UnrealBridgeModule.SequenceFrames,
+            $"{unrealActionCode} · {assetName}",
+            $"OWNED-{assetName}",
+            string.Join(separator, unrealActionCode, "1", assetName, "Texture2D"),
+            string.Empty,
+            objectPath,
+            string.Empty,
+            string.Empty,
+            assetName));
+    }
+
+    return snapshot with { Items = items.ToArray() };
+}
+
+static void StaleSequenceAssetsBecomeDeleteCandidates()
+{
+    // 复刻 Misaka/Material/Sk1 的真实现场：13 帧规范资产 + 早期同步留下的旧命名 + 断了引用的旧 Sprite。
+    var toolbox = BuildToolboxSequenceSnapshot("Misaka", "Sk1", 13);
+    const string material = "/Game/GameActor2D/Misaka/Material/Sk1";
+    var canonical = Enumerable.Range(0, 13)
+        .SelectMany(ordinal => new[]
+        {
+            $"{material}/Sk1_Frame{ordinal:00}.Sk1_Frame{ordinal:00}",
+            $"{material}/Sk1_Frame{ordinal:00}_Sprite.Sk1_Frame{ordinal:00}_Sprite"
+        })
+        .Append($"{material}/Sk1_Flipbook.Sk1_Flipbook")
+        .Append("/Game/GameActor2D/Misaka/AnimSequences/Sk1.Sk1")
+        .ToArray();
+    var stale = Enumerable.Range(6, 8)
+        .Select(index => $"{material}/Origin_Misaka_Sk1_{index}_Sprite.Origin_Misaka_Sk1_{index}_Sprite")
+        // 早期实验用的一位起始三位编号，以及那时放在 Material 目录里、与序列同名的旧 Flipbook。
+        .Append($"{material}/Sk1_Frame001.Sk1_Frame001")
+        .Append($"{material}/Sk1.Sk1")
+        .ToArray();
+
+    var unreal = AppendOwnedSequenceAssets(
+        BuildUnrealSequenceSnapshot("Misaka", "Sk1",
+            Enumerable.Range(0, 13)
+                .Select(ordinal => $"{material}/Sk1_Frame{ordinal:00}.Sk1_Frame{ordinal:00}")
+                .ToArray()),
+        "Sk1",
+        canonical.Concat(stale).ToArray());
+
+    var changes = new UnrealBridgeDiffService()
+        .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, null)
+        .ToArray();
+
+    var deletes = changes
+        .Where(change => SequenceFrameIdentity.IsOwnedAssetStableId(change.StableId))
+        .ToArray();
+    AssertEqual(stale.Length, deletes.Length);
+    AssertEqual(stale.Length, deletes.Count(change => change.Kind == UnrealBridgeChangeKind.DeleteCandidate));
+    AssertEqual(true, deletes.All(change => UnrealBridgePublishSupportPolicy.CanExecute(change)));
+
+    // Material 目录里那个和 AnimSequences 序列同名的旧 Flipbook 必须被当成待删除，
+    // 只按资产名比较会把它误判成规范序列。
+    AssertEqual(
+        true,
+        deletes.Any(change => string.Equals(
+            change.UnrealItem!.SourceObjectPath,
+            $"{material}/Sk1.Sk1",
+            StringComparison.Ordinal)));
+
+    // 全部归到同一个动作分组，选择树里才会挂在「一技能」下面。
+    var group = SequenceFrameIdentity.BuildActionStableId("Sk1");
+    AssertEqual(true, deletes.All(change => change.SequenceGroupKey == group));
+
+    var roots = UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
+        changes,
+        UnrealBridgePublishSupportPolicy.CanExecute);
+    var sk1 = roots.Single(item => item.StableId == group);
+    AssertEqual(stale.Length, sk1.DeleteCount);
+    AssertEqual(0, sk1.AddCount);
+}
+
+
+
+
+static void SequenceGroupTitleSurvivesCacheRestore()
+{
+    var toolbox = BuildToolboxSequenceSnapshot("Misaka", "Sk1", 13);
+    const string material = "/Game/GameActor2D/Misaka/Material/Sk1";
+    var unreal = AppendOwnedSequenceAssets(
+        BuildUnrealSequenceSnapshot("Misaka", "Sk1",
+            Enumerable.Range(0, 13)
+                .Select(ordinal => $"{material}/Sk1_Frame{ordinal:00}.Sk1_Frame{ordinal:00}")
+                .ToArray()),
+        "Sk1",
+        [$"{material}/Origin_Misaka_Sk1_6_Sprite.Origin_Misaka_Sk1_6_Sprite"]);
+    var changes = new UnrealBridgeDiffService()
+        .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, null)
+        // 复现 FilterCachedPublishChanges：恢复缓存时 Unchanged 的动作节点会被过滤掉。
+        .Where(change => change.Kind != UnrealBridgeChangeKind.Unchanged)
+        .ToArray();
+    AssertEqual(false, changes.Any(change => SequenceFrameIdentity.IsActionStableId(change.StableId)));
+
+    var roots = UnrealSyncSelectionTreeBuilder.FromSequenceChanges(changes, UnrealBridgePublishSupportPolicy.CanExecute);
+    var sk1 = roots.Single(item => item.StableId == SequenceFrameIdentity.BuildActionStableId("Sk1"));
+    AssertEqual("一技能", sk1.DisplayName);
+    AssertEqual(1, sk1.DeleteCount);
+}
+
+static void PublishChangeComparisonIgnoresUnchangedSubset()
+{
+    // 复现同步前那次比较：检测时 _lastPublishChanges 是完整差异集（含 Unchanged），
+    // 但 ReturnToWorkflowStep 会用会话缓存把它换成"去掉 Unchanged"的子集。
+    // 两侧口径不一致时，比较会因为元素个数不同恒判"内容已变化"，同步永远走不下去。
+    var toolbox = BuildToolboxSequenceSnapshot("Misaka", "Sk1", 4);
+    var unreal = BuildUnrealSequenceSnapshot("Misaka", "Sk1",
+        Enumerable.Range(0, 4)
+            .Select(ordinal => $"/Game/GameActor2D/Misaka/Material/Sk1/Sk1_Frame{ordinal}.Sk1_Frame{ordinal}")
+            .ToArray());
+    var full = new UnrealBridgeDiffService()
+        .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, null)
+        .ToArray();
+    AssertEqual(true, full.Any(change => change.Kind == UnrealBridgeChangeKind.Unchanged));
+
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    // WorkflowStep 只读；FilterPublishChanges 同样认 ZdAnimationTracks 这个阶段。
+    viewModel.SelectedPublishStage = viewModel.PublishStages
+        .First(stage => stage.Stage == UnrealBridgePublishStage.ZdAnimationTracks);
+
+    // 缓存恢复路径写入的是过滤后的子集。
+    var cachedSubset = full.Where(change => change.Kind != UnrealBridgeChangeKind.Unchanged).ToArray();
+    AssertEqual(false, cachedSubset.Length == full.Length);
+    viewModel.SetPublishSelectionTree(
+        UnrealSyncSelectionTreeBuilder.FromSequenceChanges(cachedSubset, UnrealBridgePublishSupportPolicy.CanExecute),
+        cachedSubset);
+
+    // 同步前重新检测得到的是完整集合；内容其实没变，必须判为一致。
+    AssertEqual(true, viewModel.MatchesCurrentPublishChanges(full));
+
+    // 内容真的变了仍然要判为不一致。
+    var editedFrameId = SequenceFrameIdentity.BuildFrameStableId("Sk1", 2);
+    var edited = full
+        .Select(change => change.StableId == editedFrameId
+            ? change with { Kind = UnrealBridgeChangeKind.Added, UnrealItem = null }
+            : change)
+        .ToArray();
+    AssertEqual(false, viewModel.MatchesCurrentPublishChanges(edited));
+}
+
+static void MigrationBaselineDoesNotFlipSequenceKinds()
+{
+    // 检测时用 baseline=null 算差异，算完才写迁移基线；同步时会加载这份基线再算一次。
+    // 如果两次的 Kind 不同，同步前的一致性校验就会误判"内容已变化"。
+    var toolbox = BuildToolboxSequenceSnapshot("Misaka", "Sk1", 6);
+    const string material = "/Game/GameActor2D/Misaka/Material/Sk1";
+    var unreal = AppendOwnedSequenceAssets(
+        BuildUnrealSequenceSnapshot("Misaka", "Sk1",
+        [
+            // 前四帧已是规范命名，后两帧还是历史命名（会判成改名）。
+            $"{material}/Sk1_Frame0.Sk1_Frame0",
+            $"{material}/Sk1_Frame1.Sk1_Frame1",
+            $"{material}/Sk1_Frame2.Sk1_Frame2",
+            $"{material}/Sk1_Frame3.Sk1_Frame3",
+            $"{material}/Origin_Misaka_Sk1_5.Origin_Misaka_Sk1_5",
+            $"{material}/Origin_Misaka_Sk1_6.Origin_Misaka_Sk1_6"
+        ]),
+        "Sk1",
+        [$"{material}/Origin_Misaka_Sk1_6_Sprite.Origin_Misaka_Sk1_6_Sprite"]);
+
+    var service = new UnrealBridgeDiffService();
+    var first = service.Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, null).ToArray();
+    var migrated = new UnrealBridgeBaselineService().BuildFromChanges(
+        "Misaka",
+        @"C:\Unreal\CrossingVoid.uproject",
+        first.Where(change => change.ToolboxItem is not null && change.UnrealItem is not null).ToArray());
+    AssertEqual(true, migrated.Entries.Count > 0);
+
+    var second = service.Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, migrated).ToArray();
+    AssertSequence(
+        first.Select(change => $"{change.StableId}={change.Kind}")
+            .OrderBy(value => value, StringComparer.Ordinal).ToArray(),
+        second.Select(change => $"{change.StableId}={change.Kind}")
+            .OrderBy(value => value, StringComparer.Ordinal).ToArray());
+}
+
+static (CharacterCard Character, string Root) CreateSequenceCharacterWithFrames(string actionCode, int frameCount)
+{
+    var root = CreateTemporaryTestFolder();
+    var character = CreateCharacter(root, "Misaka", "御坂美琴");
+    Directory.CreateDirectory(character.ToolFolderPath);
+    var service = new SequenceFrameService();
+    var action = SequenceFrameService.BuildActions(new CharacterSkillsData())
+        .First(item => string.Equals(item.Code, actionCode, StringComparison.OrdinalIgnoreCase));
+    var sources = new List<string>();
+    for (var index = 0; index < frameCount; index++)
+    {
+        var path = Path.Combine(root, $"frame{index}.png");
+        WriteSolidImage(path, Color.FromArgb(10 + index * 5, 20, 30),
+            SequenceFrameService.RequiredWidth, SequenceFrameService.RequiredHeight);
+        sources.Add(path);
+    }
+
+    if (sources.Count > 0)
+    {
+        service.ImportFrames(character, action, sources);
+    }
+
+    return (character, root);
+}
+
+static UnrealBridgeChange CreateSequenceDeleteChange(string actionCode, string objectPath)
+{
+    var separator = ((char)0x1F).ToString();
+    var assetName = objectPath.Split('.', 2)[0][(objectPath.LastIndexOf('/') + 1)..];
+    var unrealItem = new UnrealBridgeSnapshotItem(
+        SequenceFrameIdentity.BuildOwnedAssetStableId(actionCode, objectPath),
+        SequenceFrameIdentity.BuildActionStableId(actionCode),
+        UnrealBridgeModule.SequenceFrames,
+        $"{actionCode} · {assetName}",
+        $"HASH-{assetName}",
+        string.Join(separator, actionCode, "1", assetName, "Texture2D"),
+        string.Empty,
+        objectPath,
+        string.Empty,
+        string.Empty,
+        assetName);
+    return new UnrealBridgeChange(
+        unrealItem.StableId,
+        UnrealBridgeModule.SequenceFrames,
+        unrealItem.DisplayName,
+        UnrealBridgeChangeKind.DeleteCandidate,
+        null,
+        unrealItem,
+        true,
+        SequenceFrameIdentity.BuildActionStableId(actionCode));
+}
+
+static void SequencePlanCarriesSelectedStaleAssetPaths()
+{
+    var (character, root) = CreateSequenceCharacterWithFrames("Click", 3);
+    try
+    {
+        // 用户勾选的待删资产必须原样进入计划：Python 端按资产名 token 猜测，
+        // 既漏删（历史命名不含动作 token）也误删（规范目录里没勾的资产）。
+        const string material = "/Game/GameActor2D/Misaka/Material/Click";
+        var selected = new[]
+        {
+            CreateSequenceDeleteChange("Click", $"{material}/Origin_Misaka_Click_1.Origin_Misaka_Click_1"),
+            CreateSequenceDeleteChange("Click", $"{material}/Frame_01.Frame_01")
+        };
+
+        var plan = new UnrealBridgeSequencePublishService()
+            .BuildSequenceSyncPlan(character, @"C:\Unreal\CrossingVoid.uproject", selected);
+        var action = plan.Actions.Single();
+        AssertEqual(true, action.HasStaleAssetSelection);
+        AssertSequence(
+            selected.Select(change => change.UnrealItem!.SourceObjectPath).OrderBy(v => v, StringComparer.Ordinal).ToArray(),
+            action.StaleAssetObjectPaths.OrderBy(v => v, StringComparer.Ordinal).ToArray());
+
+        // Frame_01 的资产名里不含 "click"，token 猜测永远删不掉它。
+        AssertEqual(false, SequenceActionCatalog
+            .GetLegacyNameTokens(SequenceActionCatalog.Resolve("Click", out var form), form)
+            .Any(token => "frame01".Contains(token, StringComparison.Ordinal)));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SequencePlanSkipsActionsWithoutFrames()
+{
+    // Click 有帧、Death 没有帧：以前 Death 会让整批同步抛异常失败。
+    var (character, root) = CreateSequenceCharacterWithFrames("Click", 2);
+    try
+    {
+        var selected = new[]
+        {
+            CreateSequenceDeleteChange("Click", "/Game/GameActor2D/Misaka/Material/Click/Old.Old"),
+            CreateSequenceDeleteChange("Death", "/Game/GameActor2D/Misaka/Material/Death/Old.Old")
+        };
+
+        var service = new UnrealBridgeSequencePublishService();
+        var plan = service.BuildSequenceSyncPlan(character, @"C:\Unreal\CrossingVoid.uproject", selected);
+        AssertEqual("Click", plan.Actions.Single().ActionCode);
+        AssertSequence(["Death"], service.SkippedActionCodes.ToArray());
+
+        // 全部动作都没有帧时才应该报错。
+        var onlyEmpty = new[]
+        {
+            CreateSequenceDeleteChange("Death", "/Game/GameActor2D/Misaka/Material/Death/Old.Old")
+        };
+        var threw = false;
+        try
+        {
+            new UnrealBridgeSequencePublishService()
+                .BuildSequenceSyncPlan(character, @"C:\Unreal\CrossingVoid.uproject", onlyEmpty);
+        }
+        catch (InvalidOperationException)
+        {
+            threw = true;
+        }
+
+        AssertEqual(true, threw);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SequenceBaselineSkipsFailedActions()
+{
+    // 中途失败时，只有成功的动作可以刷新基线；失败动作保留执行前的条目。
+    var project = @"C:\Unreal\CrossingVoid.uproject";
+    var service = new UnrealBridgeBaselineService();
+    var previous = new UnrealBridgeSyncState
+    {
+        HashScheme = UnrealBridgeSyncState.SourceFileHashScheme,
+        CharacterCode = "Misaka",
+        UnrealProjectPath = project
+    };
+    previous.Entries[SequenceFrameIdentity.BuildFrameStableId("Sk1", 0)] =
+        new UnrealBridgeSyncStateEntry("OLD-TOOLBOX", "OLD-UNREAL", "/Game/old.old", string.Empty, string.Empty, string.Empty);
+    previous.Entries[SequenceFrameIdentity.BuildFrameStableId("Sk2", 0)] =
+        new UnrealBridgeSyncStateEntry("KEEP-TOOLBOX", "KEEP-UNREAL", "/Game/keep.keep", string.Empty, string.Empty, string.Empty);
+
+    // 只有 Sk1 执行成功。
+    var executed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+    {
+        SequenceFrameIdentity.BuildActionStableId("Sk1")
+    };
+    var merged = service.MergeVerifiedSequenceState(previous, "Misaka", project, executed, []);
+    AssertEqual(false, merged.Entries.ContainsKey(SequenceFrameIdentity.BuildFrameStableId("Sk1", 0)));
+    AssertEqual(true, merged.Entries.ContainsKey(SequenceFrameIdentity.BuildFrameStableId("Sk2", 0)));
+
+    // 复扫比较用的基线要剔除已执行动作，否则刚同步好的帧会被判成冲突。
+    var rescanBaseline = service.WithoutActions(previous, executed)!;
+    AssertEqual(false, rescanBaseline.Entries.ContainsKey(SequenceFrameIdentity.BuildFrameStableId("Sk1", 0)));
+    AssertEqual(true, rescanBaseline.Entries.ContainsKey(SequenceFrameIdentity.BuildFrameStableId("Sk2", 0)));
+    AssertEqual(2, previous.Entries.Count);
+}
+
+static void OnlineExecutionOnlyMatchesSelectedProject()
+{
+    var engine = @"F:\UnrealEngine\UE_Moon\Engine\Binaries\Win64\UnrealEditor.exe";
+    var service = new UnrealPythonTaskExecutionService();
+
+    // 没有任何编辑器打开这个项目时必须走离线，而不是选了在线再连接失败。
+    var missingProject = Path.Combine(Path.GetTempPath(), "ZDNoSuchProject", "ZDNoSuchProject.uproject");
+    AssertEqual(false, service.ShouldUseRunningEditor(engine, missingProject));
+
+    // 路径为空时同样退回离线，不能因为「有 UnrealEditor 进程」就当作可用。
+    AssertEqual(false, service.ShouldUseRunningEditor(engine, string.Empty));
+    AssertEqual(false, service.ShouldUseRunningEditor(null, null));
+
+    // 走离线时 BuildLaunch 必须原样返回离线启动信息。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var scriptPath = Path.Combine(root, "job.py");
+        File.WriteAllText(scriptPath, "# noop");
+        var offline = new System.Diagnostics.ProcessStartInfo { FileName = "UnrealEditor-Cmd.exe" };
+        var launch = service.BuildLaunch(
+            engine,
+            missingProject,
+            scriptPath,
+            Path.Combine(root, "job.remote.json"),
+            offline);
+        AssertEqual(false, launch.UsesRunningEditor);
+        AssertEqual(true, ReferenceEquals(offline, launch.StartInfo));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SessionCacheFlushDoesNotDeadlockUiThread()
+{
+    // 复现真实卡死：防抖保存的续体要回到 UI 线程，而 UI 线程正同步等同一个信号量。
+    // 用单线程同步上下文模拟 UI 线程；死锁时这里会超时失败而不是永久挂起。
+    var context = new SingleThreadTestSynchronizationContext();
+    var previous = SynchronizationContext.Current;
+    SynchronizationContext.SetSynchronizationContext(context);
+    try
+    {
+        var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        viewModel.SelectedPublishStage = viewModel.PublishStages
+            .First(stage => stage.Stage == UnrealBridgePublishStage.ZdAnimationTracks);
+
+        var completed = new ManualResetEventSlim(false);
+        // 反复触发「保存 → 立刻同步落盘」，正是检测流程里的真实节奏。
+        var worker = new Thread(() =>
+        {
+            context.Send(_ =>
+            {
+                for (var round = 0; round < 20; round++)
+                {
+                    viewModel.SaveSelectionStateToSessionCache();
+                }
+            }, null);
+            completed.Set();
+        });
+        worker.IsBackground = true;
+        worker.Start();
+
+        // 同时把排队到「UI 线程」的续体抽干，模拟消息循环。
+        var deadline = DateTime.UtcNow.AddSeconds(20);
+        while (!completed.IsSet && DateTime.UtcNow < deadline)
+        {
+            context.DrainPending();
+            Thread.Sleep(10);
+        }
+
+        AssertEqual(true, completed.IsSet);
+    }
+    finally
+    {
+        SynchronizationContext.SetSynchronizationContext(previous);
+        context.Dispose();
+    }
+}
+
+static void BulkSelectionRestoreRecomputesOnce()
+{
+    // 恢复勾选时每个叶子都会 OnPropertyChanged(IsChecked)。以前这会逐个触发
+    // 「全量汇总 + 全量过滤 + 克隆全部变更去建缓存」，上千个叶子就是 O(n^2) 次克隆：
+    // 实测把进程顶到 5GB、UI 线程 100% 空转十几分钟，看起来就像死锁。
+    const int actionCount = 12;
+    const int framesPerAction = 60;
+    var changes = new List<UnrealBridgeChange>();
+    for (var actionIndex = 0; actionIndex < actionCount; actionIndex++)
+    {
+        var actionCode = SequenceActionCatalog.Definitions[actionIndex].Code;
+        changes.Add(new UnrealBridgeChange(
+            SequenceFrameIdentity.BuildActionStableId(actionCode),
+            UnrealBridgeModule.SequenceFrames,
+            actionCode,
+            UnrealBridgeChangeKind.Unchanged,
+            null,
+            null,
+            false,
+            SequenceFrameIdentity.BuildActionStableId(actionCode)));
+        for (var frame = 0; frame < framesPerAction; frame++)
+        {
+            changes.Add(CreateSequenceDeleteChange(
+                actionCode,
+                "/Game/GameActor2D/Misaka/Material/" + actionCode + "/F" + frame + ".F" + frame));
+        }
+    }
+
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    var roots = UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
+        changes,
+        UnrealBridgePublishSupportPolicy.CanExecute,
+        selectPendingByDefault: false);
+    viewModel.SetPublishSelectionTree(roots, changes);
+
+    var leafIds = viewModel.SelectionTreeRoots
+        .SelectMany(root => root.Children)
+        .Select(child => child.StableId)
+        .ToHashSet(StringComparer.OrdinalIgnoreCase);
+    AssertEqual(actionCount * framesPerAction, leafIds.Count);
+
+    // ApplyPublishFilter 每次都给 VisibleChildren 赋一个新数组，
+    // 所以这个计数恰好等于「重算跑了几趟」。
+    var recomputeCounter = new int[1];
+    foreach (var root in viewModel.SelectionTreeRoots)
+    {
+        root.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(UnrealSyncSelectionTreeItem.VisibleChildren))
+            {
+                recomputeCounter[0]++;
+            }
+        };
+    }
+
+    viewModel.RestoreSelectionState(leafIds);
+
+    // 收尾统一重算一次，每个根被赋一次 VisibleChildren。
+    // 修复前是 720 个叶子各触发一轮全量过滤 = 720 x 12 = 8640。
+    AssertEqual(viewModel.SelectionTreeRoots.Count, recomputeCounter[0]);
+
+    // 压制通知不能把勾选本身也压没了。
+    AssertEqual(leafIds.Count, viewModel.GetSelectedStableIds().Count);
+}
+
+
+static void AssetClassNeverCarriesPointerIntoHash()
+{
+    // Unreal 的 asset_class_path 是 TopLevelAssetPath 结构体，str() 出来带对象内存地址，
+    // 每次导出都不一样。它会进 ownedAssets 的 payload 参与内容哈希，于是同一个资产
+    // 每次检测都被判成「有变化」：同步前的最终比对永远通不过，点了同步什么也不会发生，
+    // 差异列表还原封不动留在那。实测一次导出里有 873 个这样的值。
+    const string first =
+        "<Struct 'TopLevelAssetPath' (0x000001C0DE94853C) {package_name: \"/Script/Paper2D\", asset_name: \"PaperSprite\"}>";
+    const string second =
+        "<Struct 'TopLevelAssetPath' (0x000002FA11223344) {package_name: \"/Script/Paper2D\", asset_name: \"PaperSprite\"}>";
+
+    // 同一个资产、两次导出，归一后必须完全一致。
+    AssertEqual("PaperSprite", SequenceFrameIdentity.NormalizeAssetClass(first));
+    AssertEqual("PaperSprite", SequenceFrameIdentity.NormalizeAssetClass(second));
+
+    // 干净的类名原样保留，空值不炸。
+    AssertEqual("Texture2D", SequenceFrameIdentity.NormalizeAssetClass("Texture2D"));
+    AssertEqual(string.Empty, SequenceFrameIdentity.NormalizeAssetClass(null));
+    AssertEqual(string.Empty, SequenceFrameIdentity.NormalizeAssetClass("   "));
+
+    // 认不出 asset_name 时至少要把地址剥掉，绝不能让指针进哈希。
+    AssertEqual(false, SequenceFrameIdentity.NormalizeAssetClass("<Struct 'X' (0xDEADBEEF) {}>").Contains("0x"));
+
+    // 导出脚本本身也不能再直接 str() 那个结构体。
+    var exportScript = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "Unreal", "export_zd_assets.py"), Encoding.UTF8);
+    AssertEqual(true, exportScript.Contains("_stable_class_text"));
+    AssertEqual(true, exportScript.Contains("asset_name"));
+}
+
+static void ExportedFrameListIsOneEntryPerKeyframe()
+{
+    // 一个关键帧就是一帧素材，frame_run 只表示它停留多久。
+    // 以前导出侧按 frame_run 把关键帧复制成多份：Misaka 的一技能 13 帧里
+    // 有一帧时长 2、一帧时长 3，导出就变成 16 项，而工具箱侧一帧一项永远是 13。
+    // 两边条数对不上，多出来的 3 项每次检测都是处理不掉的差异。
+    var script = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "Unreal", "export_zd_assets.py"), Encoding.UTF8);
+
+    // 不能再按 frame_run 复制关键帧。
+    AssertEqual(false, script.Contains("for _ in range(frame_run)"));
+    // 时长要作为字段带出来，而不是靠重复条数表达。
+    AssertEqual(true, script.Contains("durationFrames"));
+    // 播放总长另算：声音通知定位仍然要展开后的帧数。
+    AssertEqual(true, script.Contains("playback_frame_count"));
+
+    // 桥接脚本删除后必须以「资产真的不在了」为准，不能只信返回值。
+    // 删除整体交给 ZDBridge.PurgeAssets：脚本这一侧做不可靠。
+    // delete_asset 只要有引用方就拒删；ForceDeleteObjects 只置空硬引用，
+    // 而图集是用 TSoftObjectPtr 挂着 Sprite 的，强删够不着；
+    // Python 更问不出「引用是硬是软」——find_package_referencers 不返回依赖种类。
+    var syncScript = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
+    AssertEqual(true, syncScript.Contains("purge_assets"));
+    // 插件缺席时退回普通删除并如实汇报，不能整批失败。
+    AssertEqual(true, syncScript.Contains("PurgeAssets unavailable"));
+    // 删不掉时要报出还拽着它的引用方，并区分硬/软。
+    AssertEqual(true, syncScript.Contains("hard="));
+    AssertEqual(true, syncScript.Contains("soft="));
+
+    // 这些实现已经搬进 C++，脚本里不该再留自己那一套。
+    foreach (var removed in new[]
+             {
+                 "_try_delete_asset", "_clear_references_to", "_detach_reference",
+                 "_zd_force_delete", "_deletion_rank", "collect_garbage",
+             })
+    {
+        AssertEqual(false, syncScript.Contains(removed));
+    }
+
+    // C++ 侧必须真正做到这几件脚本做不到的事。
+    var bridge = File.ReadAllText(
+        @"I:\UnrealProject_Moon\SRC_REPO\CrossingVoid\Plugins\ZDBridge\Source\ZDBridge\Private\ZDBridgeLibrary.cpp",
+        Encoding.UTF8);
+    AssertEqual(true, bridge.Contains("UZDBridgeLibrary::PurgeAssets"));
+    // 区分硬/软引用，这是 Python 问不出来的。
+    AssertEqual(true, bridge.Contains("EDependencyQuery::Hard"));
+    AssertEqual(true, bridge.Contains("EDependencyQuery::Soft"));
+    // 复核靠 FindObject + DoesPackageExist，不信任何返回值。
+    AssertEqual(true, bridge.Contains("PurgeAssetIsGone"));
+    // ForceDeleteObjects 一遍删不干净：实测 8 个只删掉 7 个，重试一次才成功。
+    AssertEqual(true, bridge.Contains("MaxPasses"));
+    // AST_GameActor2D 是目录级的 PrimaryAssetLabel，不是 Sprite Atlas，
+    // 没有槽位可摘；那段基于错误假设的代码不该再回来。
+    AssertEqual(false, bridge.Contains("PaperSpriteAtlas"));
+}
+
+static void SyncProgressBandsCoverEveryPhase()
+{
+    // 以前进度是写死的：导出完直接跳 40，桥接 58，复扫 86，
+    // 而两次 Unreal 导出根本没接进度回调 —— 一次同步里有两段各十几秒的纯静默。
+    var plan = WorkflowProgressPlan.ForSequenceSync(includesBackup: false);
+    var preflight = plan[WorkflowProgressPlan.PreflightExport];
+    var bridge = plan[WorkflowProgressPlan.BridgeExecute];
+    var rescan = plan[WorkflowProgressPlan.RescanExport];
+
+    // 从 0 开始、首尾相接、不留空洞。
+    AssertEqual(0d, preflight.Start);
+    AssertEqual(true, Math.Abs(preflight.End - bridge.Start) < 0.001);
+    AssertEqual(true, Math.Abs(bridge.End - rescan.Start) < 0.001);
+    // 收尾留 2%，复扫结束时不该已经顶到 100。
+    AssertEqual(true, rescan.End > 95d && rescan.End < 100d);
+
+    // 权重按实测耗时（15s / 13s / 15s）分配：导出两段应当比桥接长。
+    AssertEqual(true, preflight.End - preflight.Start > bridge.End - bridge.Start);
+    AssertEqual(true, Math.Abs((preflight.End - preflight.Start) - (rescan.End - rescan.Start)) < 0.001);
+
+    // 子进度映射到区间内部，且被夹住。
+    AssertEqual(preflight.Start, preflight.At(0));
+    AssertEqual(preflight.End, preflight.At(100));
+    AssertEqual(preflight.End, preflight.At(140));
+    AssertEqual(preflight.Start, preflight.At(-20));
+
+    // 开了备份时它会占掉大半条 —— 实测约 66 秒，确实是最长的一段。
+    var withBackup = WorkflowProgressPlan.ForSequenceSync(includesBackup: true);
+    var backup = withBackup[WorkflowProgressPlan.Backup];
+    AssertEqual(true, backup.End - backup.Start > 50d);
+    AssertEqual(true, Math.Abs(withBackup[WorkflowProgressPlan.PreflightExport].End - backup.Start) < 0.001);
+    AssertEqual(true, Math.Abs(backup.End - withBackup[WorkflowProgressPlan.BridgeExecute].Start) < 0.001);
+
+    // 未知阶段名不能抛异常，退化成一整条即可。
+    AssertEqual(0d, plan["nope"].Start);
+}
+
+static void ExportSkipsUnchangedPngFiles()
+{
+    // 一次同步要跑三趟 Unreal 导出，每趟都把同一批贴图重写一遍 PNG，
+    // 而且 AssetExportTask.replace_identical 还是 True（内容相同也照写）。
+    var script = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "Unreal", "export_zd_assets.py"), Encoding.UTF8);
+    AssertEqual(true, script.Contains("_png_is_up_to_date"));
+    AssertEqual(true, script.Contains("_package_file_path"));
+    // 必须在建导出任务之前就短路掉，否则省不下时间。
+    var guardIndex = script.IndexOf("if _png_is_up_to_date(output_path", StringComparison.Ordinal);
+    var taskIndex = script.IndexOf("task = unreal.AssetExportTask()", StringComparison.Ordinal);
+    AssertEqual(true, guardIndex > 0 && taskIndex > guardIndex);
+}
+
+sealed class SingleThreadTestSynchronizationContext : SynchronizationContext, IDisposable
+{
+    private readonly System.Collections.Concurrent.BlockingCollection<(SendOrPostCallback Callback, object? State)> _queue = [];
+
+    public override void Post(SendOrPostCallback d, object? state)
+    {
+        if (!_queue.IsAddingCompleted)
+        {
+            _queue.Add((d, state));
+        }
+    }
+
+    public override void Send(SendOrPostCallback d, object? state) => d(state);
+
+    /// <summary>把已排队的续体全部执行掉，模拟 UI 消息循环。</summary>
+    public void DrainPending()
+    {
+        while (_queue.TryTake(out var item))
+        {
+            item.Callback(item.State);
+        }
+    }
+
+    public void Dispose()
+    {
+        _queue.CompleteAdding();
+        _queue.Dispose();
     }
 }

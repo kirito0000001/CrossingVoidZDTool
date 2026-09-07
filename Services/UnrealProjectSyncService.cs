@@ -139,10 +139,7 @@ internal sealed class UnrealProjectSyncService
             ? string.Empty
             : GetExportScriptPath();
         var exportScriptExists = File.Exists(exportScriptPath);
-        var exportManifestPath = string.IsNullOrWhiteSpace(exportDirectoryPath)
-            ? string.Empty
-            : Path.Combine(exportDirectoryPath, ExportManifestFileName);
-        var exportManifest = LoadExportManifest(exportManifestPath);
+        var (exportManifestPath, exportManifest) = ResolveExportManifest(exportDirectoryPath);
         var exportManifestExists = exportManifest is not null;
         items.Add(new UnrealProjectSyncCheckItem(
             "工具箱导出脚本",
@@ -248,8 +245,9 @@ internal sealed class UnrealProjectSyncService
         var soundRootPath = Path.Combine(actorRootPath, "Sound");
         var soundObjectPath = $"{actorObjectPath}/Sound";
         var itemObjectPath = $"{TargetCharacterItemContentPath}/Item_{characterCode}.Item_{characterCode}";
+        // 同样要走合并解析：分步导出不写 characters.json，只读它会拿不到资产类型。
         var manifest = requireAssetTypes
-            ? LoadExportManifest(Path.Combine(GetExportDirectoryPath(projectPath), ExportManifestFileName))
+            ? ResolveExportManifest(GetExportDirectoryPath(projectPath)).Manifest
             : null;
         var checks = new List<UnrealPublishFoundationCheckItem>
         {
@@ -625,7 +623,7 @@ internal sealed class UnrealProjectSyncService
         var manifestPath = Path.Combine(GetExportDirectoryPath(normalizedProjectPath), GetExportManifestFileName(scope));
         var progressPath = GetExportProgressPath(manifestPath);
         var taskExecutionService = new UnrealPythonTaskExecutionService();
-        var useRunningEditor = taskExecutionService.ShouldUseRunningEditor();
+        var useRunningEditor = taskExecutionService.ShouldUseRunningEditor(enginePath, normalizedProjectPath);
         var offlineStartInfo = BuildExportProcessStartInfo(
             enginePath,
             projectPath,
@@ -824,6 +822,58 @@ internal sealed class UnrealProjectSyncService
         return Path.Combine(
             contentPath,
             packagePath.Replace('/', Path.DirectorySeparatorChar) + ".uasset");
+    }
+
+    /// <summary>分步导出会各自写一个清单文件，完整导出才写 characters.json。</summary>
+    private static readonly string[] ExportManifestFileNames =
+    [
+        ExportManifestFileName,
+        SequenceExportManifestFileName,
+        "characters-materials.json",
+        "characters-normalization.json"
+    ];
+
+    /// <summary>
+    /// 解析导出目录里可用的清单。第三到第五步只写各自范围的清单，
+    /// 从来不会生成 characters.json；如果只读 characters.json，
+    /// Unreal 侧就会整体为空，差异里只剩工具箱侧的新增，删除永远是 0。
+    /// 这里按修改时间从新到旧合并各分段，缺哪段补哪段。
+    /// </summary>
+    private static (string Path, UnrealProjectExportManifest? Manifest) ResolveExportManifest(string exportDirectoryPath)
+    {
+        if (string.IsNullOrWhiteSpace(exportDirectoryPath) || !Directory.Exists(exportDirectoryPath))
+        {
+            return (string.IsNullOrWhiteSpace(exportDirectoryPath)
+                ? string.Empty
+                : Path.Combine(exportDirectoryPath, ExportManifestFileName), null);
+        }
+
+        var loaded = ExportManifestFileNames
+            .Select(fileName => Path.Combine(exportDirectoryPath, fileName))
+            .Where(File.Exists)
+            .Select(path => (Path: path, Manifest: LoadExportManifest(path), WrittenAt: File.GetLastWriteTimeUtc(path)))
+            .Where(entry => entry.Manifest is not null)
+            .OrderByDescending(entry => entry.WrittenAt)
+            .ToArray();
+        if (loaded.Length == 0)
+        {
+            return (Path.Combine(exportDirectoryPath, ExportManifestFileName), null);
+        }
+
+        var primary = loaded[0];
+        var manifest = primary.Manifest!;
+        foreach (var entry in loaded.Skip(1))
+        {
+            var other = entry.Manifest!;
+            if (manifest.Assets.Count == 0) manifest.Assets = other.Assets;
+            if (manifest.CharacterItems.Count == 0) manifest.CharacterItems = other.CharacterItems;
+            if (manifest.CharacterSummaries.Count == 0) manifest.CharacterSummaries = other.CharacterSummaries;
+            if (manifest.CharacterActors.Count == 0) manifest.CharacterActors = other.CharacterActors;
+            if (manifest.CharacterSequences.Count == 0) manifest.CharacterSequences = other.CharacterSequences;
+            if (manifest.CharacterBuffs.Count == 0) manifest.CharacterBuffs = other.CharacterBuffs;
+        }
+
+        return (primary.Path, manifest);
     }
 
     private static UnrealProjectExportManifest? LoadExportManifest(string path)
@@ -1998,7 +2048,8 @@ internal sealed class UnrealProjectSyncService
                 notify.SoundAssetClass,
                 notify.ExportedFilePath,
                 notify.IsCharacterVoice,
-                notify.SequenceObjectPath)).ToArray());
+                notify.SequenceObjectPath)).ToArray(),
+            action.OwnedAssets.Select(BuildExportAssetView).ToArray());
     }
 
     private static UnrealProjectSyncExportAssetView BuildExportAssetView(UnrealProjectExportSequenceAsset asset)

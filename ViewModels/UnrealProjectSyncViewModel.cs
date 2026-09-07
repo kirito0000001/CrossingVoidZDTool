@@ -14,7 +14,10 @@ namespace CrossingVoidZDTool.ViewModels;
 
 internal sealed class UnrealProjectSyncViewModel : ObservableObject
 {
-    private const int CurrentDetectionAlgorithmVersion = 4;
+    // 5：资产类名不再把 TopLevelAssetPath 的对象内存地址带进内容哈希。
+    // 旧缓存里 ownedAssets 的哈希掺了指针，和新导出的永远对不上，
+    // 必须整份作废重新检测，不能拿来做同步前比对。
+    private const int CurrentDetectionAlgorithmVersion = 5;
     private readonly UnrealProjectSyncService _syncService;
     private string _enginePath = string.Empty;
     private string _projectPath = string.Empty;
@@ -76,6 +79,8 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     private string _pendingSessionProjectPath = string.Empty;
     private bool _sessionRestored;
     private bool _isRestoringSession;
+    private int _bulkSelectionUpdateDepth;
+    private bool _bulkSelectionUpdatePending;
     private DateTimeOffset? _lastContentDetectionAt;
     private UnrealBridgeSnapshot? _lastImportSnapshot;
     private List<UnrealBridgeChange> _lastPublishChanges = [];
@@ -1344,6 +1349,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             return;
         }
 
+        // 勾选是 180ms 防抖写盘的。这里只读磁盘，所以必须先把挂起的那份落盘，
+        // 否则「勾选后立刻点同步」会读到勾选之前的旧缓存，把刚做的勾选整个抹掉。
+        FlushSessionCache();
         var result = _sessionCacheService.LoadStep(ProjectPath, characterCode, step);
         if (result.Status != UnrealSyncSessionCacheLoadStatus.Loaded || result.Cache is null)
         {
@@ -1594,15 +1602,31 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
     public bool MatchesCurrentPublishChanges(IReadOnlyList<UnrealBridgeChange> latestChanges)
     {
-        var current = _lastPublishChanges
-            .Select(GetPublishChangeFingerprint)
-            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        var latest = latestChanges
-            .Select(GetPublishChangeFingerprint)
-            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        // 两侧必须同口径。_lastPublishChanges 的来源不固定：刚检测完是完整差异集，
+        // 而从会话缓存恢复（ReturnToWorkflowStep → RestoreWorkflowStepCache）之后
+        // 会变成去掉 Unchanged 和已验证项的子集。直接比会因为元素个数不同恒判"内容已变化"，
+        // 同步永远走不下去。所以比较前把两侧都归一到"本次真正需要处理的差异"。
+        var current = NormalizePublishChangesForComparison(_lastPublishChanges);
+        var latest = NormalizePublishChangesForComparison(latestChanges);
         return current.SequenceEqual(latest, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private string[] NormalizePublishChangesForComparison(IReadOnlyList<UnrealBridgeChange> changes)
+    {
+        var actionable = FilterPublishChanges(changes)
+            .Where(change => change.Kind != UnrealBridgeChangeKind.Unchanged);
+        var state = SelectedSource?.DraftCharacter is { } character && !string.IsNullOrWhiteSpace(ProjectPath)
+            ? new UnrealBridgeStateService().Load(character, ProjectPath)
+            : null;
+        if (state is not null)
+        {
+            actionable = actionable.Where(change => !IsAlreadyVerified(change, state));
+        }
+
+        return actionable
+            .Select(GetPublishChangeFingerprint)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     private static string GetPublishChangeFingerprint(UnrealBridgeChange change) =>
@@ -1626,6 +1650,17 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         {
             if (item.Change is not UnrealBridgeChange change)
             {
+                continue;
+            }
+
+            // 序列行不走素材重定向：删除项显示 Unreal 资产名，新增项显示帧名，
+            // 否则待清理的旧 Sprite 会被标成“待选择工具箱素材”。
+            if (change.Module == UnrealBridgeModule.SequenceFrames)
+            {
+                var sequenceDetail = change.UnrealItem is not null
+                    ? $"Unreal 现有：{TrimGamePrefix(change.UnrealItem.SourceObjectPath)}"
+                    : $"目标：{BuildPublishTargetPreview(change.ToolboxItem)}";
+                item.ApplyDisplay(change.DisplayName, sequenceDetail);
                 continue;
             }
 
@@ -1746,9 +1781,19 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         OnPropertyChanged(nameof(HasNoPublishChanges));
         OnPropertyChanged(nameof(CanStartPublish));
         OnPropertyChanged(nameof(PublishActionText));
-        WorkflowStep = 4;
-        ImportOperationTitle = "素材同步完成";
-        ImportOperationMessage = "正在进入第四步基础配置。";
+        // 第五步是最后一步：完成后必须留在第五步。以前无条件跳到第四步，
+        // 序列同步一成功用户就被踢回基础配置，检测结果和选择树全被清空，
+        // 只能重走第四步再回来重新检测。
+        var wasSequenceStep = WorkflowStep == 5;
+        if (!wasSequenceStep)
+        {
+            WorkflowStep = 4;
+        }
+
+        ImportOperationTitle = wasSequenceStep ? "序列同步完成" : "素材同步完成";
+        ImportOperationMessage = wasSequenceStep
+            ? "当前角色的序列已全部同步。"
+            : "正在进入第四步基础配置。";
         ImportResultMessage = $"已验证 {executedCount} 项，保留未执行 {deferredCount} 项。";
         ImportResultVisibility = Visibility.Collapsed;
     }
@@ -1906,17 +1951,97 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 return;
             }
 
-            UpdateImportSelectionSummary();
-            ApplyPublishFilter();
-            SaveSessionCache();
+            if (DeferSelectionRecompute())
+            {
+                return;
+            }
+
+            RecomputeSelectionState();
         }
     }
 
-    private void SelectionGroup_GroupSelectionChanged(object? sender, EventArgs e)
+    /// <summary>
+    /// 批量改勾选时，把「汇总 + 过滤 + 写缓存」压成结尾的一次。
+    /// 这三件事每次都要走一遍整棵树，SaveSessionCache 还会把全部变更记录克隆一份去建缓存对象；
+    /// 恢复上千个叶子勾选时逐个触发，就是上百万次克隆，实测能把进程顶到 5GB 并让 UI 线程一直满载空转。
+    /// </summary>
+    public IDisposable BeginBulkSelectionUpdate()
+    {
+        _bulkSelectionUpdateDepth++;
+        return new BulkSelectionUpdateScope(this);
+    }
+
+    /// <summary>批量期间返回 true，表示这次重算推迟到批量结束时统一做。</summary>
+    private bool DeferSelectionRecompute()
+    {
+        if (_bulkSelectionUpdateDepth <= 0)
+        {
+            return false;
+        }
+
+        _bulkSelectionUpdatePending = true;
+        return true;
+    }
+
+    private void EndBulkSelectionUpdate()
+    {
+        if (_bulkSelectionUpdateDepth > 0)
+        {
+            _bulkSelectionUpdateDepth--;
+        }
+
+        if (_bulkSelectionUpdateDepth > 0 || !_bulkSelectionUpdatePending)
+        {
+            return;
+        }
+
+        _bulkSelectionUpdatePending = false;
+        RecomputeSelectionState();
+    }
+
+    private void RecomputeSelectionState()
     {
         UpdateImportSelectionSummary();
         ApplyPublishFilter();
         SaveSessionCache();
+    }
+
+    private sealed class BulkSelectionUpdateScope(UnrealProjectSyncViewModel owner) : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            owner.EndBulkSelectionUpdate();
+        }
+    }
+
+    /// <summary>按上一次的勾选恢复整棵树，全程只做一次汇总与写盘。</summary>
+    public void RestoreSelectionState(IReadOnlySet<string> selectedStableIds)
+    {
+        using var scope = BeginBulkSelectionUpdate();
+        foreach (var root in SelectionTreeRoots)
+        {
+            root.RestoreCheckedState(selectedStableIds);
+        }
+
+        _bulkSelectionUpdatePending = true;
+    }
+
+    private void SelectionGroup_GroupSelectionChanged(object? sender, EventArgs e)
+    {
+        if (DeferSelectionRecompute())
+        {
+            return;
+        }
+
+        RecomputeSelectionState();
     }
 
     private void NormalizationResolutionChanged()
@@ -2153,8 +2278,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         return toolboxMatches && (unrealMatches || change.UnrealItem is null);
     }
 
-    private static void ApplySelection(IEnumerable<UnrealSyncSelectionTreeItem> roots, IReadOnlySet<string> selectedIds)
+    private void ApplySelection(IEnumerable<UnrealSyncSelectionTreeItem> roots, IReadOnlySet<string> selectedIds)
     {
+        using var scope = BeginBulkSelectionUpdate();
         foreach (var root in roots)
         {
             root.RestoreCheckedState(selectedIds);
@@ -2277,13 +2403,15 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     {
         try
         {
-            await Task.Delay(180);
+            // 全程不回 UI 线程：FlushSessionCache 会在 UI 线程上同步等这个信号量，
+            // 续体一旦需要 UI 线程，两边就会互相等死。
+            await Task.Delay(180).ConfigureAwait(false);
             if (version != Volatile.Read(ref _sessionSaveVersion)) return;
-            await _sessionSaveSemaphore.WaitAsync();
+            await _sessionSaveSemaphore.WaitAsync().ConfigureAwait(false);
             try
             {
                 if (version != Volatile.Read(ref _sessionSaveVersion)) return;
-                await Task.Run(() => _sessionCacheService.Write(projectPath, cache));
+                await Task.Run(() => _sessionCacheService.Write(projectPath, cache)).ConfigureAwait(false);
                 if (version == Volatile.Read(ref _sessionSaveVersion)) _pendingSessionCache = null;
             }
             finally
@@ -2297,13 +2425,29 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// 勾选状态变化后重新写一次会话缓存。SetPublishSelectionTree 保存的是重建后的默认态，
+    /// 调用方恢复用户勾选之后需要再存一次，缓存里才是真实勾选。
+    /// </summary>
+    public void SaveSelectionStateToSessionCache()
+    {
+        SaveSessionCache();
+        FlushSessionCache();
+    }
+
     public void FlushSessionCache()
     {
         var cache = _pendingSessionCache;
         var projectPath = _pendingSessionProjectPath;
         if (cache is null || string.IsNullOrWhiteSpace(projectPath)) return;
         Interlocked.Increment(ref _sessionSaveVersion);
-        _sessionSaveSemaphore.Wait();
+        // 这个方法会在 UI 线程上被调用，绝不能无限期阻塞：
+        // 拿不到信号量就直接放弃这次落盘，交给防抖保存完成，界面不能因此卡死。
+        if (!_sessionSaveSemaphore.Wait(TimeSpan.FromSeconds(2)))
+        {
+            return;
+        }
+
         try
         {
             _sessionCacheService.Write(projectPath, cache);

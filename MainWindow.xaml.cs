@@ -42,6 +42,8 @@ namespace CrossingVoidZDTool
         private readonly DispatcherQueueTimer _baseMaterialRefreshTimer;
         private readonly Dictionary<InfoBar, DispatcherQueueTimer> _floatingTipTimers = new();
         private readonly Queue<(LogKind Kind, string DisplayText, string CopyText)> _logLines = new();
+        private const int MaxUiLogCount = 300;
+        private bool _logScrollToBottomPending;
         private readonly Queue<(DateTime Timestamp, string Text)> _recentOperations = new();
         private const int MaxRecentOperationCount = 50;
         private readonly object _runtimeLogLock = new();

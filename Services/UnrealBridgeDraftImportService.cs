@@ -436,9 +436,7 @@ internal sealed class UnrealBridgeDraftImportService
         foreach (var sourceAction in candidate.SequenceFramesPreview.Actions.Where(action =>
                      selectedStableIds.Contains(GetSequenceStableId(candidate.Code, action))))
         {
-            var actionCode = NormalizeSequenceActionCode(sourceAction.ActionCode, sourceAction.FormIndex);
-            var targetAction = toolboxActions.FirstOrDefault(action =>
-                string.Equals(action.Code, actionCode, StringComparison.OrdinalIgnoreCase));
+            var targetAction = ResolveToolboxSequenceAction(toolboxActions, sourceAction);
             if (targetAction is null || !sections.TryGetValue(targetAction.Code, out var section))
             {
                 continue;
@@ -514,9 +512,7 @@ internal sealed class UnrealBridgeDraftImportService
         foreach (var sourceAction in candidate.SequenceFramesPreview.Actions.Where(action =>
                      action.HasFramePreview && selectedStableIds.Contains(GetSequenceStableId(candidate.Code, action))))
         {
-            var actionCode = NormalizeSequenceActionCode(sourceAction.ActionCode, sourceAction.FormIndex);
-            var targetAction = toolboxActions.FirstOrDefault(action =>
-                string.Equals(action.Code, actionCode, StringComparison.OrdinalIgnoreCase));
+            var targetAction = ResolveToolboxSequenceAction(toolboxActions, sourceAction);
             if (targetAction is null)
             {
                 continue;
@@ -533,24 +529,23 @@ internal sealed class UnrealBridgeDraftImportService
         }
     }
 
-    private static string NormalizeSequenceActionCode(string value, int formIndex)
+    /// <summary>
+    /// 把 Unreal 侧的动作对应到工具箱动作。原来这里手写了一张 Defence→Defense、OnDamage→Ondm 的表，
+    /// 而工具箱的动作代号其实是 Defence / OnDamage，映射出来的代号在工具箱里根本不存在，
+    /// 这些动作会被静默跳过。现在统一交给 SequenceActionCatalog 解析。
+    /// </summary>
+    private static SequenceFrameAction? ResolveToolboxSequenceAction(
+        IReadOnlyList<SequenceFrameAction> toolboxActions,
+        UnrealProjectSyncSequenceActionPreview sourceAction)
     {
-        var code = value.Trim() switch
-        {
-            "Defence" => "Defense",
-            "OnDamage" => "Ondm",
-            "KO" => "Ko",
-            "FlyDown" => "Flydown",
-            "FlyStart" => "Flystart",
-            "StandUP" => "Standup",
-            var other => other
-        };
-        if (formIndex > 1 && !(code.Length >= 2 && char.IsDigit(code[^1]) && char.IsDigit(code[^2])))
-        {
-            code += formIndex.ToString("00");
-        }
-
-        return code;
+        var variantCode = SequenceFrameIdentity.ResolveVariantCode(sourceAction.ActionCode, sourceAction.FormIndex);
+        var actionKey = SequenceActionCatalog.NormalizeActionKey(variantCode);
+        return toolboxActions.FirstOrDefault(action =>
+            string.Equals(
+                SequenceActionCatalog.NormalizeActionKey(
+                    SequenceFrameIdentity.ResolveVariantCode(action.Code, action.FormIndex)),
+                actionKey,
+                StringComparison.OrdinalIgnoreCase));
     }
 
     private static void AssignImportedSkillIdentities(
@@ -637,10 +632,11 @@ internal sealed class UnrealBridgeDraftImportService
     private static string GetBuffStableId(UnrealProjectSyncBuffPreview buff) =>
         $"buff:{UnrealBridgeSemanticSnapshotService.CreateOriginIdentity(buff.ObjectPath)}";
 
+    // 必须和语义快照生成的动作稳定 ID 完全一致，否则勾选的动作在导入时一个都匹配不上。
     private static string GetSequenceStableId(
         string characterCode,
         UnrealProjectSyncSequenceActionPreview action) =>
-        $"sequence:{UnrealBridgeSemanticSnapshotService.CreateOriginIdentity($"{characterCode}|sequence|{action.ActionCode}|{action.FormIndex}")}";
+        SequenceFrameIdentity.BuildActionStableId(action.ActionCode, action.FormIndex);
 
     private static string GetSkillStableId(
         string characterCode,

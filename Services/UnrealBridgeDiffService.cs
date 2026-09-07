@@ -8,6 +8,9 @@ namespace CrossingVoidZDTool.Services;
 
 internal sealed class UnrealBridgeDiffService
 {
+    /// <summary>Unreal 语义快照 payload 的字段分隔符，与 UnrealBridgeSemanticSnapshotService.Join 一致。</summary>
+    private const char SemanticPayloadSeparator = (char)0x1F;
+
     public IReadOnlyList<UnrealBridgeChange> Compare(
         UnrealBridgeSnapshot toolbox,
         UnrealBridgeSnapshot unreal,
@@ -22,8 +25,15 @@ internal sealed class UnrealBridgeDiffService
         if (direction == UnrealBridgeDirection.PublishToUnreal)
         {
             AlignCanonicalMaterialItems(toolboxItems, unrealItems, toolbox.CharacterCode);
-            AlignCanonicalSequenceItems(toolboxItems, unrealItems, toolbox.CharacterCode);
         }
+
+        // 序列帧两侧现在共用「动作 + 帧位置」稳定 ID，不再需要事后对齐。
+        // 这里预先算出每一帧同步后应有的贴图路径，用来区分「已经是规范命名」和「本次要改名过去」。
+        var canonicalSequenceTexturePaths = direction == UnrealBridgeDirection.PublishToUnreal
+            ? BuildCanonicalSequenceTexturePaths(toolboxItems, toolbox.CharacterCode)
+            : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 每个动作同步之后应有的资产名；Unreal 侧多出来的资产就是要清理的历史素材。
+        var canonicalSequenceAssetPaths = BuildCanonicalSequenceAssetPaths(toolboxItems, toolbox.CharacterCode);
         var changes = toolboxItems.Keys
             .Union(unrealItems.Keys, StringComparer.OrdinalIgnoreCase)
             .Select(stableId => BuildChange(
@@ -35,95 +45,167 @@ internal sealed class UnrealBridgeDiffService
                 direction == UnrealBridgeDirection.PublishToUnreal &&
                     toolboxItems.TryGetValue(stableId, out var matchedToolboxItem) &&
                     unrealItems.TryGetValue(stableId, out var matchedUnrealItem) &&
-                    IsMigrationSafePair(matchedToolboxItem, matchedUnrealItem, toolbox.CharacterCode)))
+                    IsMigrationSafePair(matchedToolboxItem, matchedUnrealItem, toolbox.CharacterCode, canonicalSequenceTexturePaths),
+                direction == UnrealBridgeDirection.PublishToUnreal &&
+                    toolboxItems.TryGetValue(stableId, out var renameToolboxItem) &&
+                    unrealItems.TryGetValue(stableId, out var renameUnrealItem) &&
+                    NeedsCanonicalSequenceRename(renameToolboxItem, renameUnrealItem, canonicalSequenceTexturePaths)))
             .SelectMany(ExpandSequenceChange)
-            .Where(change => !ShouldHideSequenceAlreadyPublished(change, unrealItems, direction))
+            .Where(change => !IsCanonicalOwnedSequenceAsset(change, canonicalSequenceAssetPaths))
             .OrderBy(change => change.Module)
             .ThenBy(change => change.StableId, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         return changes;
     }
 
-    private static void AlignCanonicalSequenceItems(
+    /// <summary>
+    /// 为每个工具箱序列帧算出「同步之后应有的贴图对象路径」。
+    /// 编号位宽跟随该动作的总帧数，所以必须按动作分组之后再算。
+    /// </summary>
+    private static Dictionary<string, string> BuildCanonicalSequenceTexturePaths(
         IDictionary<string, UnrealBridgeSnapshotItem> toolboxItems,
-        IDictionary<string, UnrealBridgeSnapshotItem> unrealItems,
         string characterCode)
     {
-        var sequenceAssets = unrealItems
-            .Where(pair => pair.Value.Module == UnrealBridgeModule.SequenceFrames &&
-                IsCanonicalSequencePath(pair.Value.SourceObjectPath, characterCode))
-            .ToArray();
-        foreach (var toolboxPair in toolboxItems.Where(pair =>
-            pair.Value.Module == UnrealBridgeModule.SequenceFrames &&
-            pair.Key.StartsWith("sequence:", StringComparison.OrdinalIgnoreCase)).ToArray())
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(characterCode))
         {
-            var actionCode = NormalizeSequenceActionCode(ExtractActionCode(toolboxPair.Value.PayloadJson));
-            var match = sequenceAssets.FirstOrDefault(pair =>
-                string.Equals(NormalizeSequenceActionCode(GetSequenceActionCode(pair.Value.SourceObjectPath)), actionCode, StringComparison.OrdinalIgnoreCase));
-            if (string.IsNullOrWhiteSpace(match.Key))
+            return result;
+        }
+
+        var groups = toolboxItems.Values
+            .Where(item => item.Module == UnrealBridgeModule.SequenceFrames &&
+                SequenceFrameIdentity.IsFrameStableId(item.StableId))
+            .GroupBy(item => item.ParentStableId, StringComparer.OrdinalIgnoreCase);
+        foreach (var group in groups)
+        {
+            var frames = group.ToArray();
+            foreach (var item in frames)
             {
-                continue;
+                var actionCode = ExtractActionCode(item.PayloadJson);
+                var ordinal = ParseFrameOrdinal(item.StableId);
+                if (ordinal < 0 || ordinal >= frames.Length)
+                {
+                    continue;
+                }
+
+                var path = SequenceFrameIdentity.BuildCanonicalTextureObjectPath(
+                    characterCode, actionCode, ordinal, frames.Length);
+                if (!string.IsNullOrWhiteSpace(path))
+                {
+                    result[item.StableId] = path;
+                }
             }
-
-            // 正式 AnimSequence 使用工具箱动作节点的稳定 ID；帧节点仍由后续过滤/聚合处理。
-            unrealItems.Remove(match.Key);
-            // 正式序列的扫描元数据与工具箱动作 payload 不是同一哈希算法；
-            // 这里仅把“正式序列已存在”对齐为动作节点已同步，帧内容由序列同步计划负责。
-            unrealItems[toolboxPair.Key] = match.Value with
-            {
-                StableId = toolboxPair.Key,
-                ContentHash = toolboxPair.Value.ContentHash,
-                ParentStableId = toolboxPair.Value.ParentStableId
-            };
         }
+
+        return result;
     }
 
-    private static bool IsCanonicalSequencePath(string path, string characterCode) =>
-        !string.IsNullOrWhiteSpace(path) &&
-        path.Contains($"/Game/GameActor2D/{characterCode}/AnimSequences/", StringComparison.OrdinalIgnoreCase);
-
-    private static string GetSequenceActionCode(string path)
+    /// <summary>按动作汇总「同步后应当存在的资产包路径」。</summary>
+    private static Dictionary<string, IReadOnlyCollection<string>> BuildCanonicalSequenceAssetPaths(
+        IDictionary<string, UnrealBridgeSnapshotItem> toolboxItems,
+        string characterCode)
     {
-        var package = NormalizeObjectPath(path);
-        var slash = package.LastIndexOf('/');
-        return slash >= 0 ? package[(slash + 1)..] : string.Empty;
+        var result = new Dictionary<string, IReadOnlyCollection<string>>(StringComparer.OrdinalIgnoreCase);
+        var groups = toolboxItems.Values
+            .Where(item => item.Module == UnrealBridgeModule.SequenceFrames &&
+                SequenceFrameIdentity.IsFrameStableId(item.StableId))
+            .GroupBy(item => item.ParentStableId, StringComparer.OrdinalIgnoreCase);
+        foreach (var group in groups)
+        {
+            var frames = group.ToArray();
+            var actionCode = ExtractActionCode(frames[0].PayloadJson);
+            result[group.Key] = SequenceFrameIdentity.BuildCanonicalAssetPackagePaths(
+                characterCode, actionCode, frames.Length);
+        }
+
+        return result;
     }
 
-    private static string NormalizeSequenceActionCode(string value) =>
-        value.Equals("Ondm", StringComparison.OrdinalIgnoreCase) ? "ondamage" :
-        value.Equals("Flydown", StringComparison.OrdinalIgnoreCase) ? "flydown" :
-        value.Equals("Flystart", StringComparison.OrdinalIgnoreCase) ? "flystart" :
-        value.Equals("Standup", StringComparison.OrdinalIgnoreCase) ? "standup" :
-        value.Equals("Defense", StringComparison.OrdinalIgnoreCase) ? "defence" :
-        NormalizeId(value);
-
-    private static bool ShouldHideSequenceAlreadyPublished(
+    /// <summary>规范位置上的资产由帧节点负责，不再单独列成删除项。</summary>
+    private static bool IsCanonicalOwnedSequenceAsset(
         UnrealBridgeChange change,
-        IReadOnlyDictionary<string, UnrealBridgeSnapshotItem> unrealItems,
-        UnrealBridgeDirection direction)
+        IReadOnlyDictionary<string, IReadOnlyCollection<string>> canonicalAssetPaths)
     {
-        if (direction != UnrealBridgeDirection.PublishToUnreal ||
-            change.Module != UnrealBridgeModule.SequenceFrames ||
-            change.Kind != UnrealBridgeChangeKind.Added ||
-            change.ToolboxItem is null ||
-            !change.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase))
+        if (!SequenceFrameIdentity.IsOwnedAssetStableId(change.StableId))
         {
             return false;
         }
 
-        var payload = change.ToolboxItem.PayloadJson ?? string.Empty;
-        var actionCode = ExtractActionCode(payload);
-        if (string.IsNullOrWhiteSpace(actionCode))
-        {
-            return false;
-        }
-
-        return unrealItems.Values.Any(item =>
-            item.Module == UnrealBridgeModule.SequenceFrames &&
-            item.SourceObjectPath.Contains("/AnimSequences/", StringComparison.OrdinalIgnoreCase) &&
-            item.SourceObjectPath.EndsWith("/" + actionCode + "." + actionCode, StringComparison.OrdinalIgnoreCase));
+        var objectPath = change.UnrealItem?.SourceObjectPath ?? string.Empty;
+        return canonicalAssetPaths.TryGetValue(change.SequenceGroupKey, out var paths) &&
+            paths.Contains(SequenceFrameIdentity.NormalizePackagePath(objectPath));
     }
 
+    private static int ParseFrameOrdinal(string stableId)
+    {
+        var separator = (stableId ?? string.Empty).LastIndexOf(':');
+        return separator >= 0 && int.TryParse(stableId![(separator + 1)..], out var ordinal) ? ordinal : -1;
+    }
+
+    /// <summary>
+    /// 两侧 payload 格式不同：工具箱是 JSON，Unreal 语义快照是分隔符连接的字段串，
+    /// 其中 isBlank 是最后一个字段。不能整串找 "True"，否则任何含该词的字段都会误判。
+    /// </summary>
+    private static bool IsBlankSequenceFrame(UnrealBridgeSnapshotItem item)
+    {
+        var payload = item.PayloadJson ?? string.Empty;
+        if (payload.TrimStart().StartsWith("{", StringComparison.Ordinal))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(payload);
+                return document.RootElement.TryGetProperty("isBlank", out var value) &&
+                    string.Equals(value.GetString(), "true", StringComparison.OrdinalIgnoreCase);
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
+        var fields = payload.Split(SemanticPayloadSeparator);
+        return fields.Length > 0 &&
+            string.Equals(fields[^1], "True", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>该帧的 Unreal 资产已经落在规范命名上，可以直接作为同步基线。</summary>
+    private static bool IsCanonicalSequenceFramePair(
+        UnrealBridgeSnapshotItem toolboxItem,
+        UnrealBridgeSnapshotItem unrealItem,
+        IReadOnlyDictionary<string, string> canonicalTexturePaths)
+    {
+        if (toolboxItem.Module != UnrealBridgeModule.SequenceFrames ||
+            unrealItem.Module != UnrealBridgeModule.SequenceFrames ||
+            !SequenceFrameIdentity.IsFrameStableId(toolboxItem.StableId))
+        {
+            return false;
+        }
+
+        // 空白帧两侧都没有贴图资产，只要都是空白就算一致。
+        if (IsBlankSequenceFrame(toolboxItem) && IsBlankSequenceFrame(unrealItem))
+        {
+            return true;
+        }
+
+        return canonicalTexturePaths.TryGetValue(toolboxItem.StableId, out var canonicalPath) &&
+            SameObjectPath(unrealItem.SourceObjectPath, canonicalPath);
+    }
+
+    /// <summary>该帧在 Unreal 里还是历史命名，本次同步会把它改名到规范位置。</summary>
+    private static bool NeedsCanonicalSequenceRename(
+        UnrealBridgeSnapshotItem toolboxItem,
+        UnrealBridgeSnapshotItem unrealItem,
+        IReadOnlyDictionary<string, string> canonicalTexturePaths)
+    {
+        if (toolboxItem.Module != UnrealBridgeModule.SequenceFrames ||
+            unrealItem.Module != UnrealBridgeModule.SequenceFrames ||
+            !SequenceFrameIdentity.IsFrameStableId(toolboxItem.StableId))
+        {
+            return false;
+        }
+
+        return !IsCanonicalSequenceFramePair(toolboxItem, unrealItem, canonicalTexturePaths);
+    }
     private static IEnumerable<UnrealBridgeChange> ExpandSequenceChange(UnrealBridgeChange change)
     {
         var sequenceGroupKey = ComputeSequenceGroupKey(change);
@@ -297,8 +379,14 @@ internal sealed class UnrealBridgeDiffService
     private static bool IsMigrationSafePair(
         UnrealBridgeSnapshotItem toolboxItem,
         UnrealBridgeSnapshotItem unrealItem,
-        string characterCode)
+        string characterCode,
+        IReadOnlyDictionary<string, string> canonicalSequenceTexturePaths)
     {
+        if (toolboxItem.Module == UnrealBridgeModule.SequenceFrames)
+        {
+            return IsCanonicalSequenceFramePair(toolboxItem, unrealItem, canonicalSequenceTexturePaths);
+        }
+
         if (toolboxItem.Module is not (UnrealBridgeModule.BaseMaterials or UnrealBridgeModule.Voices) ||
             unrealItem.Module != toolboxItem.Module ||
             string.IsNullOrWhiteSpace(unrealItem.SourceObjectPath))
@@ -369,7 +457,8 @@ internal sealed class UnrealBridgeDiffService
         UnrealBridgeSnapshotItem? unrealItem,
         UnrealBridgeDirection direction,
         UnrealBridgeSyncState? baseline,
-        bool isMigrationSafePair)
+        bool isMigrationSafePair,
+        bool sequenceNeedsCanonicalRename)
     {
         var sourceItem = direction == UnrealBridgeDirection.PublishToUnreal ? toolboxItem : unrealItem;
         var targetItem = direction == UnrealBridgeDirection.PublishToUnreal ? unrealItem : toolboxItem;
@@ -404,15 +493,27 @@ internal sealed class UnrealBridgeDiffService
                     ? UnrealBridgeChangeKind.Renamed
                     : sourceChanged
                         ? UnrealBridgeChangeKind.Updated
-                        : UnrealBridgeChangeKind.Unchanged;
+                        // 有基线条目、两侧哈希也都没变，但资产还停在历史命名上：
+                        // 仍然要判成改名，否则该改名的帧永远不会出现在第五步列表里。
+                        : sequenceNeedsCanonicalRename
+                            ? UnrealBridgeChangeKind.Renamed
+                            : UnrealBridgeChangeKind.Unchanged;
         }
-        else if (isMigrationSafePair && baseline is null)
+        // 序列帧两侧的哈希本来就不可直接比较（工具箱是源文件，Unreal 是导出预览），
+        // 所以只要资产已经在规范位置就当作已同步，并在这一轮建立基线。
+        else if (isMigrationSafePair &&
+            (baseline is null || referenceItem.Module == UnrealBridgeModule.SequenceFrames))
         {
             kind = UnrealBridgeChangeKind.Unchanged;
         }
         else if (string.Equals(sourceItem.ContentHash, targetItem!.ContentHash, StringComparison.OrdinalIgnoreCase))
         {
             kind = isRename ? UnrealBridgeChangeKind.Renamed : UnrealBridgeChangeKind.Unchanged;
+        }
+        else if (sequenceNeedsCanonicalRename)
+        {
+            // 还是历史命名，本次同步会改名过去；这不是冲突，冲突要留给「基线之后 Unreal 侧被改动」。
+            kind = UnrealBridgeChangeKind.Renamed;
         }
         else
         {
@@ -432,8 +533,31 @@ internal sealed class UnrealBridgeDiffService
 
     private static string ComputeSequenceGroupKey(UnrealBridgeChange change)
     {
-        if (change.Module != UnrealBridgeModule.SequenceFrames ||
-            !change.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase))
+        if (change.Module != UnrealBridgeModule.SequenceFrames)
+        {
+            return change.StableId;
+        }
+
+        // 帧是「动作键 + 位置」，占用资产是「动作键 + 资产名」；两者都取最后一个冒号之前的部分。
+        var prefix = SequenceFrameIdentity.IsFrameStableId(change.StableId)
+            ? SequenceFrameIdentity.FramePrefix
+            : SequenceFrameIdentity.IsOwnedAssetStableId(change.StableId)
+                ? SequenceFrameIdentity.OwnedAssetPrefix
+                : string.Empty;
+        if (prefix.Length > 0)
+        {
+            var separator = change.StableId.LastIndexOf(':');
+            if (separator > prefix.Length)
+            {
+                var actionKey = change.StableId[prefix.Length..separator];
+                if (!string.IsNullOrWhiteSpace(actionKey))
+                {
+                    return SequenceFrameIdentity.ActionPrefix + actionKey;
+                }
+            }
+        }
+
+        if (SequenceFrameIdentity.IsActionStableId(change.StableId))
         {
             return change.StableId;
         }
@@ -444,7 +568,7 @@ internal sealed class UnrealBridgeDiffService
         var actionCode = ExtractActionCode(payloadJson);
         return string.IsNullOrWhiteSpace(actionCode)
             ? change.StableId
-            : $"sequence:{NormalizeId(actionCode)}";
+            : SequenceFrameIdentity.BuildActionStableId(actionCode);
     }
 
     private static string ExtractActionCode(string payloadJson)
@@ -474,14 +598,6 @@ internal sealed class UnrealBridgeDiffService
 
         var parts = trimmed.Split('|', StringSplitOptions.RemoveEmptyEntries);
         return parts.Length > 0 ? parts[0] : string.Empty;
-    }
-
-    private static string NormalizeId(string value)
-    {
-        var normalized = new string(value.Trim().ToLowerInvariant()
-            .Select(character => char.IsLetterOrDigit(character) || character is '-' or '_' ? character : '-')
-            .ToArray());
-        return string.IsNullOrWhiteSpace(normalized) ? "unnamed" : normalized;
     }
 
     private static bool IsRename(

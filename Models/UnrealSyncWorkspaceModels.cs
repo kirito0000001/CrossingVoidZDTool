@@ -6,6 +6,7 @@ using System.Linq;
 using System.IO;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using CrossingVoidZDTool.Services;
 using CrossingVoidZDTool.ViewModels;
 
 namespace CrossingVoidZDTool;
@@ -165,7 +166,12 @@ internal sealed class UnrealSyncSelectionTreeItem : ObservableObject
 
         // 组节点也必须参与恢复。以前这里只恢复叶子 ID，
         // 用户只勾选“ 一技能 ”组时，刷新后会变成全未勾选。
-        var groupWasSelected = selectedStableIds.Contains(StableId);
+        //
+        // 但只有在「组内一个叶子 ID 都没记录」时才整组勾上——那说明叶子 ID 变了，
+        // 只能靠组 ID 兜底。若有叶子被记录，就按叶子逐个恢复：否则用户在组里特意
+        // 取消掉的删除项会被强行勾回来，而第五步的删除项是真的会删 Unreal 资产。
+        var groupWasSelected = selectedStableIds.Contains(StableId) &&
+            !Children.Any(child => selectedStableIds.Contains(child.StableId));
         if (groupWasSelected)
         {
             _isUpdatingChildren = true;
@@ -179,9 +185,19 @@ internal sealed class UnrealSyncSelectionTreeItem : ObservableObject
             return;
         }
 
-        foreach (var child in Children)
+        // 整组恢复期间挂起子项通知：否则每个叶子都会让父节点重新扫一遍全部兄弟，
+        // 还会捅到 ViewModel 去做一次全量汇总 + 写盘。上千个叶子就是 O(n²)。
+        _isUpdatingChildren = true;
+        try
         {
-            child.RestoreCheckedState(selectedStableIds);
+            foreach (var child in Children)
+            {
+                child.RestoreCheckedState(selectedStableIds);
+            }
+        }
+        finally
+        {
+            _isUpdatingChildren = false;
         }
 
         UpdateCheckedStateFromChildren();
@@ -313,7 +329,7 @@ internal static class UnrealSyncSelectionTreeBuilder
         canExecute ??= change => !change.RequiresExplicitConfirmation;
         var allChanges = changes.Where(change => change.Module == UnrealBridgeModule.SequenceFrames).ToArray();
         var parentNames = allChanges
-            .Where(change => !change.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase))
+            .Where(change => SequenceFrameIdentity.IsActionStableId(change.StableId))
             .GroupBy(change => change.StableId, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(group => group.Key, group => group.First().DisplayName, StringComparer.OrdinalIgnoreCase);
         var actionNameToKey = parentNames
@@ -329,13 +345,16 @@ internal static class UnrealSyncSelectionTreeBuilder
             {
                 var toolboxParent = group.Select(pair => pair.change)
                     .FirstOrDefault(change => change.ToolboxItem is not null &&
-                        !change.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase));
+                        SequenceFrameIdentity.IsActionStableId(change.StableId));
                 return toolboxParent is not null
                     ? $"sequence:{NormalizeActionCode(group.Key)}"
                     : group.First().change.SequenceGroupKey;
             }, StringComparer.OrdinalIgnoreCase);
         return allChanges
-            .Where(change => change.StableId.StartsWith("sequence-frame:", StringComparison.OrdinalIgnoreCase) &&
+            // 除了帧，动作占用的历史资产（断了引用的旧 Sprite、旧 Flipbook）也要列成删除项，
+            // 否则素材目录里多出来的文件永远不会被提示清理。
+            .Where(change => (SequenceFrameIdentity.IsFrameStableId(change.StableId) ||
+                    SequenceFrameIdentity.IsOwnedAssetStableId(change.StableId)) &&
                 change.Kind != UnrealBridgeChangeKind.Unchanged &&
                 change.Kind is UnrealBridgeChangeKind.Added or UnrealBridgeChangeKind.DeleteCandidate)
             .GroupBy(change => ResolveSequenceGroupKey(change, actionNameToKey, actionCodeToKey))
@@ -350,7 +369,11 @@ internal static class UnrealSyncSelectionTreeBuilder
                     .ThenBy(change => change.DisplayName, StringComparer.OrdinalIgnoreCase)
                     .Select(change => FromChange(change, canExecute, selectPendingByDefault))
                     .ToArray();
-                var displayName = parentNames.GetValueOrDefault(parentKey, representative.DisplayName);
+                // 缓存恢复路径会先滤掉 Unchanged 的动作节点，这时 parentNames 里没有它；
+                // 标题必须能从动作键自己算出来，不能退化成第一个叶子的名字（“一技能 第 1 帧”）。
+                var displayName = parentNames.TryGetValue(parentKey, out var parentName)
+                    ? parentName
+                    : ResolveSequenceGroupDisplayName(parentKey, representative);
                 return new UnrealSyncSelectionTreeItem(
                     group.Key,
                     displayName,
@@ -369,6 +392,26 @@ internal static class UnrealSyncSelectionTreeBuilder
             .Where(item => item.DeleteCount > 0 || item.AddCount > 0)
             .OrderBy(item => item.DisplayName, StringComparer.OrdinalIgnoreCase)
             .ToArray();
+    }
+
+    private static string ResolveSequenceGroupDisplayName(string groupKey, UnrealBridgeChange representative)
+    {
+        if (SequenceFrameIdentity.IsActionStableId(groupKey))
+        {
+            var actionKey = groupKey[SequenceFrameIdentity.ActionPrefix.Length..];
+            var variantCode = actionKey.Contains("-shape", StringComparison.OrdinalIgnoreCase)
+                ? actionKey.Replace("-shape", SequenceActionCatalog.FormSuffixSeparator, StringComparison.OrdinalIgnoreCase)
+                : actionKey;
+            if (SequenceActionCatalog.TryResolve(variantCode, out var definition, out var formIndex))
+            {
+                return formIndex > 1 ? $"{definition.DisplayName}-{formIndex}" : definition.DisplayName;
+            }
+        }
+
+        var match = Regex.Match(representative.DisplayName ?? string.Empty, @"^(.*?)\s*(?:第\s*\d+\s*帧|·.*)\s*$");
+        return match.Success && !string.IsNullOrWhiteSpace(match.Groups[1].Value)
+            ? match.Groups[1].Value.Trim()
+            : representative.DisplayName ?? string.Empty;
     }
 
     private static string ResolveSequenceGroupKey(
@@ -448,11 +491,10 @@ internal static class UnrealSyncSelectionTreeBuilder
         return parts.Length > 0 ? parts[0] : string.Empty;
     }
 
+    // 分组键必须和差异服务、发布服务用同一套别名解析，否则 Ondm 与 OnDamage、
+    // Defense 与 Defence 会被拆成两个动作分组。
     private static string NormalizeActionCode(string value) =>
-        new string((value ?? string.Empty).Trim()
-            .Where(char.IsLetterOrDigit)
-            .Select(char.ToLowerInvariant)
-            .ToArray());
+        SequenceActionCatalog.NormalizeActionKey(value);
 
     public static IReadOnlyList<UnrealSyncSelectionTreeItem> FromSnapshot(UnrealBridgeSnapshot snapshot)
     {

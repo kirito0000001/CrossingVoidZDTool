@@ -283,10 +283,30 @@ def _to_text(value):
         return ""
 
 
+_STRUCT_ADDRESS_PATTERN = re.compile(r"\s*\(0x[0-9A-Fa-f]+\)")
+
+
+def _stable_class_text(value):
+    """把资产类名归一成稳定文本。
+
+    UE5 的 asset_class_path 是 TopLevelAssetPath 结构体，str() 出来长这样：
+        <Struct 'TopLevelAssetPath' (0x000001C0DE94853C) {package_name: ..., asset_name: "PaperSprite"}>
+    里面带对象内存地址，每次导出都不一样。这个值会进 payload 参与内容哈希，
+    结果就是同一个资产每次检测都被判成「有变化」：同步前的最终比对永远不通过，
+    基线也永远对不上。取 asset_name 才是稳定的类名。
+    """
+    if value is None:
+        return ""
+    asset_name = _to_text(getattr(value, "asset_name", ""))
+    if asset_name:
+        return asset_name
+    return _STRUCT_ADDRESS_PATTERN.sub("", _to_text(value)).strip()
+
+
 def _asset_class(asset_data):
     for attr in ("asset_class_path", "asset_class"):
         if hasattr(asset_data, attr):
-            text = _to_text(getattr(asset_data, attr))
+            text = _stable_class_text(getattr(asset_data, attr))
             if text:
                 return text
     return ""
@@ -325,6 +345,33 @@ def _safe_file_name(value):
     return result or "Asset"
 
 
+def _package_file_path(package_path_or_name):
+    """把 /Game/... 包路径换算成磁盘上的 .uasset 路径。"""
+    name = (package_path_or_name or "").split(".", 1)[0]
+    if not name.lower().startswith("/game/"):
+        return ""
+    relative = name[len("/game/"):].replace("/", os.sep)
+    return os.path.join(unreal.Paths.project_content_dir(), relative + ".uasset")
+
+
+def _png_is_up_to_date(output_path, package_name):
+    """已有 PNG 比源 .uasset 新，就不必再导一次。
+
+    一次第五步同步要跑三趟 Unreal 导出，每趟都把同一批贴图重新写一遍 PNG
+    （AssetExportTask.replace_identical 还是 True，内容相同也照写）。
+    绝大多数贴图两趟之间根本没动过，这一步纯属浪费。
+    """
+    try:
+        if not os.path.isfile(output_path):
+            return False
+        source = _package_file_path(package_name)
+        if not source or not os.path.isfile(source):
+            return False
+        return os.path.getmtime(output_path) >= os.path.getmtime(source)
+    except OSError:
+        return False
+
+
 def _export_texture_png(asset_data, export_root):
     package_path = _to_text(asset_data.package_path)
     if package_path.startswith(BASE_MATERIAL_ROOT + "/"):
@@ -352,6 +399,8 @@ def _export_texture_png(asset_data, export_root):
     folder = os.path.join(export_root, output_root_name, *relative_package.split("/"))
     os.makedirs(folder, exist_ok=True)
     output_path = os.path.join(folder, "{}.png".format(_safe_file_name(asset_data.asset_name)))
+    if _png_is_up_to_date(output_path, _to_text(asset_data.package_name)):
+        return output_path
 
     task = unreal.AssetExportTask()
     task.object = asset
@@ -1358,17 +1407,18 @@ def _split_character_actor_relative_path(package_path, code):
     return [part for part in relative.split("/") if part]
 
 
-def _sequence_asset_export_item(asset):
+def _sequence_asset_export_item(asset, duration_frames=1):
     return {
         "assetName": asset.get("assetName", ""),
         "assetClass": asset.get("assetClass", ""),
         "packagePath": asset.get("packagePath", ""),
         "objectPath": asset.get("objectPath", ""),
         "exportedFilePath": asset.get("exportedFilePath", ""),
+        "durationFrames": max(1, int(duration_frames)),
     }
 
 
-def _blank_sequence_frame_export_item():
+def _blank_sequence_frame_export_item(duration_frames=1):
     return {
         "assetName": "空白帧",
         "assetClass": "BlankFrame",
@@ -1376,6 +1426,7 @@ def _blank_sequence_frame_export_item():
         "objectPath": "",
         "exportedFilePath": "",
         "isBlank": True,
+        "durationFrames": max(1, int(duration_frames)),
     }
 
 
@@ -1985,6 +2036,7 @@ def _flipbook_frames_per_second(asset):
 def _ordered_flipbook_frame_assets(flipbook_assets, texture_assets, all_assets):
     ordered_frames = []
     sprite_paths = set()
+    playback_frame_count = 0
     for flipbook_asset in sorted(flipbook_assets, key=lambda item: item.get("assetName", "")):
         flipbook = unreal.load_asset(flipbook_asset.get("objectPath", ""))
         if flipbook is None:
@@ -2003,8 +2055,14 @@ def _ordered_flipbook_frame_assets(flipbook_assets, texture_assets, all_assets):
             except Exception:
                 frame_run = 1
 
+            # 一个关键帧就是一帧素材，frame_run 只是它停留多久。
+            # 以前按 frame_run 把关键帧复制成多份，13 帧带时长的序列会导出成 16 项，
+            # 而工具箱侧一帧一项永远是 13：两边条数对不上，多出来的那几项每次检测
+            # 都会变成永远处理不掉的差异。播放总长另算，不能挤进帧列表。
+            playback_frame_count += frame_run
+
             if sprite is None:
-                ordered_frames.extend(_blank_sequence_frame_export_item() for _ in range(frame_run))
+                ordered_frames.append(_blank_sequence_frame_export_item(frame_run))
                 continue
 
             sprite_text = _object_path_text(sprite)
@@ -2014,8 +2072,8 @@ def _ordered_flipbook_frame_assets(flipbook_assets, texture_assets, all_assets):
             texture_asset = _find_asset_by_object_path(texture_assets, texture_path) or _find_asset_by_object_path(all_assets, texture_path)
             if texture_asset is None:
                 continue
-            ordered_frames.extend(_sequence_asset_export_item(texture_asset) for _ in range(frame_run))
-    return ordered_frames, len(sprite_paths), sorted(sprite_paths, key=str.lower)
+            ordered_frames.append(_sequence_asset_export_item(texture_asset, frame_run))
+    return ordered_frames, len(sprite_paths), sorted(sprite_paths, key=str.lower), playback_frame_count
 
 
 def _sequence_sound_notifies(sequence_assets, all_assets, character_code, frames_per_second, frame_count):
@@ -2159,17 +2217,21 @@ def _build_sequence_actions(code, obj, actor_asset, actor_asset_map, manifest_as
         ]
         sequence_flipbook_assets = _sequence_related_flipbook_assets(bucket, all_actor_assets)
         playback_flipbook_assets = _unique_assets(sequence_flipbook_assets + flipbook_assets)
-        ordered_frames, ordered_sprite_count, ordered_sprite_paths = _ordered_flipbook_frame_assets(flipbook_assets, texture_assets, all_actor_assets)
-        sequence_ordered_frames, sequence_ordered_sprite_count, sequence_ordered_sprite_paths = _ordered_flipbook_frame_assets(
+        ordered_frames, ordered_sprite_count, ordered_sprite_paths, fallback_playback_frames = _ordered_flipbook_frame_assets(flipbook_assets, texture_assets, all_actor_assets)
+        sequence_ordered_frames, sequence_ordered_sprite_count, sequence_ordered_sprite_paths, sequence_playback_frames = _ordered_flipbook_frame_assets(
             sequence_flipbook_assets,
             texture_assets,
             all_actor_assets)
+        playback_frame_count = fallback_playback_frames
         if sequence_ordered_frames:
             ordered_frames = sequence_ordered_frames
             ordered_sprite_count = sequence_ordered_sprite_count
             ordered_sprite_paths = sequence_ordered_sprite_paths
+            playback_frame_count = sequence_playback_frames
         if not ordered_frames:
             ordered_frames = [_sequence_asset_export_item(asset) for asset in _sorted_sequence_frame_assets(texture_assets)]
+        if playback_frame_count <= 0:
+            playback_frame_count = len(ordered_frames)
         preview_frames = ordered_frames[:3]
         frames_per_second = _flipbook_frames_per_second(playback_flipbook_assets[0]) if playback_flipbook_assets else 0.0
         sound_notifies = _sequence_sound_notifies(
@@ -2180,7 +2242,8 @@ def _build_sequence_actions(code, obj, actor_asset, actor_asset_map, manifest_as
             ],
             code,
             frames_per_second,
-            len(ordered_frames))
+            # 通知定位按播放时间算，要的是展开后的总帧数，不是关键帧条数。
+            playback_frame_count)
         has_data = bool(bucket["referencedSequences"] or bucket["animSequences"] or texture_assets or sprite_assets or playback_flipbook_assets)
         result.append({
             "actionCode": bucket["actionCode"],
@@ -2198,6 +2261,13 @@ def _build_sequence_actions(code, obj, actor_asset, actor_asset_map, manifest_as
             "flipbookPaths": [asset.get("objectPath", "") for asset in playback_flipbook_assets],
             "orderedSpritePaths": ordered_sprite_paths,
             "framesPerSecond": frames_per_second,
+            # 该动作在 Unreal 里实际占用的全部资产（Material 目录 + AnimSequences）。
+            # orderedFrames 只反查得到 Flipbook 关键帧用到的贴图，
+            # 断了引用的旧 Sprite、旧 Flipbook 不在里面，检测就永远看不到该删的东西。
+            "ownedAssets": [
+                _sequence_asset_export_item(asset)
+                for asset in _unique_assets(list(bucket["materialAssets"]) + list(bucket["animSequences"]))
+            ],
             "orderedFrames": ordered_frames,
             "previewFrames": preview_frames,
             "soundNotifies": sound_notifies,

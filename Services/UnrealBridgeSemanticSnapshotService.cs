@@ -52,21 +52,42 @@ internal sealed class UnrealBridgeSemanticSnapshotService
 
         foreach (var action in candidate.SequenceFramesPreview.Actions.Where(action => action.HasData))
         {
-            var actionIdentity = CreateOriginIdentity($"{candidate.Code}|sequence|{action.ActionCode}|{action.FormIndex}");
-            var actionId = $"sequence:{actionIdentity}";
+            // 动作和帧的稳定 ID 与工具箱快照共用一套规则：动作 + 帧位置。
+            // 之前这里把 Unreal 对象路径算进身份，发布改名后身份就变了，两侧再也配不上对。
+            var variantCode = SequenceFrameIdentity.ResolveVariantCode(action.ActionCode, action.FormIndex);
+            var actionId = SequenceFrameIdentity.BuildActionStableId(variantCode);
             Add(items, actionId, $"module:{UnrealBridgeModule.SequenceFrames}", UnrealBridgeModule.SequenceFrames,
                 action.Title, candidate.SequenceFramesPreview.AnimMapsObjectPath,
-                Join(action.ActionCode, action.FormIndex, action.FramesPerSecond));
+                // 与工具箱动作节点共用同一份载荷，帧率取整后比较（工具箱只能产出整数帧率）。
+                SequenceFrameIdentity.BuildActionPayload(
+                    variantCode,
+                    (int)Math.Round(action.FramesPerSecond <= 0 ? SequenceFrameService.DefaultFps : action.FramesPerSecond)));
             var frames = action.OrderedFrames.Count > 0 ? action.OrderedFrames : action.PreviewFrames;
             for (var index = 0; index < frames.Count; index++)
             {
                 var frame = frames[index];
-                var identity = CreateOriginIdentity(
-                    $"{candidate.Code}|sequence-frame|{action.ActionCode}|{action.FormIndex}|{index}|{frame.ObjectPath}");
-                Add(items, $"sequence-frame:{identity}", actionId, UnrealBridgeModule.SequenceFrames,
+                Add(items, SequenceFrameIdentity.BuildFrameStableId(variantCode, index), actionId,
+                    UnrealBridgeModule.SequenceFrames,
                     $"{action.Title} 第 {index + 1} 帧", frame.ObjectPath,
                     Join(action.ActionCode, action.FormIndex, index + 1, frame.IsBlank),
                     frame.ExportedFilePath, frame.AssetName);
+            }
+
+            // 该动作在 Unreal 里实际占用的资产。规范命名的那些会被差异比较过滤掉，
+            // 剩下的（断了引用的旧 Sprite、旧 Flipbook、旧拼写的序列）就是需要清理的删除项。
+            foreach (var owned in action.OwnedAssets ?? [])
+            {
+                if (string.IsNullOrWhiteSpace(owned.ObjectPath))
+                {
+                    continue;
+                }
+
+                Add(items, SequenceFrameIdentity.BuildOwnedAssetStableId(variantCode, owned.ObjectPath), actionId,
+                    UnrealBridgeModule.SequenceFrames,
+                    $"{action.Title} · {owned.AssetName}", owned.ObjectPath,
+                    Join(action.ActionCode, action.FormIndex, owned.AssetName,
+                        SequenceFrameIdentity.NormalizeAssetClass(owned.AssetClass)),
+                    string.Empty, owned.AssetName);
             }
         }
 

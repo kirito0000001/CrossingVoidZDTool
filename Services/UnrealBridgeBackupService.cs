@@ -6,6 +6,17 @@ using System.Linq;
 
 namespace CrossingVoidZDTool.Services;
 
+internal enum UnrealBridgeBackupDecision
+{
+    /// <summary>不备份：本批只新增，没有改写或删除既有资产。</summary>
+    Skip,
+
+    /// <summary>不备份，但要提醒：用户关掉了开关，而这一批会改写或删除既有资产。</summary>
+    SkipWithRiskWarning,
+
+    Backup
+}
+
 internal static class UnrealBridgeBackupPolicy
 {
     public static bool ShouldBackupByDefault(IEnumerable<UnrealBridgeChange> changes)
@@ -13,6 +24,27 @@ internal static class UnrealBridgeBackupPolicy
         return changes.Any(change =>
             change.IsSelected &&
             change.Kind is UnrealBridgeChangeKind.Updated or UnrealBridgeChangeKind.Renamed or UnrealBridgeChangeKind.Conflict or UnrealBridgeChangeKind.DeleteCandidate);
+    }
+
+    /// <summary>
+    /// 同步前备不备份。整体设置是唯一开关：关掉就一律不备份。
+    ///
+    /// 以前只要计划里含更新/改名/删除就会绕过设置强制备份一次，
+    /// 而第五步必然带删除项，等于这个开关对第五步完全无效——
+    /// 关着开关点同步，照样先压一份几个 G 的工程出来。
+    /// </summary>
+    public static UnrealBridgeBackupDecision Decide(
+        bool backupEnabledInSettings,
+        bool planTouchesExistingAssets)
+    {
+        if (backupEnabledInSettings)
+        {
+            return UnrealBridgeBackupDecision.Backup;
+        }
+
+        return planTouchesExistingAssets
+            ? UnrealBridgeBackupDecision.SkipWithRiskWarning
+            : UnrealBridgeBackupDecision.Skip;
     }
 }
 

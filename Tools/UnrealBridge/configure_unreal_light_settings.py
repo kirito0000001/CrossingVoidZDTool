@@ -281,7 +281,166 @@ def _literal_object_path(literal):
     return _object_path(_read_property(literal, "Object"))
 
 
+# 这两个是 MetaSound 的 graph variable，不是 graph input：
+# 该资产的 GetGraphInputNames 只返回 UE.Source.OnPlay。
+WAVE_VARIABLE_NAMES = ("Wave Asset", "WaveAsset")
+WEIGHTS_VARIABLE_NAMES = ("Weights",)
+
+
+def _meta_builder(asset):
+    """Return the document builder for a MetaSound asset, or None.
+
+    The editor graph member objects only mirror the document: their Defaults
+    property is declared Transient, so in a fresh headless process it is empty
+    even when the asset on disk holds the values. The frontend document reached
+    through the builder is the authoritative store for both reading and writing.
+    """
+    try:
+        subsystem = unreal.get_editor_subsystem(unreal.MetaSoundEditorSubsystem)
+    except Exception:
+        return None
+    if subsystem is None:
+        return None
+    try:
+        result = subsystem.find_or_begin_building(asset)
+    except Exception:
+        return None
+    builder = result[0] if isinstance(result, tuple) else result
+    return builder or None
+
+
+def _builder_subsystem():
+    try:
+        return unreal.get_engine_subsystem(unreal.MetaSoundBuilderSubsystem)
+    except Exception:
+        return None
+
+
+def _first_value(result):
+    return result[0] if isinstance(result, tuple) else result
+
+
+def _graph_variable_literal(builder, names):
+    """Read a graph variable default, trying each accepted spelling."""
+    for name in names:
+        try:
+            literal = _first_value(builder.get_graph_variable_default(name))
+        except Exception:
+            continue
+        text = _literal_text(literal)
+        # 变量不存在时引擎返回 Type=None 的空字面量，不能当成“当前值为空”。
+        if text and "Type=None" not in text:
+            return literal
+    return None
+
+
+def _literal_text(literal):
+    if literal is None:
+        return ""
+    try:
+        return str(literal.export_text())
+    except Exception:
+        return ""
+
+
+def _literal_group(text, field):
+    """Extract one bracketed field from a literal export, tolerating nested parens."""
+    marker = field + "=("
+    start = text.find(marker)
+    if start < 0:
+        return None
+    index = start + len(marker)
+    depth = 1
+    while index < len(text) and depth > 0:
+        if text[index] == "(":
+            depth += 1
+        elif text[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[start + len(marker):index]
+        index += 1
+    return None
+
+
+def _literal_object_paths(literal):
+    """Best-effort display list. Correctness of the diff never depends on this."""
+    group = _literal_group(_literal_text(literal), "AsUObject")
+    if group is None:
+        return []
+    values = []
+    for item in group.split(","):
+        item = item.strip()
+        if not item or item.lower() == "none":
+            values.append("")
+            continue
+        # 元素形如 "/Script/Engine.SoundWave'/Game/.../Misaka-Hurt-01.Misaka-Hurt-01'"：
+        # 真实路径在内层单引号里，先匹配双引号会连类名一起取到。
+        quoted = re.search(r"'([^']+)'", item) or re.search(r'"([^"]+)"', item)
+        values.append(_normalized_path(quoted.group(1) if quoted else item))
+    return values
+
+
+def _literal_floats(literal):
+    group = _literal_group(_literal_text(literal), "AsFloat")
+    if group is None:
+        return []
+    values = []
+    for item in group.split(","):
+        item = item.strip()
+        if not item:
+            continue
+        try:
+            values.append(float(item))
+        except ValueError:
+            continue
+    return values
+
+
+def _build_wave_literal(subsystem, hurt_paths):
+    """Index 0 stays empty; the toolbox Hurt voices follow in ascending order."""
+    sounds = [None]
+    for index, path in enumerate(hurt_paths, start=1):
+        sounds.append(_load_asset(path, "受击语音 #{}".format(index), "SoundWave"))
+    return _first_value(subsystem.create_object_array_meta_sound_literal(sounds))
+
+
+def _build_weight_literal(subsystem, hurt_count):
+    weights = [0.3] + [0.1] * hurt_count
+    return _first_value(subsystem.create_float_array_meta_sound_literal(weights))
+
+
+def _same_literal(left, right):
+    """Compare two literals produced by the same engine serializer.
+
+    Comparing exported text avoids parsing the literal's internals, so the
+    difference verdict stays correct even if the export format changes.
+    """
+    left_text = _literal_text(left)
+    right_text = _literal_text(right)
+    return bool(left_text) and left_text == right_text
+
+
+def _set_graph_variable_default(asset, names, literal):
+    """Write a graph variable default through ZDBridge.
+
+    Returns the variable name that was written, or None when the plugin function
+    is unavailable so the caller can fall back to the editor graph mirror.
+    """
+    bridge = getattr(unreal, "ZDBridgeLibrary", None)
+    method = getattr(bridge, "set_meta_sound_graph_variable_default", None) if bridge else None
+    if method is None:
+        return None
+    last_error = ""
+    for name in names:
+        error = str(method(asset, name, literal) or "")
+        if not error:
+            return name
+        last_error = error
+    raise RuntimeError(last_error or "ZDBridge 未能写入 MetaSound 变量默认值")
+
+
 def _read_meta_arrays(asset, asset_path):
+    """Legacy fallback: read the editor graph mirror when no builder is available."""
     _prepare_metasound(asset)
     document = _read_property(asset, "RootMetasoundDocument")
     try:
@@ -305,10 +464,20 @@ def _read_meta_arrays(asset, asset_path):
     return object_member, float_member, object_values, float_values
 
 
-def _set_meta_object_array(member, current_values, object_paths):
-    defaults, page = _member_page(member, "Wave Asset")
+# 引擎没有向脚本暴露 SetGraphVariableDefault，写入只能经由编辑器图镜像；
+# 而该镜像是 Transient 的，只有资产在 MetaSound 编辑器里打开过才会被回填。
+MIRROR_REQUIRED_HINT = (
+    "受击 MetaSound 的{}默认值当前不可写：编辑器图缓存为空。"
+    "请在 Unreal 中打开 {} 这个 MetaSound 后再应用基础配置。")
+
+
+def _set_meta_object_array(member, current_values, object_paths, asset_path=""):
+    try:
+        defaults, page = _member_page(member, "Wave Asset")
+    except RuntimeError:
+        raise RuntimeError(MIRROR_REQUIRED_HINT.format("受击语音数组", asset_path))
     if not current_values:
-        raise RuntimeError("Wave Asset 数组缺少可复制的空占位元素")
+        raise RuntimeError(MIRROR_REQUIRED_HINT.format("受击语音数组", asset_path))
     blank = _clone_struct(current_values[0])
     _write_property(blank, "Object", None)
     values = [blank]
@@ -324,8 +493,11 @@ def _set_meta_object_array(member, current_values, object_paths):
     _write_property(member, "Defaults", defaults)
 
 
-def _set_meta_float_array(member, weights):
-    defaults, page = _member_page(member, "Weights")
+def _set_meta_float_array(member, weights, asset_path=""):
+    try:
+        defaults, page = _member_page(member, "Weights")
+    except RuntimeError:
+        raise RuntimeError(MIRROR_REQUIRED_HINT.format("受击语音权重", asset_path))
     updated_page = page
     _write_property(updated_page, "Value", [float(value) for value in weights])
     defaults[0] = updated_page
@@ -373,19 +545,36 @@ def _build_meta_entries(request):
         "MetaSoundSource.ConcurrencySet", "当前角色 Con_Ondm",
         current_concurrency, [hurt_concurrency_path],
         _same_paths(current_concurrency, [hurt_concurrency_path]))]
-    object_member, float_member, object_values, float_values = _read_meta_arrays(meta_asset, meta_path)
-    current_waves = [_literal_object_path(value) for value in object_values]
     hurt_paths = list(_get(request, "HurtVoiceObjectPaths", "hurtVoiceObjectPaths", default=[]))
-    for index, path in enumerate(hurt_paths, start=1):
-        _load_asset(path, "受击语音 #{}".format(index), "SoundWave")
     target_waves = [""] + hurt_paths
     target_weights = [0.3] + [0.1] * len(hurt_paths)
+    builder = _meta_builder(meta_asset)
+    subsystem = _builder_subsystem()
+    target_wave_literal = _build_wave_literal(subsystem, hurt_paths) if subsystem is not None else None
+    target_weight_literal = _build_weight_literal(subsystem, len(hurt_paths)) if subsystem is not None else None
+    # 只有当字面量能导出文本时才走文档比较；导不出来就没有可比对象，退回旧路径，
+    # 否则两边都是空串会把每次检测都判成待设置。
+    if builder is not None and _literal_text(target_wave_literal) and _literal_text(target_weight_literal):
+        # 权威来源是 MetaSound 的前端文档；编辑器图成员上的 Defaults 是 Transient 的，
+        # 无头进程里恒为空，按它比较会把已经同步好的数组永远判成待设置。
+        current_wave_literal = _graph_variable_literal(builder, WAVE_VARIABLE_NAMES)
+        current_weight_literal = _graph_variable_literal(builder, WEIGHTS_VARIABLE_NAMES)
+        current_waves = _literal_object_paths(current_wave_literal)
+        float_values = _literal_floats(current_weight_literal)
+        waves_equal = _same_literal(current_wave_literal, target_wave_literal)
+        weights_equal = _same_literal(current_weight_literal, target_weight_literal)
+    else:
+        object_member, float_member, object_values, float_values = _read_meta_arrays(meta_asset, meta_path)
+        current_waves = [_literal_object_path(value) for value in object_values]
+        for index, path in enumerate(hurt_paths, start=1):
+            _load_asset(path, "受击语音 #{}".format(index), "SoundWave")
+        waves_equal = _same_paths(current_waves, target_waves)
+        weights_equal = len(float_values) == len(target_weights) and all(
+            abs(left - right) < 0.0001 for left, right in zip(float_values, target_weights))
     entries.append(_entry(
         "meta.waves", "受击 MetaSound", "受击语音数组", meta_path,
         "Wave Asset:WaveAsset:Array", "Hurt 按编号升序，索引 0 留空",
-        current_waves, target_waves, _same_paths(current_waves, target_waves)))
-    weights_equal = len(float_values) == len(target_weights) and all(
-        abs(left - right) < 0.0001 for left, right in zip(float_values, target_weights))
+        current_waves, target_waves, waves_equal))
     entries.append(_entry(
         "meta.weights", "受击 MetaSound", "受击语音权重", meta_path,
         "Weights:Float:Array", "索引 0 为 0.3，其余为 0.1",
@@ -650,34 +839,43 @@ def _apply_meta(request, selected, changed_assets):
             applied.append("meta.concurrency")
         except Exception as error:
             errors["meta.concurrency"] = str(error)
-    if "meta.waves" in selected or "meta.weights" in selected:
-        try:
+    hurt_paths = list(_get(request, "HurtVoiceObjectPaths", "hurtVoiceObjectPaths", default=[]))
+    subsystem = _builder_subsystem()
+    object_member = float_member = None
+    object_values = []
+    mirror_loaded = False
+
+    def _ensure_mirror():
+        """Editor graph mirror fallback: only load it when ZDBridge is unavailable."""
+        nonlocal object_member, float_member, object_values, mirror_loaded
+        if not mirror_loaded:
             object_member, float_member, object_values, _ = _read_meta_arrays(asset, meta_path)
-        except Exception as error:
-            if "meta.waves" in selected:
-                errors["meta.waves"] = str(error)
-            if "meta.weights" in selected:
-                errors["meta.weights"] = str(error)
-            object_member = float_member = None
-            object_values = []
+            mirror_loaded = True
+
     if "meta.waves" in selected:
-        if "meta.waves" not in errors:
-            try:
-                _set_meta_object_array(
-                    object_member,
-                    object_values,
-                    list(_get(request, "HurtVoiceObjectPaths", "hurtVoiceObjectPaths", default=[])))
-                applied.append("meta.waves")
-            except Exception as error:
-                errors["meta.waves"] = str(error)
+        try:
+            written = None
+            if subsystem is not None:
+                written = _set_graph_variable_default(
+                    asset, WAVE_VARIABLE_NAMES, _build_wave_literal(subsystem, hurt_paths))
+            if written is None:
+                _ensure_mirror()
+                _set_meta_object_array(object_member, object_values, hurt_paths, meta_path)
+            applied.append("meta.waves")
+        except Exception as error:
+            errors["meta.waves"] = str(error)
     if "meta.weights" in selected:
-        if "meta.weights" not in errors:
-            try:
-                hurt_count = len(_get(request, "HurtVoiceObjectPaths", "hurtVoiceObjectPaths", default=[]))
-                _set_meta_float_array(float_member, [0.3] + [0.1] * hurt_count)
-                applied.append("meta.weights")
-            except Exception as error:
-                errors["meta.weights"] = str(error)
+        try:
+            written = None
+            if subsystem is not None:
+                written = _set_graph_variable_default(
+                    asset, WEIGHTS_VARIABLE_NAMES, _build_weight_literal(subsystem, len(hurt_paths)))
+            if written is None:
+                _ensure_mirror()
+                _set_meta_float_array(float_member, [0.3] + [0.1] * len(hurt_paths), meta_path)
+            applied.append("meta.weights")
+        except Exception as error:
+            errors["meta.weights"] = str(error)
     if applied:
         changed_assets.append(asset)
     return applied, errors
