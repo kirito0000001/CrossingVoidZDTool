@@ -23,6 +23,18 @@ internal static class SequenceFrameIdentity
     /// <summary>该动作在 Unreal 里占用、但不属于规范命名的历史资产。</summary>
     public const string OwnedAssetPrefix = "sequence-asset:";
 
+    /// <summary>挂在角色动画源上、却不属于任何规范动作的序列。</summary>
+    public const string OrphanSequencePrefix = "sequence-orphan:";
+
+    /// <summary>孤儿序列没有归属动作，全部挂在这一个分组下。</summary>
+    public const string OrphanGroupStableId = "sequence:__orphan__";
+
+    public static string BuildOrphanSequenceStableId(string? objectPath) =>
+        OrphanSequencePrefix + NormalizePackagePath(objectPath);
+
+    public static bool IsOrphanSequenceStableId(string? stableId) =>
+        (stableId ?? string.Empty).StartsWith(OrphanSequencePrefix, StringComparison.OrdinalIgnoreCase);
+
     private static readonly Regex StructAddressPattern = new(@"\s*\(0x[0-9A-Fa-f]+\)", RegexOptions.Compiled);
     private static readonly Regex StructAssetNamePattern =
         new("asset_name:\\s*\"([^\"]+)\"", RegexOptions.Compiled);
@@ -56,6 +68,39 @@ internal static class SequenceFrameIdentity
         return match.Success
             ? match.Groups[1].Value
             : StructAddressPattern.Replace(text, string.Empty).Trim();
+    }
+
+    /// <summary>两侧语义载荷用的字段分隔符（Unreal 侧是 \u001f 拼接，工具箱侧是 JSON）。</summary>
+    public const char SemanticPayloadSeparator = (char)0x1F;
+
+    /// <summary>
+    /// 这一帧是不是空白帧。
+    ///
+    /// 空白帧在 Unreal 里没有对应资产——它就是 Flipbook 里 sprite 为 null 的关键帧，
+    /// 所以既没有对象路径也没有源文件。差异比较和可执行性判定都要认得它，
+    /// 因此判定放在共用处：以前只有差异服务有一份私有实现，
+    /// 发布策略那边不认，含空白帧的动作被勾选后整批同步会被拦下。
+    /// </summary>
+    public static bool IsBlankFramePayload(string? payloadJson)
+    {
+        var payload = payloadJson ?? string.Empty;
+        if (payload.TrimStart().StartsWith("{", StringComparison.Ordinal))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(payload);
+                return document.RootElement.TryGetProperty("isBlank", out var value) &&
+                    string.Equals(value.GetString(), "true", StringComparison.OrdinalIgnoreCase);
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
+        var fields = payload.Split(SemanticPayloadSeparator);
+        return fields.Length > 0 &&
+            string.Equals(fields[^1], "True", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>动作节点的稳定 ID。别名写法（Ondm/OnDamage、Defense/Defence）会归一到同一个键。</summary>

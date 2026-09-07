@@ -16,6 +16,13 @@ internal sealed class UnrealBridgeSequenceSyncPlan
     public string CharacterBlueprintPath { get; set; } = string.Empty;
     public string AnimMapsPath { get; set; } = string.Empty;
     public List<UnrealBridgeSequenceSyncAction> Actions { get; set; } = [];
+
+    /// <summary>
+    /// 要从角色动画源上解绑的非规范序列（对象路径）。
+    /// 只解绑、不删资产：串错位置的序列往往仍是有用素材，
+    /// 因为它看起来不该在这儿就把它删掉，代价太大。
+    /// </summary>
+    public List<string> DetachSequenceObjectPaths { get; set; } = [];
 }
 
 internal sealed class UnrealBridgeSequenceSyncAction
@@ -76,6 +83,16 @@ internal sealed class UnrealBridgeSequencePublishService
         IReadOnlyList<UnrealBridgeChange> selectedSequenceChanges)
     {
         ArgumentNullException.ThrowIfNull(character);
+        // 孤儿序列不属于任何动作，单独收集；它们只需要解绑，不参与逐动作的重建。
+        var detachPaths = selectedSequenceChanges
+            .Where(change => change.IsSelected &&
+                change.Module == UnrealBridgeModule.SequenceFrames &&
+                SequenceFrameIdentity.IsOrphanSequenceStableId(change.StableId))
+            .Select(change => change.UnrealItem?.SourceObjectPath ?? string.Empty)
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
         var selectedActions = selectedSequenceChanges
             .Where(change => change.IsSelected && change.Module == UnrealBridgeModule.SequenceFrames)
             .Select(ResolveAction)
@@ -83,7 +100,8 @@ internal sealed class UnrealBridgeSequencePublishService
             .Select(resolved => resolved!.Value)
             .DistinctBy(resolved => (resolved.Definition.Code, resolved.FormIndex))
             .ToArray();
-        if (selectedActions.Length == 0)
+        // 只勾了非规范序列（只需解绑、不重建任何动作）也是合法的一批。
+        if (selectedActions.Length == 0 && detachPaths.Count == 0)
         {
             throw new InvalidOperationException("没有选择需要同步的序列动作。");
         }
@@ -128,7 +146,8 @@ internal sealed class UnrealBridgeSequencePublishService
             CharacterCode = character.Code,
             UnrealProjectPath = project,
             CharacterBlueprintPath = $"{root}/{character.Code}.{character.Code}",
-            AnimMapsPath = $"{root}/{character.Code}_AnimMaps.{character.Code}_AnimMaps"
+            AnimMapsPath = $"{root}/{character.Code}_AnimMaps.{character.Code}_AnimMaps",
+            DetachSequenceObjectPaths = detachPaths
         };
         foreach (var (definition, formIndex) in selectedActions)
         {
@@ -190,7 +209,7 @@ internal sealed class UnrealBridgeSequencePublishService
             plan.Actions.Add(action);
         }
 
-        if (plan.Actions.Count == 0)
+        if (plan.Actions.Count == 0 && plan.DetachSequenceObjectPaths.Count == 0)
         {
             throw new InvalidOperationException(skipped.Count > 0
                 ? $"选中的动作在工具箱里没有序列帧数据：{string.Join("、", skipped)}。"

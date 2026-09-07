@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Text.Json.Serialization;
 
 namespace CrossingVoidZDTool;
 
@@ -375,6 +376,13 @@ internal sealed class UnrealBridgeExecutionResult
     public DateTimeOffset CompletedAt { get; set; }
 
     public List<UnrealBridgeExecutionItemResult> Items { get; set; } = [];
+
+    /// <summary>
+    /// 进程退出码非 0、但结果文件判定成功时的诊断信息。
+    /// 只在工具箱进程内传递，不属于桥接协议。
+    /// </summary>
+    [JsonIgnore]
+    public string ProcessExitWarning { get; set; } = string.Empty;
 }
 
 internal sealed class UnrealBridgeExecutionItemResult

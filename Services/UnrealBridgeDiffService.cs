@@ -146,27 +146,8 @@ internal sealed class UnrealBridgeDiffService
     /// 两侧 payload 格式不同：工具箱是 JSON，Unreal 语义快照是分隔符连接的字段串，
     /// 其中 isBlank 是最后一个字段。不能整串找 "True"，否则任何含该词的字段都会误判。
     /// </summary>
-    private static bool IsBlankSequenceFrame(UnrealBridgeSnapshotItem item)
-    {
-        var payload = item.PayloadJson ?? string.Empty;
-        if (payload.TrimStart().StartsWith("{", StringComparison.Ordinal))
-        {
-            try
-            {
-                using var document = JsonDocument.Parse(payload);
-                return document.RootElement.TryGetProperty("isBlank", out var value) &&
-                    string.Equals(value.GetString(), "true", StringComparison.OrdinalIgnoreCase);
-            }
-            catch (JsonException)
-            {
-                return false;
-            }
-        }
-
-        var fields = payload.Split(SemanticPayloadSeparator);
-        return fields.Length > 0 &&
-            string.Equals(fields[^1], "True", StringComparison.OrdinalIgnoreCase);
-    }
+    private static bool IsBlankSequenceFrame(UnrealBridgeSnapshotItem item) =>
+        SequenceFrameIdentity.IsBlankFramePayload(item.PayloadJson);
 
     /// <summary>该帧的 Unreal 资产已经落在规范命名上，可以直接作为同步基线。</summary>
     private static bool IsCanonicalSequenceFramePair(
@@ -487,17 +468,25 @@ internal sealed class UnrealBridgeDiffService
                 : stateEntry.ToolboxHash;
             var sourceChanged = !string.Equals(sourceItem.ContentHash, baselineSourceHash, StringComparison.OrdinalIgnoreCase);
             var targetChanged = !string.Equals(targetItem!.ContentHash, baselineTargetHash, StringComparison.OrdinalIgnoreCase);
-            kind = targetChanged
-                ? UnrealBridgeChangeKind.Conflict
-                : isRename
+            // 两侧当前就是一致的：没有东西可同步，也谈不上冲突。
+            // 基线可能停在更早的状态——比如某些动作的 fps 曾经两边不一样，那时记下的
+            // 两个哈希互不相同；同步把两边弄一致之后，只凭「相对基线都变了」会把这些
+            // 已经同步好的动作永久判成冲突，差异列表再也归不了零。
+            kind = string.Equals(sourceItem.ContentHash, targetItem.ContentHash, StringComparison.OrdinalIgnoreCase)
+                ? isRename || sequenceNeedsCanonicalRename
                     ? UnrealBridgeChangeKind.Renamed
-                    : sourceChanged
-                        ? UnrealBridgeChangeKind.Updated
-                        // 有基线条目、两侧哈希也都没变，但资产还停在历史命名上：
-                        // 仍然要判成改名，否则该改名的帧永远不会出现在第五步列表里。
-                        : sequenceNeedsCanonicalRename
-                            ? UnrealBridgeChangeKind.Renamed
-                            : UnrealBridgeChangeKind.Unchanged;
+                    : UnrealBridgeChangeKind.Unchanged
+                : targetChanged
+                    ? UnrealBridgeChangeKind.Conflict
+                    : isRename
+                        ? UnrealBridgeChangeKind.Renamed
+                        : sourceChanged
+                            ? UnrealBridgeChangeKind.Updated
+                            // 有基线条目、两侧哈希也都没变，但资产还停在历史命名上：
+                            // 仍然要判成改名，否则该改名的帧永远不会出现在第五步列表里。
+                            : sequenceNeedsCanonicalRename
+                                ? UnrealBridgeChangeKind.Renamed
+                                : UnrealBridgeChangeKind.Unchanged;
         }
         // 序列帧两侧的哈希本来就不可直接比较（工具箱是源文件，Unreal 是导出预览），
         // 所以只要资产已经在规范位置就当作已同步，并在这一轮建立基线。
@@ -536,6 +525,12 @@ internal sealed class UnrealBridgeDiffService
         if (change.Module != UnrealBridgeModule.SequenceFrames)
         {
             return change.StableId;
+        }
+
+        // 孤儿序列不属于任何动作，全部归到同一个分组下。
+        if (SequenceFrameIdentity.IsOrphanSequenceStableId(change.StableId))
+        {
+            return SequenceFrameIdentity.OrphanGroupStableId;
         }
 
         // 帧是「动作键 + 位置」，占用资产是「动作键 + 资产名」；两者都取最后一个冒号之前的部分。

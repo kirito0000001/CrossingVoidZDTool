@@ -469,7 +469,6 @@ internal sealed class UnrealProjectSyncService
 
         var exportDirectoryPath = GetExportDirectoryPath(normalizedProjectPath);
         Directory.CreateDirectory(exportDirectoryPath);
-        var manifestPath = Path.Combine(exportDirectoryPath, GetExportManifestFileName(scope));
         var editorCommandPath = ResolveEditorCommandPath(normalizedEnginePath);
         var startInfo = new ProcessStartInfo
         {
@@ -479,18 +478,50 @@ internal sealed class UnrealProjectSyncService
             CreateNoWindow = true,
             WorkingDirectory = Path.GetDirectoryName(editorCommandPath) ?? string.Empty
         };
-        startInfo.Environment["ZD_TOOLBOX_PROJECT_PATH"] = normalizedProjectPath;
-        startInfo.Environment["ZD_TOOLBOX_EXPORT_MANIFEST"] = manifestPath;
-        startInfo.Environment["ZD_TOOLBOX_EXPORT_PROGRESS"] = GetExportProgressPath(manifestPath);
-        startInfo.Environment["ZD_TOOLBOX_TARGET_PATHS"] = $"[{string.Join(", ", ExportTargetContentPaths.Select(ToJsonStringLiteral))}]";
-        startInfo.Environment["ZD_TOOLBOX_EXPORT_SCOPE"] = scope.ToString();
-        if (selectedCharacterCodes is { Count: > 0 })
+        foreach (var (key, value) in BuildExportEnvironment(normalizedProjectPath, scope, selectedCharacterCodes))
         {
-            startInfo.Environment["ZD_TOOLBOX_SELECTED_CHARACTERS"] =
-                $"[{string.Join(", ", selectedCharacterCodes.Select(ToJsonStringLiteral))}]";
+            startInfo.Environment[key] = value;
         }
+
         return startInfo;
     }
+
+    /// <summary>
+    /// 导出脚本认的那批环境变量。
+    ///
+    /// 抽出来是因为桥接同步要在同一个编辑器会话里顺手把复扫导出做掉：
+    /// 一次同步原本要开三次编辑器，而实测每次会话 13-15 秒里约 9 秒是纯启动开销。
+    /// 两边必须用同一套变量，否则复扫会写到别的清单上。
+    /// </summary>
+    public IReadOnlyDictionary<string, string> BuildExportEnvironment(
+        string projectPath,
+        UnrealProjectSyncExportScope scope,
+        IReadOnlyCollection<string>? selectedCharacterCodes)
+    {
+        var normalizedProjectPath = NormalizePath(projectPath);
+        var manifestPath = GetExportManifestPath(normalizedProjectPath, scope);
+        var values = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["ZD_TOOLBOX_PROJECT_PATH"] = normalizedProjectPath,
+            ["ZD_TOOLBOX_EXPORT_MANIFEST"] = manifestPath,
+            ["ZD_TOOLBOX_EXPORT_PROGRESS"] = GetExportProgressPath(manifestPath),
+            ["ZD_TOOLBOX_TARGET_PATHS"] = $"[{string.Join(", ", ExportTargetContentPaths.Select(ToJsonStringLiteral))}]",
+            ["ZD_TOOLBOX_EXPORT_SCOPE"] = scope.ToString(),
+        };
+        if (selectedCharacterCodes is { Count: > 0 })
+        {
+            values["ZD_TOOLBOX_SELECTED_CHARACTERS"] =
+                $"[{string.Join(", ", selectedCharacterCodes.Select(ToJsonStringLiteral))}]";
+        }
+
+        return values;
+    }
+
+    /// <summary>某个导出范围对应的清单文件路径。</summary>
+    public string GetExportManifestPath(string projectPath, UnrealProjectSyncExportScope scope) =>
+        Path.Combine(
+            GetExportDirectoryPath(NormalizePath(projectPath)),
+            GetExportManifestFileName(scope));
 
     private static string GetExportManifestFileName(UnrealProjectSyncExportScope scope) =>
         scope switch
@@ -648,6 +679,7 @@ internal sealed class UnrealProjectSyncService
             launch.UsesRunningEditor ? "正在连接已打开的 Unreal Editor..." : "正在启动 Unreal Editor 命令进程...",
             35,
             startInfo.FileName));
+        var runStartedAtUtc = DateTime.UtcNow;
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("无法启动 Unreal Python 任务进程。");
         var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
@@ -700,25 +732,30 @@ internal sealed class UnrealProjectSyncService
         cancellationToken.ThrowIfCancellationRequested();
         progress?.Report(new ProgressUpdate("正在读取 Unreal 导出结果...", 94, manifestPath));
         var output = await outputTask + await errorTask;
-        if (process.ExitCode != 0)
+        var detail = string.IsNullOrWhiteSpace(output)
+            ? "Unreal 未返回标准输出；请查看项目 Saved/Logs 下的最新日志。"
+            : output.Trim();
+        if (detail.Length > 4000)
         {
-            var detail = string.IsNullOrWhiteSpace(output)
-                ? "Unreal 未返回标准输出；请查看项目 Saved/Logs 下的最新日志。"
-                : output.Trim();
-            if (detail.Length > 4000)
-            {
-                detail = detail[^4000..];
-            }
-
-            throw new InvalidOperationException(
-                $"Unreal 角色数据导出失败，退出码 {process.ExitCode}。\n{detail}");
+            detail = detail[^4000..];
         }
 
         var manifest = LoadExportManifest(manifestPath);
-        if (manifest is null)
+        // 导出成没成功，以清单为准，不以退出码为准。
+        // commandlet 只要编辑器在别处报过错就返回非 0——实测工程里有个蓝图编译不过，
+        // 于是每次检测都被判成「导出失败」，而日志里明写着 Python script executed successfully、
+        // 清单也照常写出来了。清单缺失或不是这一轮写的，才是真失败。
+        var manifestIsFresh = manifest is not null && TryGetLastWriteUtc(manifestPath) > runStartedAtUtc;
+        if (manifest is null || !manifestIsFresh)
         {
-            throw new InvalidOperationException($"Unreal 导出进程已结束，但没有生成有效清单：{manifestPath}");
+            throw new InvalidOperationException(process.ExitCode != 0
+                ? $"Unreal 角色数据导出失败，退出码 {process.ExitCode}。\n{detail}"
+                : $"Unreal 导出进程已结束，但没有生成有效清单：{manifestPath}");
         }
+
+        var exportWarning = process.ExitCode == 0
+            ? string.Empty
+            : $"Unreal 退出码为 {process.ExitCode}，但导出清单已正常写出；退出码多半来自与导出无关的编辑器报错。\n{detail}";
 
         var assetCount = manifest?.Assets.Count ?? 0;
         var characterItemCount = manifest?.CharacterItems.Count ?? 0;
@@ -728,7 +765,7 @@ internal sealed class UnrealProjectSyncService
             "项目角色导出完成。",
             100,
             $"导出资产 {assetCount} 个，角色物品 {characterItemCount} 个，序列预览 {characterSequenceCount} 个，BUFF {(manifest?.CharacterBuffs.Count ?? 0)} 组。"));
-        return new UnrealProjectSyncExportRunResult(process.ExitCode, manifestPath, totalCount, output);
+        return new UnrealProjectSyncExportRunResult(process.ExitCode, manifestPath, totalCount, output, exportWarning);
     }
 
     public string GetExportDirectoryPath(string projectPath)
@@ -739,6 +776,19 @@ internal sealed class UnrealProjectSyncService
     private static string GetExportProgressPath(string manifestPath)
     {
         return Path.Combine(Path.GetDirectoryName(manifestPath)!, "characters.progress.json");
+    }
+
+    private static DateTime TryGetLastWriteUtc(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            return info.Exists ? info.LastWriteTimeUtc : DateTime.MinValue;
+        }
+        catch (IOException)
+        {
+            return DateTime.MinValue;
+        }
     }
 
     private static UnrealExportProgressState? TryReadExportProgress(string path)
@@ -1781,6 +1831,7 @@ internal sealed class UnrealProjectSyncService
                 [],
                 [],
                 [],
+                [],
                 []);
         }
 
@@ -1812,7 +1863,8 @@ internal sealed class UnrealProjectSyncService
             baseActions,
             skillActions,
             linkActions,
-            otherActions);
+            otherActions,
+            sequence.OrphanSequences.Select(BuildExportAssetView).ToArray());
     }
 
     private static UnrealProjectSyncBuffsPreview BuildBuffsPreview(UnrealProjectExportCharacterBuffSet? buffSet)

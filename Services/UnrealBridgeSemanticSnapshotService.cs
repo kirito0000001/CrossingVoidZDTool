@@ -50,6 +50,34 @@ internal sealed class UnrealBridgeSemanticSnapshotService
                 $"link:{linkIndex}:{link.SupportCharacterCode}:{link.SkillIndex}");
         }
 
+        // 挂在角色动画源上、却不属于任何规范动作的序列。
+        // 工具箱侧永远不会产出这些条目，所以它们只会以「删除候选」的形式出现。
+        // 注意：第五步只把它们从动画源上解绑，不删资产——串错位置的序列往往仍是有用素材。
+        var orphanSequences = candidate.SequenceFramesPreview.OrphanSequences;
+        if (orphanSequences.Count > 0)
+        {
+            // 不产出分组表头条目：工具箱侧不可能有对应项，它自己会被判成一条"待删除"，
+            // 于是分组标题混进删除候选里，计数比实际多一项。
+            // 分组由子项的 SequenceGroupKey 合成，标题另有解析规则。
+            foreach (var orphan in orphanSequences)
+            {
+                if (string.IsNullOrWhiteSpace(orphan.ObjectPath))
+                {
+                    continue;
+                }
+
+                Add(items,
+                    SequenceFrameIdentity.BuildOrphanSequenceStableId(orphan.ObjectPath),
+                    SequenceFrameIdentity.OrphanGroupStableId,
+                    UnrealBridgeModule.SequenceFrames,
+                    $"非规范序列 · {orphan.AssetName}",
+                    orphan.ObjectPath,
+                    Join(orphan.AssetName, SequenceFrameIdentity.NormalizeAssetClass(orphan.AssetClass)),
+                    string.Empty,
+                    orphan.AssetName);
+            }
+        }
+
         foreach (var action in candidate.SequenceFramesPreview.Actions.Where(action => action.HasData))
         {
             // 动作和帧的稳定 ID 与工具箱快照共用一套规则：动作 + 帧位置。

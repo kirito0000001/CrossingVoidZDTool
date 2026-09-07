@@ -362,6 +362,8 @@ namespace CrossingVoidZDTool
                 AppendLog(LogKind.Info, $"[Pre-Sync Restore Result] restored={restoredSelection.Count} ids={string.Join(",", restoredSelection.Take(12))}");
                 if (publishChangesChanged)
                 {
+                    AppendLog(LogKind.Warning,
+                        $"[Sync Aborted] reason=changes-drifted character={character.Code} latest={latestChanges.Length}");
                     _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(isSequenceSynchronization ? 5 : 3);
                     CompleteGlobalProgress("同步内容发生变化", "已刷新第三步列表，请重新确认后再次同步。");
                     ShowFloatingTip(InfoBarSeverity.Warning, "同步内容已刷新", "最终检测发现素材发生变化，请重新确认本次选择。");
@@ -398,6 +400,8 @@ namespace CrossingVoidZDTool
                         return;
                     }
 
+                    AppendLog(LogKind.Warning,
+                        $"[Sync Aborted] reason=no-detection character={character.Code} leaves={selectionLeaves.Length}");
                     CompleteGlobalProgress("尚未检测差异", "请先检测差异，再勾选需要同步的内容。");
                     ShowFloatingTip(InfoBarSeverity.Warning, "尚未检测差异", "请先检测差异，再勾选需要同步的内容。");
                     await HideGlobalProgressAfterDelayAsync();
@@ -408,6 +412,8 @@ namespace CrossingVoidZDTool
                 // 早退在前会把「已经做完了」误报成「勾选失效」。
                 if (selectionWasLost)
                 {
+                    AppendLog(LogKind.Warning,
+                        $"[Sync Aborted] reason=selection-lost character={character.Code} before={selectionBeforeRefresh.Count} restored={restoredSelection.Count}");
                     _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(isSequenceSynchronization ? 5 : 3);
                     CompleteGlobalProgress("同步已停止", "刷新后未能恢复原来的勾选，未修改 Unreal。请重新检测差异并确认选择。");
                     ShowFloatingTip(InfoBarSeverity.Warning, "未恢复同步选择", "刷新后的勾选集合与同步前不一致，已停止执行，未修改 Unreal。");
@@ -419,6 +425,16 @@ namespace CrossingVoidZDTool
                     !_applicationViewModel.UnrealProjectSync.CanExecutePublishChange(change)).ToArray();
                 if (unsupported.Length > 0)
                 {
+                    // 逐条列出来：全选时最常见的原因是某个动作的工具箱侧源文件已经不在了。
+                    AppendLog(LogKind.Warning,
+                        $"[Sync Aborted] reason=unsupported character={character.Code} count={unsupported.Length}/{executableCount}");
+                    foreach (var item in unsupported)
+                    {
+                        AppendDiagnosticLog(LogKind.Warning,
+                            $"[Sync Aborted Item] stableId={item.StableId} kind={item.Kind} display={FormatSyncLogValue(item.DisplayName)} " +
+                            $"toolboxAsset={FormatSyncLogValue(item.ToolboxItem?.AssetPath)} unrealPath={FormatSyncLogValue(item.UnrealItem?.SourceObjectPath)}");
+                    }
+
                     CompleteGlobalProgress("包含尚未完成重定向的同步项", "请先完成第二步素材规整后再同步。");
                     ShowFloatingTip(InfoBarSeverity.Warning, "包含尚未完成重定向的同步项", $"请先完成规整：{string.Join("、", unsupported.Select(item => item.DisplayName))}");
                     await HideGlobalProgressAfterDelayAsync();
@@ -430,6 +446,8 @@ namespace CrossingVoidZDTool
                 {
                     if (deferredCount > 0)
                     {
+                        AppendLog(LogKind.Warning,
+                            $"[Sync Aborted] reason=nothing-executable character={character.Code} deferred={deferredCount} leaves={selectionLeaves.Length}");
                         CompleteGlobalProgress("尚有未同步素材", $"还有 {deferredCount} 项未执行，请完成第三步后再进入基础配置。");
                         ShowFloatingTip(InfoBarSeverity.Warning, "第三步尚未完成", $"还有 {deferredCount} 项素材未同步。");
                         await HideGlobalProgressAfterDelayAsync();
@@ -484,6 +502,20 @@ namespace CrossingVoidZDTool
                         Path.Combine(AppContext.BaseDirectory, "Tools", "UnrealBridge", "sync_character_sequences.py"));
                     sequenceStartInfo.Environment["ZD_SEQUENCE_SYNC_PLAN_PATH"] = sequencePlanPath;
                     sequenceStartInfo.Environment["ZD_SEQUENCE_SYNC_RESULT_PATH"] = sequenceResultPath;
+                    // 让桥接脚本在同一个编辑器会话里顺手做复扫导出：
+                    // 一次同步原本要开三次编辑器，每次约 9 秒纯启动开销。
+                    var syncService = new UnrealProjectSyncService();
+                    foreach (var (key, value) in syncService.BuildExportEnvironment(
+                        projectPath, UnrealProjectSyncExportScope.CharacterSequences, [character.Code]))
+                    {
+                        sequenceStartInfo.Environment[key] = value;
+                    }
+
+                    sequenceStartInfo.Environment["ZD_POST_SYNC_EXPORT_SCRIPT"] =
+                        Path.Combine(AppContext.BaseDirectory, "Tools", "Unreal", "export_zd_assets.py");
+                    var sequenceManifestPath = syncService.GetExportManifestPath(
+                        projectPath, UnrealProjectSyncExportScope.CharacterSequences);
+                    var sequenceSyncStartedAt = DateTime.UtcNow;
                     var sequenceLaunch = new UnrealPythonTaskExecutionService().BuildLaunch(
                         enginePath,
                         projectPath,
@@ -511,6 +543,10 @@ namespace CrossingVoidZDTool
                                 $"动作进度：{value.CompletedCount}/{value.TotalCount} · {value.StableId}")),
                         GetGlobalProgressCancellationToken());
                     AppendLog(sequenceResult.Succeeded ? LogKind.Info : LogKind.Error, $"[Sequence Execution] character={character.Code} succeeded={sequenceResult.Succeeded} items={sequenceResult.Items.Count} error={FormatSyncLogValue(sequenceResult.ErrorMessage)}");
+                    if (!string.IsNullOrWhiteSpace(sequenceResult.ProcessExitWarning))
+                    {
+                        AppendLog(LogKind.Warning, $"[Sequence Execution] {sequenceResult.ProcessExitWarning}");
+                    }
                     foreach (var item in sequenceResult.Items)
                     {
                         AppendLog(item.Succeeded ? LogKind.Info : LogKind.Error, $"[Sequence Execution Item] stableId={item.StableId} succeeded={item.Succeeded} objectPath={FormatSyncLogValue(item.ObjectPath)} message={FormatSyncLogValue(item.Message)}");
@@ -531,16 +567,31 @@ namespace CrossingVoidZDTool
                         progressPlan[WorkflowProgressPlan.RescanExport].At(0),
                         $"角色：{character.Code} · 重新读取 Unreal 动画资源",
                         true);
-                    await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
-                        [character.Code],
-                        // 同样补上：复扫也是一次完整的 Unreal 导出，不该静默十几秒。
-                        new Progress<ProgressUpdate>(update => UpdateGlobalProgress(
-                            $"阶段 4/4 · {update.Message}",
-                            progressPlan[WorkflowProgressPlan.RescanExport].At(update.Percent),
-                            update.Detail,
-                            update.IsIndeterminate)),
-                        GetGlobalProgressCancellationToken(),
-                        UnrealProjectSyncExportScope.CharacterSequences);
+                    // 桥接会话里已经顺手导出过一次，清单够新就不必再开一次编辑器。
+                    // 判据只认文件写入时间：同会话导出失败时脚本只记日志不抛异常，
+                    // 拿旧清单去复扫会把"还剩多少差异"算错，所以宁可退回独立导出。
+                    if (TrySkipRescanExport(sequenceManifestPath, sequenceSyncStartedAt))
+                    {
+                        UpdateGlobalProgress(
+                            "阶段 4/4 · 正在复扫验证序列资产",
+                            progressPlan[WorkflowProgressPlan.RescanExport].At(70),
+                            "已复用同步会话内的导出结果 · 省去一次编辑器启动",
+                            false);
+                        _applicationViewModel.UnrealProjectSync.Detect();
+                    }
+                    else
+                    {
+                        await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
+                            [character.Code],
+                            // 复扫也是一次完整的 Unreal 导出，不该静默十几秒。
+                            new Progress<ProgressUpdate>(update => UpdateGlobalProgress(
+                                $"阶段 4/4 · {update.Message}",
+                                progressPlan[WorkflowProgressPlan.RescanExport].At(update.Percent),
+                                update.Detail,
+                                update.IsIndeterminate)),
+                            GetGlobalProgressCancellationToken(),
+                            UnrealProjectSyncExportScope.CharacterSequences);
+                    }
 
                     // 序列同步后必须用最新 Unreal 快照重新计算差异，不能直接清空选择树；
                     // 否则只同步一个动作时，剩余动作也会被误判为“全部完成”。
@@ -904,12 +955,13 @@ namespace CrossingVoidZDTool
                 var detectionExportScope = _applicationViewModel.UnrealProjectSync.WorkflowStep == 5 || _workflowStepAfterPublishDetection == 5
                     ? UnrealProjectSyncExportScope.CharacterSequences
                     : UnrealProjectSyncExportScope.CharacterMaterials;
-                await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
+                var detectionExportRun = await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
                     [character.Code],
                     new Progress<ProgressUpdate>(update =>
                         UpdateGlobalProgress(update.Message, Math.Min(70, update.Percent * 0.7), update.Detail, update.IsIndeterminate)),
                     GetGlobalProgressCancellationToken(),
                     detectionExportScope);
+                LogExportWarning(detectionExportRun);
                 _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code, requireAssetTypes: false);
                 var candidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.FirstOrDefault(item =>
                     string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase));
@@ -1591,6 +1643,49 @@ namespace CrossingVoidZDTool
                         ? $"已写入 {writtenMb} MB · 用时 {elapsed.Minutes:00}:{elapsed.Seconds:00}"
                         : $"用时 {elapsed.Minutes:00}:{elapsed.Seconds:00}",
                     false);
+            }
+        }
+
+
+        /// <summary>
+        /// 桥接会话里顺带做的复扫导出是否可用。
+        ///
+        /// 只认清单文件的写入时间：同会话导出失败时脚本只记日志、不抛异常，
+        /// 此时清单还是同步前那一份，拿它复扫会把「还剩多少差异」算错。
+        /// 判不准就退回独立导出——多花十几秒，总好过报错误的结果。
+        /// </summary>
+        private bool TrySkipRescanExport(string manifestPath, DateTime syncStartedAtUtc)
+        {
+            try
+            {
+                var info = new FileInfo(manifestPath);
+                if (!info.Exists || info.Length == 0)
+                {
+                    return false;
+                }
+
+                var fresh = info.LastWriteTimeUtc > syncStartedAtUtc;
+                AppendLog(LogKind.Info,
+                    $"[Post-Sync Export] reused={fresh} manifest={manifestPath} writtenAt={info.LastWriteTimeUtc:HH:mm:ss} syncStartedAt={syncStartedAtUtc:HH:mm:ss}");
+                return fresh;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+        }
+
+
+        /// <summary>
+        /// 导出退出码非 0、但清单确实写出来了时的提醒。
+        /// commandlet 只要编辑器在别处报过错（例如某个蓝图编译不过）就会返回非 0，
+        /// 那跟导出成没成功无关，但值得让人知道工程里有东西坏了。
+        /// </summary>
+        private void LogExportWarning(UnrealProjectSyncExportRunResult result)
+        {
+            if (!string.IsNullOrWhiteSpace(result.Warning))
+            {
+                AppendLog(LogKind.Warning, $"[Export] {result.Warning}");
             }
         }
 

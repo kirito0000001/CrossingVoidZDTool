@@ -1771,11 +1771,14 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     {
         SetSelectionTree([]);
         _lastPublishChanges.Clear();
-        _hasImportDetection = false;
+        // 同步完成后必须留下反馈。以前这里把 _hasImportDetection 置假、又清空检测计数：
+        // DetectionResultVisibility 要求 HasContentDetection 为真，于是整块结果面板直接折叠，
+        // 中栏什么都不显示——刚跑完一次成功的同步，界面却像什么都没发生过。
+        // 复扫的统计是真实且有意义的（检查了多少项、还剩多少差异），保留它。
+        _hasImportDetection = true;
         OnPropertyChanged(nameof(HasContentDetection));
         OnPropertyChanged(nameof(WorkflowStep5StatusText));
         OnPropertyChanged(nameof(DetectionResultVisibility));
-        ResetDetectionSummary();
         OnPropertyChanged(nameof(IsPublishSelectionReady));
         OnPropertyChanged(nameof(HasPublishSelection));
         OnPropertyChanged(nameof(HasNoPublishChanges));
@@ -1794,8 +1797,10 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         ImportOperationMessage = wasSequenceStep
             ? "当前角色的序列已全部同步。"
             : "正在进入第四步基础配置。";
-        ImportResultMessage = $"已验证 {executedCount} 项，保留未执行 {deferredCount} 项。";
-        ImportResultVisibility = Visibility.Collapsed;
+        ImportResultMessage = deferredCount > 0
+            ? $"本次已执行 {executedCount} 项，保留未执行 {deferredCount} 项。"
+            : $"本次已执行 {executedCount} 项，复扫未发现剩余差异。";
+        ImportResultVisibility = Visibility.Visible;
     }
 
     public void SetLightConfigurationResult(

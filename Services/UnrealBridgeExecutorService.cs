@@ -139,8 +139,19 @@ internal sealed class UnrealBridgeExecutorService
         var result = LoadResult(resultPath);
         if (process.ExitCode != 0 && result.Succeeded)
         {
-            throw new InvalidOperationException(
-                $"虚幻同步进程退出码为 {process.ExitCode}，但结果文件错误地标记为成功。");
+            // 同步结果先落盘，之后还会在同一个会话里跑复扫导出，编辑器自己也会做资产校验；
+            // 这些后续动作报错会把整个进程的退出码带成非 0，但同步本身已经完成了。
+            // 同步是否成功以结果文件为准——那是同步流程自己写的；复扫是否可用另有清单
+            // 时间戳兜底。所以这里只留告警，不再把一次成功的同步判成失败。
+            var detail = output.Trim();
+            if (detail.Length > 2000)
+            {
+                detail = detail[^2000..];
+            }
+
+            result.ProcessExitWarning = string.IsNullOrEmpty(detail)
+                ? $"进程退出码为 {process.ExitCode}，但同步结果标记为成功；进程没有输出可供诊断。"
+                : $"进程退出码为 {process.ExitCode}，但同步结果标记为成功。进程输出：{Environment.NewLine}{detail}";
         }
 
         return result;

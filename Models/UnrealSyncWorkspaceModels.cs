@@ -354,7 +354,9 @@ internal static class UnrealSyncSelectionTreeBuilder
             // 除了帧，动作占用的历史资产（断了引用的旧 Sprite、旧 Flipbook）也要列成删除项，
             // 否则素材目录里多出来的文件永远不会被提示清理。
             .Where(change => (SequenceFrameIdentity.IsFrameStableId(change.StableId) ||
-                    SequenceFrameIdentity.IsOwnedAssetStableId(change.StableId)) &&
+                    SequenceFrameIdentity.IsOwnedAssetStableId(change.StableId) ||
+                    // 非规范序列同样要能被勾选，否则它只体现在计数里、列表却是空的。
+                    SequenceFrameIdentity.IsOrphanSequenceStableId(change.StableId)) &&
                 change.Kind != UnrealBridgeChangeKind.Unchanged &&
                 change.Kind is UnrealBridgeChangeKind.Added or UnrealBridgeChangeKind.DeleteCandidate)
             .GroupBy(change => ResolveSequenceGroupKey(change, actionNameToKey, actionCodeToKey))
@@ -396,6 +398,11 @@ internal static class UnrealSyncSelectionTreeBuilder
 
     private static string ResolveSequenceGroupDisplayName(string groupKey, UnrealBridgeChange representative)
     {
+        if (string.Equals(groupKey, SequenceFrameIdentity.OrphanGroupStableId, StringComparison.OrdinalIgnoreCase))
+        {
+            return "非规范序列";
+        }
+
         if (SequenceFrameIdentity.IsActionStableId(groupKey))
         {
             var actionKey = groupKey[SequenceFrameIdentity.ActionPrefix.Length..];
@@ -422,6 +429,13 @@ internal static class UnrealSyncSelectionTreeBuilder
         if (change.Module != UnrealBridgeModule.SequenceFrames)
         {
             return change.StableId;
+        }
+
+        // 孤儿序列不属于任何动作，单独成组。
+        if (SequenceFrameIdentity.IsOrphanSequenceStableId(change.StableId) ||
+            string.Equals(change.StableId, SequenceFrameIdentity.OrphanGroupStableId, StringComparison.OrdinalIgnoreCase))
+        {
+            return SequenceFrameIdentity.OrphanGroupStableId;
         }
 
         var actionCode = ExtractSequenceActionCode(change);

@@ -18,8 +18,21 @@ internal static class UnrealBridgePublishSupportPolicy
 
         if (change.Kind == UnrealBridgeChangeKind.DeleteCandidate)
         {
-            return change.Module == UnrealBridgeModule.SequenceFrames &&
-                !string.IsNullOrWhiteSpace(change.UnrealItem?.SourceObjectPath);
+            if (change.Module != UnrealBridgeModule.SequenceFrames)
+            {
+                return false;
+            }
+
+            // 空白帧在 Unreal 里没有对应资产（Flipbook 里 sprite 为 null 的关键帧），
+            // 它的"删除"靠同步时重建 Flipbook 完成，本来就没有对象路径可言。
+            // 以前一律要求 SourceObjectPath 非空，于是含空白帧的动作一旦被勾选，
+            // 整批同步就卡在"包含尚未完成重定向的同步项"，而且当时日志里毫无线索。
+            if (SequenceFrameIdentity.IsBlankFramePayload(change.UnrealItem?.PayloadJson))
+            {
+                return true;
+            }
+
+            return !string.IsNullOrWhiteSpace(change.UnrealItem?.SourceObjectPath);
         }
 
         if (change.Kind == UnrealBridgeChangeKind.Added)

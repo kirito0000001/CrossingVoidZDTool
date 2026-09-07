@@ -2033,6 +2033,43 @@ def _flipbook_frames_per_second(asset):
         return 0.0
 
 
+def _orphan_animation_sequences(anim_maps_asset, character_code):
+    """挂在该角色动画源上、却不在其规范 AnimSequences 目录里的序列。
+
+    PaperZD 2.2 的动画源上没有 SupportedAnimations 数组——编辑器里那份列表是按
+    序列自身的 AnimSource 指针反查出来的。所以这类"串进来"的序列可能躺在项目的
+    任何角落（实测有一条 /Game/ZDBridgeTest/Test_Sequence），按目录扫描永远看不到，
+    必须从动画源这一侧反查。
+    """
+    if anim_maps_asset is None:
+        return []
+    library = getattr(unreal, "ZDBridgeLibrary", None)
+    if library is None or not hasattr(library, "scan_animation_source"):
+        return []
+    try:
+        report = json.loads(library.scan_animation_source(anim_maps_asset) or "{}")
+    except Exception:
+        unreal.log_warning("ZDToolbox: scan_animation_source failed for {}".format(character_code))
+        return []
+
+    canonical_prefix = "{}/{}/animsequences/".format(CHARACTER_ACTOR_ROOT, character_code).lower()
+    orphans = []
+    for item in report.get("sequences", []) or []:
+        object_path = _to_text(item.get("assetPath"))
+        if not object_path or object_path.lower().startswith(canonical_prefix):
+            continue
+        package_path = object_path.split(".", 1)[0]
+        orphans.append({
+            "assetName": package_path.rsplit("/", 1)[-1],
+            "assetClass": _to_text(item.get("assetClass")),
+            "packagePath": package_path,
+            "objectPath": object_path,
+            "exportedFilePath": "",
+        })
+    orphans.sort(key=lambda entry: entry["objectPath"].lower())
+    return orphans
+
+
 def _ordered_flipbook_frame_assets(flipbook_assets, texture_assets, all_assets):
     ordered_frames = []
     sprite_paths = set()
@@ -2319,6 +2356,7 @@ def _export_character_sequences(character_actors, manifest_assets, project_path)
             "code": code,
             "animMapsObjectPath": anim_maps_object_path,
             "hasAnimMaps": anim_maps_asset is not None,
+            "orphanSequences": _orphan_animation_sequences(anim_maps_asset, code),
             "hasData": has_data,
             "readMessage": read_message,
             "animSequenceCount": anim_sequence_count,

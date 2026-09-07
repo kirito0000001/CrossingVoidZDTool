@@ -26,6 +26,7 @@ def _load(path):
     value['CharacterCode'] = get(value, 'characterCode', '')
     value['CharacterBlueprintPath'] = get(value, 'characterBlueprintPath', '')
     value['AnimMapsPath'] = get(value, 'animMapsPath', '')
+    value['DetachSequenceObjectPaths'] = get(value, 'detachSequenceObjectPaths', []) or []
     actions = get(value, 'actions', []) or []
     for action in actions:
         for name in ('actionCode', 'baseActionCode', 'formIndex', 'displayName', 'fps', 'blueprintProperty',
@@ -147,56 +148,6 @@ def _get_first(obj, names, action):
         except Exception:
             pass
     raise RuntimeError('%s: no readable property among %s' % (action, ','.join(names)))
-
-def _blueprint_default_object(blueprint, action):
-    """Resolve the generated class default object of a character Blueprint.
-
-    unreal.load_asset on a Blueprint path returns the UBlueprint asset, which
-    does not expose the character's sequence properties; those live on the
-    generated class CDO.
-    """
-    for name in ('generated_class', 'GeneratedClass'):
-        try:
-            generated = blueprint.get_editor_property(name)
-        except Exception:
-            continue
-        if generated is None:
-            continue
-        try:
-            return unreal.get_default_object(generated)
-        except Exception:
-            pass
-    raise RuntimeError('%s: character blueprint has no generated class default object' % action)
-
-
-def _write_blueprint_sequence_slot(blueprint_path, property_name, slot_index, sequence, action):
-    """Write the sequence into the character's per-form sequence array.
-
-    These properties are TArray<UPaperZDAnimSequence*> indexed by CharShape, so
-    form N belongs at index N-1. Assigning the sequence directly to the property
-    would fail on the array type and silently leave the character unbound.
-    """
-    blueprint = _require(blueprint_path, action)
-    default_object = _blueprint_default_object(blueprint, action)
-    try:
-        current = list(default_object.get_editor_property(property_name) or [])
-    except Exception as error:
-        raise RuntimeError('%s: cannot read blueprint property %s: %s' % (action, property_name, error))
-    if slot_index < 0:
-        raise RuntimeError('%s: invalid form slot index for %s' % (action, property_name))
-    while len(current) <= slot_index:
-        current.append(None)
-    if current[slot_index] == sequence:
-        return False
-    current[slot_index] = sequence
-    try:
-        default_object.set_editor_property(property_name, current)
-    except Exception as error:
-        raise RuntimeError('%s: cannot write blueprint property %s: %s' % (action, property_name, error))
-    _save(blueprint.get_path_name())
-    unreal.log('SequenceSync: bound %s[%d] on %s' % (property_name, slot_index, blueprint_path))
-    return True
-
 
 def _capture_notification_state(sequence):
     """Read notification-related properties without changing the sequence."""
@@ -439,6 +390,42 @@ def _rename_asset(source_package, target_package, action_code):
         raise RuntimeError('%s: failed to rename %s to %s' % (action_code, source_package, target_package))
 
 
+def _fixup_redirectors(package_paths, action_code):
+    """把改名留下的重定向器解引用并清掉。
+
+    rename_asset 会在旧路径留一个重定向器。大小写对齐要连着改两次名，
+    中间那个名字（*__ZDCaseMigration）一旦被引用方记进包里、而重定向器随后被清理，
+    这条引用就永久悬空了——实测把 Misaka_AnimBP 的 Play Sequence 节点打断了，
+    此后每次导出编辑器都会报 "references an unknown sequence" 并让 commandlet 返回非 0。
+    """
+    tools = unreal.AssetToolsHelpers.get_asset_tools()
+    redirectors = []
+    for package in package_paths:
+        object_path = '%s.%s' % (package, package.rsplit('/', 1)[-1])
+        try:
+            obj = unreal.load_object(None, object_path)
+        except Exception:
+            obj = None
+        if obj is not None and isinstance(obj, unreal.ObjectRedirector):
+            redirectors.append(obj)
+
+    if not redirectors:
+        return
+
+    try:
+        tools.fixup_referencers(redirectors)
+    except Exception as exc:
+        unreal.log_warning('SequenceSync: action=%s fixup_referencers failed: %s' % (action_code, exc))
+        return
+
+    for package in package_paths:
+        try:
+            if unreal.EditorAssetLibrary.does_asset_exist(package):
+                unreal.EditorAssetLibrary.delete_asset(package)
+        except Exception:
+            pass
+    unreal.log('SequenceSync: action=%s fixed up %d redirector(s)' % (action_code, len(redirectors)))
+
 def _align_asset_name_case(folder, target_name, action_code):
     """Rename an existing asset whose name differs from the target only by case.
 
@@ -462,6 +449,9 @@ def _align_asset_name_case(folder, target_name, action_code):
             temporary_package = target_package + '__ZDCaseMigration'
             _rename_asset(package, temporary_package, action_code)
             _rename_asset(temporary_package, target_package, action_code)
+            # 两次改名各留下一个重定向器，中间那个尤其危险：引用方一旦把
+            # *__ZDCaseMigration 记进自己的包里，重定向器被清掉后引用就永久悬空。
+            _fixup_redirectors([package, temporary_package], action_code)
             unreal.log('SequenceSync: case migration %s -> %s' % (package, target_package))
             return True
     return False
@@ -642,13 +632,8 @@ def _sync_action(action):
         _save(source_asset.get_path_name())
     sequence.modify()
     _save(sequence.get_path_name())
-    if action.get('blueprintProperty'):
-        _write_blueprint_sequence_slot(
-            action['characterBlueprintPath'],
-            action['blueprintProperty'],
-            int(action.get('blueprintFormSlotIndex', 0) or 0),
-            sequence,
-            code)
+    # 第五步不再往角色蓝图里写序列槽位——把序列绑到蓝图属于下一步的职责。
+    # 计划里仍然带着 blueprintProperty / blueprintFormSlotIndex，留给那一步用。
     sequence.modify()
     _save(sequence.get_path_name())
     new_paths = [texture_path for texture_path in imported if texture_path] + [
@@ -669,6 +654,71 @@ def _result_message(action_result):
     return ' | '.join(parts)
 
 
+def _detach_orphan_sequences(paths):
+    """把非规范序列从角色动画源上解绑——只解绑，不删资产。
+
+    PaperZD 2.2 的动画源没有 SupportedAnimations 数组：编辑器里那份列表是按序列自身的
+    AnimSource 指针反查的，所以"从源里移除"就是清掉那个指针。
+
+    资产刻意保留在盘上。一条串错位置的序列往往仍是有用素材，
+    因为它看起来不该在这儿就顺手删掉，代价太大。
+    """
+    if not paths:
+        return [], []
+    library = getattr(unreal, 'ZDBridgeLibrary', None)
+    if library is None or not hasattr(library, 'detach_sequences_from_animation_source'):
+        unreal.log_warning('SequenceSync: ZDBridge.DetachSequencesFromAnimationSource unavailable; '
+                           'orphan sequences left bound')
+        return [], list(paths)
+    try:
+        report = json.loads(library.detach_sequences_from_animation_source(list(paths)) or '{}')
+    except Exception as exc:
+        unreal.log_warning('SequenceSync: detach bridge failed: %s' % exc)
+        return [], list(paths)
+
+    detached, failed = [], []
+    for item in report.get('items', []):
+        path = item.get('objectPath', '')
+        if item.get('detached'):
+            detached.append(path)
+        else:
+            failed.append(path)
+            unreal.log_warning('SequenceSync: cannot detach %s; class=%s previousSource=%s error=%s'
+                               % (path, item.get('assetClass', ''),
+                                  item.get('previousSource', ''), item.get('error', '')))
+    unreal.log('SequenceSync: orphan sequences detached=%d failed=%d' % (len(detached), len(failed)))
+    return detached, failed
+
+def _run_post_sync_export():
+    """同步完成后，在同一个编辑器会话里顺手把复扫导出做掉。
+
+    一次第五步同步原本要开三次编辑器：同步前导出、桥接同步、同步后复扫导出。
+    实测每次会话 13-15 秒，其中约 9 秒是纯启动开销——复扫要读的就是这个
+    已经加载好、而且刚被自己改过的编辑器，再开一次纯属浪费。
+
+    工具箱按清单文件的写入时间判断这一步有没有成功；失败就退回独立导出，
+    所以这里只记日志、绝不让异常冒出去打断同步结果的写入。
+    """
+    script = os.environ.get('ZD_POST_SYNC_EXPORT_SCRIPT', '')
+    if not script:
+        return False
+    if not os.path.isfile(script):
+        unreal.log_warning('SequenceSync: post-sync export script missing: %s' % script)
+        return False
+
+    try:
+        unreal.log('SequenceSync: running post-sync export in the same editor session')
+        with open(script, 'r', encoding='utf-8') as handle:
+            code = handle.read()
+        # 导出脚本是顶层执行的（末尾直接调 _export()），给它一个独立的全局命名空间，
+        # 免得两边的同名函数互相覆盖。
+        exec(compile(code, script, 'exec'), {'__name__': '__zd_post_sync_export__'})
+        return True
+    except Exception:
+        unreal.log_warning('SequenceSync: post-sync export failed:\n' + traceback.format_exc())
+        return False
+
+
 def main():
     plan_path = os.environ.get('ZD_SEQUENCE_SYNC_PLAN_PATH', '')
     result_path = os.environ.get('ZD_SEQUENCE_SYNC_RESULT_PATH', '')
@@ -678,11 +728,24 @@ def main():
     total = len(actions)
     results = []
     try:
-        _require(plan['CharacterBlueprintPath'], 'character blueprint')
+        # 只校验 AnimMaps：第五步同步的是序列、帧素材、AnimMaps 映射和语音轨道，
+        # 角色蓝图的绑定交给下一步，这里不该因为蓝图状态而失败。
         _require(plan['AnimMapsPath'], 'AnimMaps')
+        detach_paths = plan.get('DetachSequenceObjectPaths') or []
+        if detach_paths:
+            detached, failed = _detach_orphan_sequences(detach_paths)
+            results.append({
+                'stableId': 'orphan-sequences',
+                'succeeded': not failed,
+                'message': '非规范序列已从动画源解绑（资产保留）| detached=%d | failed=%d%s' % (
+                    len(detached), len(failed),
+                    (' | ' + ', '.join(failed)) if failed else ''),
+                'objectPath': plan['AnimMapsPath'],
+                'originIdentity': '',
+                'outputFilePath': '',
+            })
         for index, action in enumerate(actions):
             action['animMapsPath'] = plan['AnimMapsPath']
-            action['characterBlueprintPath'] = plan['CharacterBlueprintPath']
             action['characterCode'] = plan.get('CharacterCode', '')
             code = action.get('actionCode', '')
             _write_progress(progress_path, index, total, code, action.get('displayName', '') or code)
@@ -716,6 +779,8 @@ def main():
 
 try:
     main()
+    # 结果已经落盘，再做复扫导出；它失败只是让工具箱退回独立导出，不影响同步本身。
+    _run_post_sync_export()
 except Exception:
     unreal.log_error('Sequence sync failed:\n' + traceback.format_exc())
     raise

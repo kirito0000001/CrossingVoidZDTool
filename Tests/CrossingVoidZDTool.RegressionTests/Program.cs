@@ -232,7 +232,12 @@ var tests = new (string Name, Action Run)[]
     ("资产类名不会把内存地址带进哈希", AssetClassNeverCarriesPointerIntoHash),
     ("导出帧列表一个关键帧一项", ExportedFrameListIsOneEntryPerKeyframe),
     ("同步进度分段覆盖每个阶段", SyncProgressBandsCoverEveryPhase),
-    ("导出跳过未变化的 PNG", ExportSkipsUnchangedPngFiles)
+    ("导出跳过未变化的 PNG", ExportSkipsUnchangedPngFiles),
+    ("复扫导出与同步共用一个编辑器会话", PostSyncExportRunsInTheSameEditorSession),
+    ("空白帧的删除项可以执行", BlankFrameDeletionIsExecutable),
+    ("两侧一致就不是冲突", MatchingSidesAreNotConflicts),
+    ("非规范序列只解绑不删资产", OrphanSequencesAreDetachedNotDeleted),
+    ("同步完成后仍有可见反馈", SyncCompletionLeavesVisibleFeedback)
 };
 
 var failed = 0;
@@ -4015,8 +4020,16 @@ static void UnrealProjectDetailExportRejectsFailedProcess()
 {
     var service = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "Services", "UnrealProjectSyncService.cs"));
 
-    AssertEqual(true, service.Contains("if (process.ExitCode != 0)", StringComparison.Ordinal));
+    // 导出失败仍然要抛，但判据换成了产物而不是退出码：
+    // commandlet 只要编辑器在别处报过错（实测是 Misaka_AnimBP 有个 Play Sequence
+    // 指向已不存在的序列）就返回非 0，而日志里明写着 Python script executed successfully、
+    // 清单也照常写出来了。按退出码判，每次检测都会被判成导出失败。
     AssertEqual(true, service.Contains("Unreal 角色数据导出失败", StringComparison.Ordinal));
+    AssertEqual(true, service.Contains("manifest is null || !manifestIsFresh", StringComparison.Ordinal));
+    // 清单必须是这一轮新写的，不能拿上一次的残留冒充成功。
+    AssertEqual(true, service.Contains("TryGetLastWriteUtc(manifestPath) > runStartedAtUtc", StringComparison.Ordinal));
+    // 退出码非 0 但清单有效时，只留告警。
+    AssertEqual(true, service.Contains("exportWarning", StringComparison.Ordinal));
 }
 
 static void UnrealProjectDetailExportRejectsMismatchedModuleBuildIds()
@@ -4594,7 +4607,7 @@ static void CharacterAntiChangesSynchronizationSnapshot()
             0,
             info,
             CreateEmptyUnrealSkillsPreview(),
-            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], []),
+            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], [], []),
             new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
             [],
             hasLatestData: true);
@@ -5241,7 +5254,7 @@ static void UnrealBridgeImportCreatesDraftAndWritesReadableModules()
                 100,
                 true),
             CreateEmptyUnrealSkillsPreview(),
-            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], []),
+            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], [], []),
             new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
             [],
             hasLatestData: true);
@@ -5289,7 +5302,7 @@ static void UnrealBridgeImportUsesSelectedLeafItems()
             0,
             new UnrealProjectSyncCharacterInfoPreview(string.Empty, string.Empty, false, string.Empty, string.Empty, string.Empty, [], [], 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             CreateEmptyUnrealSkillsPreview(),
-            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], []),
+            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], [], []),
             new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
             [new UnrealProjectSyncMaterialBucket("其他图片", "OtherImage", 2, [first, second])],
             hasLatestData: true);
@@ -5443,7 +5456,7 @@ static UnrealProjectSyncCharacterCandidate CreateUnrealImportFailureCandidate(
         0,
         characterInfo,
         CreateEmptyUnrealSkillsPreview(),
-        new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], []),
+        new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], [], []),
         new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
         [new UnrealProjectSyncMaterialBucket("其他图片", "OtherImage", 1, [asset])],
         hasLatestData: true);
@@ -5477,7 +5490,7 @@ static void UnrealBridgeRepeatedImportReplacesVoiceCategory()
             0,
             new UnrealProjectSyncCharacterInfoPreview(string.Empty, string.Empty, false, string.Empty, string.Empty, string.Empty, [], [], 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             CreateEmptyUnrealSkillsPreview(),
-            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], []),
+            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], [], []),
             new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
             [],
             hasLatestData: true,
@@ -5586,7 +5599,7 @@ static UnrealProjectSyncCharacterCandidate CreateMaterialImportCandidate(
         0,
         new UnrealProjectSyncCharacterInfoPreview(string.Empty, string.Empty, false, string.Empty, string.Empty, string.Empty, [], [], 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
         CreateEmptyUnrealSkillsPreview(),
-        new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], []),
+        new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], [], []),
         new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
         [new UnrealProjectSyncMaterialBucket(kind, kind, 1, [asset])],
         hasLatestData: true);
@@ -5643,7 +5656,7 @@ static void UnrealBridgeImportedMaterialKeepsSemanticStableId()
             0,
             new UnrealProjectSyncCharacterInfoPreview(string.Empty, string.Empty, false, string.Empty, string.Empty, string.Empty, [], [], 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             CreateEmptyUnrealSkillsPreview(),
-            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], []),
+            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], [], []),
             new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
             [new UnrealProjectSyncMaterialBucket("其他图片", "OtherImage", 1, [asset])],
             hasLatestData: true);
@@ -5712,7 +5725,7 @@ static void UnrealBridgeImportedSemanticItemsKeepStableIds()
             "Misaka", "御坂美琴", string.Empty, string.Empty, 0, 0,
             new UnrealProjectSyncCharacterInfoPreview(string.Empty, string.Empty, false, string.Empty, string.Empty, string.Empty, [], [], 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             skills,
-            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], []),
+            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], [], []),
             new UnrealProjectSyncBuffsPreview(true, string.Empty, [buff]),
             [],
             hasLatestData: true);
@@ -5754,7 +5767,7 @@ static void UnrealBridgeImportedSequenceFramesKeepStableIds()
             CreateEmptyUnrealSkillsPreview(),
             new UnrealProjectSyncSequenceFramesPreview(
                 true, true, "/Game/GameActor2D/Misaka/Misaka_AnimMaps.Misaka_AnimMaps", string.Empty,
-                [action], [], [], []),
+                [action], [], [], [], []),
             new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
             [],
             hasLatestData: true);
@@ -5795,7 +5808,7 @@ static void UnrealBridgeVoicesClassifyAndKeepStableIds()
             "Misaka", "御坂美琴", string.Empty, string.Empty, 0, 0,
             new UnrealProjectSyncCharacterInfoPreview(string.Empty, string.Empty, false, string.Empty, string.Empty, string.Empty, [], [], 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             CreateEmptyUnrealSkillsPreview(),
-            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], []),
+            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], [], []),
             new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
             [],
             hasLatestData: true,
@@ -5867,7 +5880,7 @@ static void UnrealBridgeSequenceVoiceNotificationsClassifyAndBindFrames()
             "ALO_Yuki", "优纪 ALO", string.Empty, string.Empty, 0, 0,
             new UnrealProjectSyncCharacterInfoPreview(string.Empty, string.Empty, false, string.Empty, string.Empty, string.Empty, [], [], 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             CreateEmptyUnrealSkillsPreview(),
-            new UnrealProjectSyncSequenceFramesPreview(true, true, "/Game/Test/AnimMaps", "已读取", [], [skillAction, skill2Action], [], []),
+            new UnrealProjectSyncSequenceFramesPreview(true, true, "/Game/Test/AnimMaps", "已读取", [], [skillAction, skill2Action], [], [], []),
             new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
             [],
             hasLatestData: true,
@@ -5977,7 +5990,7 @@ static void UnrealBridgeImportCopiesSharedSequenceSounds()
             "ALO_Yuki", "优纪 ALO", string.Empty, string.Empty, 0, 0,
             new UnrealProjectSyncCharacterInfoPreview(string.Empty, string.Empty, false, string.Empty, string.Empty, string.Empty, [], [], 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
             CreateEmptyUnrealSkillsPreview(),
-            new UnrealProjectSyncSequenceFramesPreview(true, true, "/Game/Test/AnimMaps", "已读取", [], [action], [], []),
+            new UnrealProjectSyncSequenceFramesPreview(true, true, "/Game/Test/AnimMaps", "已读取", [], [action], [], [], []),
             new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
             [],
             hasLatestData: true);
@@ -7747,6 +7760,331 @@ static void ExportSkipsUnchangedPngFiles()
     var guardIndex = script.IndexOf("if _png_is_up_to_date(output_path", StringComparison.Ordinal);
     var taskIndex = script.IndexOf("task = unreal.AssetExportTask()", StringComparison.Ordinal);
     AssertEqual(true, guardIndex > 0 && taskIndex > guardIndex);
+}
+
+static void PostSyncExportRunsInTheSameEditorSession()
+{
+    // 一次第五步同步原本要开三次编辑器：同步前导出、桥接同步、复扫导出。
+    // 实测每次会话 13-15 秒，其中约 9 秒是纯启动开销。复扫要读的就是那个
+    // 刚被自己改过、已经加载好的编辑器，没有理由再开一次。
+    // 合并后实测 16 秒完成「同步 + 导出」，对比原先 13 + 15 = 28 秒。
+    var syncScript = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
+    AssertEqual(true, syncScript.Contains("_run_post_sync_export"));
+    AssertEqual(true, syncScript.Contains("ZD_POST_SYNC_EXPORT_SCRIPT"));
+    // 导出脚本是顶层执行的，必须给独立命名空间，否则两边同名函数会互相覆盖。
+    AssertEqual(true, syncScript.Contains("__zd_post_sync_export__"));
+
+    // 结果必须先落盘再导出：导出失败只该让工具箱退回独立导出，不能吃掉同步结果。
+    var mainCall = syncScript.LastIndexOf("    main()", StringComparison.Ordinal);
+    var exportCall = syncScript.LastIndexOf("    _run_post_sync_export()", StringComparison.Ordinal);
+    AssertEqual(true, mainCall > 0 && exportCall > mainCall);
+
+    // 两侧必须用同一套导出环境变量，否则复扫会写到别的清单上。
+    var service = new UnrealProjectSyncService();
+    const string project = @"C:\Unreal\CrossingVoid.uproject";
+    var env = service.BuildExportEnvironment(
+        project, UnrealProjectSyncExportScope.CharacterSequences, ["Misaka"]);
+    AssertEqual(service.GetExportManifestPath(project, UnrealProjectSyncExportScope.CharacterSequences),
+        env["ZD_TOOLBOX_EXPORT_MANIFEST"]);
+    AssertEqual("CharacterSequences", env["ZD_TOOLBOX_EXPORT_SCOPE"]);
+    AssertEqual(true, env["ZD_TOOLBOX_SELECTED_CHARACTERS"].Contains("Misaka"));
+    // 不同范围写不同清单，别名不能撞。
+    AssertEqual(false, string.Equals(
+        service.GetExportManifestPath(project, UnrealProjectSyncExportScope.CharacterSequences),
+        service.GetExportManifestPath(project, UnrealProjectSyncExportScope.CharacterMaterials),
+        StringComparison.OrdinalIgnoreCase));
+
+    // 同会话导出失败时脚本只记日志不抛异常，所以必须靠清单写入时间判断能否跳过。
+    var host = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "MainWindow.UnrealProjectSync.cs"), Encoding.UTF8);
+    AssertEqual(true, host.Contains("TrySkipRescanExport"));
+    AssertEqual(true, host.Contains("LastWriteTimeUtc"));
+}
+
+static void BlankFrameDeletionIsExecutable()
+{
+    // 护援技的 Flipbook 里有 5 个空白关键帧（sprite 为 null）。它们会被列为删除候选，
+    // 但空白帧在 Unreal 里根本没有对应资产，所以 SourceObjectPath 是空的。
+    // 以前删除项一律要求对象路径非空，于是全选序列后这 5 条被判成"不可执行"，
+    // 整批同步被"包含尚未完成重定向的同步项"拦下 —— 而且当时日志里一条线索都没有。
+    var separator = SequenceFrameIdentity.SemanticPayloadSeparator.ToString();
+    var blankPayload = string.Join(separator, "Sub", "1", "1", "True");
+
+    var blankUnrealItem = new UnrealBridgeSnapshotItem(
+        SequenceFrameIdentity.BuildFrameStableId("Sub", 0) + ":delete",
+        SequenceFrameIdentity.BuildActionStableId("Sub"),
+        UnrealBridgeModule.SequenceFrames,
+        "护援技 第 1 帧（旧）",
+        "HASH-BLANK",
+        blankPayload,
+        string.Empty,
+        string.Empty,   // 空白帧没有对象路径
+        string.Empty,
+        "空白帧");
+    var blankDelete = new UnrealBridgeChange(
+        blankUnrealItem.StableId,
+        UnrealBridgeModule.SequenceFrames,
+        blankUnrealItem.DisplayName,
+        UnrealBridgeChangeKind.DeleteCandidate,
+        null,
+        blankUnrealItem,
+        true,
+        SequenceFrameIdentity.BuildActionStableId("Sub"));
+
+    // 空白帧的"删除"靠同步时重建 Flipbook 完成，必须算可执行。
+    AssertEqual(true, UnrealBridgePublishSupportPolicy.CanExecute(blankDelete));
+
+    // 非空白帧仍然要求有对象路径，否则删无可删。
+    var brokenPayload = string.Join(separator, "Sub", "1", "2", "False");
+    var brokenItem = blankUnrealItem with { PayloadJson = brokenPayload, SourceObjectPath = string.Empty };
+    AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(blankDelete with { UnrealItem = brokenItem }));
+
+    // 有路径的普通删除项照常可执行。
+    var normalItem = brokenItem with { SourceObjectPath = "/Game/GameActor2D/Misaka/Material/Sub/Old.Old" };
+    AssertEqual(true, UnrealBridgePublishSupportPolicy.CanExecute(blankDelete with { UnrealItem = normalItem }));
+
+    // 判定两种载荷格式都要认：Unreal 侧是 \u001f 拼接，工具箱侧是 JSON。
+    AssertEqual(true, SequenceFrameIdentity.IsBlankFramePayload(blankPayload));
+    AssertEqual(false, SequenceFrameIdentity.IsBlankFramePayload(brokenPayload));
+    AssertEqual(true, SequenceFrameIdentity.IsBlankFramePayload("{\"isBlank\":\"true\"}"));
+    AssertEqual(false, SequenceFrameIdentity.IsBlankFramePayload("{\"isBlank\":\"false\"}"));
+    AssertEqual(false, SequenceFrameIdentity.IsBlankFramePayload(null));
+    AssertEqual(false, SequenceFrameIdentity.IsBlankFramePayload("{ 坏 JSON"));
+
+    // 导出同理：commandlet 只要编辑器在别处报过错就返回非 0。
+    // 实测工程里 Misaka_AnimBP 有个 Play Sequence 节点指向已不存在的序列，
+    // 于是每次检测都被判成「导出失败」，而日志里明写着 Python script executed successfully。
+    // 导出成没成功，以清单为准。
+    var syncService = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Services", "UnrealProjectSyncService.cs"), Encoding.UTF8);
+    AssertEqual(true, syncService.Contains("manifestIsFresh"));
+    AssertEqual(true, syncService.Contains("TryGetLastWriteUtc"));
+    // 清单缺失或不是这一轮写的，才是真失败。
+    AssertEqual(true, syncService.Contains("manifest is null || !manifestIsFresh"));
+
+    // 合并会话之后，同步结果先落盘、复扫导出后跑，编辑器自己还会做资产校验。
+    // 这些后续动作报错会把进程退出码带成非 0，但同步本身已经完成 ——
+    // 实测就出现过 16/16 全成功却被判成"结果文件错误地标记为成功"而整批失败。
+    var executor = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Services", "UnrealBridgeExecutorService.cs"), Encoding.UTF8);
+    AssertEqual(false, executor.Contains("但结果文件错误地标记为成功"));
+    AssertEqual(true, executor.Contains("ProcessExitWarning"));
+    // 告警必须带上进程输出，否则等于什么线索都没留。
+    AssertEqual(true, executor.Contains("进程输出"));
+
+    // 第五步不碰角色蓝图：绑定序列槽位是下一步的职责。
+    // 而且 UBlueprint 的 generated_class 在这个引擎版本上并非可脚本化属性，
+    // 硬写会让第一个带蓝图属性的动作（DefAtk）直接失败，拖垮整批同步。
+    var syncScript2 = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
+    AssertEqual(false, syncScript2.Contains("_write_blueprint_sequence_slot"));
+    AssertEqual(false, syncScript2.Contains("_blueprint_default_object"));
+    AssertEqual(false, syncScript2.Contains("generated_class"));
+    // 但计划字段要留着，下一步还要用。
+    AssertEqual(true, syncScript2.Contains("'blueprintProperty'"));
+    AssertEqual(true, syncScript2.Contains("'blueprintFormSlotIndex'"));
+
+    // 中止同步时必须在日志里留下原因，否则事后完全查不出为什么没跑。
+    var host = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "MainWindow.UnrealProjectSync.cs"), Encoding.UTF8);
+    foreach (var reason in new[]
+             {
+                 "reason=no-detection", "reason=selection-lost", "reason=unsupported",
+                 "reason=nothing-executable", "reason=changes-drifted",
+             })
+    {
+        AssertEqual(true, host.Contains(reason));
+    }
+}
+
+static void MatchingSidesAreNotConflicts()
+{
+    // 有基线条目时，判定只看「相对基线变没变」，从不看两侧当前是否已经一致。
+    // Misaka 有 6 个动作的 fps 曾经两边不同（12 vs 15），基线因此记下两个不同的哈希；
+    // 同步把两边弄一致之后，这 6 个被永久判成冲突，差异列表再也归不了零。
+    var payload = SequenceFrameIdentity.BuildActionPayload("Death", 12);
+    var toolbox = new UnrealBridgeSnapshotItem(
+        SequenceFrameIdentity.BuildActionStableId("Death"),
+        $"module:{UnrealBridgeModule.SequenceFrames}",
+        UnrealBridgeModule.SequenceFrames,
+        "死亡", "SAME-HASH", payload, string.Empty, string.Empty, string.Empty, "Death");
+    var unrealItem = toolbox with { };
+
+    // 基线停在两侧还不一致的年代。
+    var baseline = new UnrealBridgeSyncState
+    {
+        HashScheme = UnrealBridgeSyncState.SourceFileHashScheme,
+        CharacterCode = "Misaka",
+        UnrealProjectPath = @"C:\Unreal\CrossingVoid.uproject",
+    };
+    baseline.Entries[toolbox.StableId] = new UnrealBridgeSyncStateEntry(
+        "OLD-TOOLBOX", "OLD-UNREAL", string.Empty, string.Empty, string.Empty, string.Empty);
+
+    var changes = new UnrealBridgeDiffService().Compare(
+        new UnrealBridgeSnapshot("Misaka", [toolbox]),
+        new UnrealBridgeSnapshot("Misaka", [unrealItem]),
+        UnrealBridgeDirection.PublishToUnreal,
+        baseline);
+    // 两侧逐字节相同：没有东西可同步，也谈不上冲突。
+    AssertEqual(
+        UnrealBridgeChangeKind.Unchanged,
+        changes.Single(item => item.StableId == toolbox.StableId).Kind);
+
+    // 两侧真不一致时，冲突判定照旧。
+    var drifted = unrealItem with { ContentHash = "DIFFERENT-HASH" };
+    var conflictChanges = new UnrealBridgeDiffService().Compare(
+        new UnrealBridgeSnapshot("Misaka", [toolbox]),
+        new UnrealBridgeSnapshot("Misaka", [drifted]),
+        UnrealBridgeDirection.PublishToUnreal,
+        baseline);
+    AssertEqual(
+        UnrealBridgeChangeKind.Conflict,
+        conflictChanges.Single(item => item.StableId == toolbox.StableId).Kind);
+}
+
+static void OrphanSequencesAreDetachedNotDeleted()
+{
+    // Misaka 的动画源上挂着一条 /Game/ZDBridgeTest/Test_Sequence——它在角色目录之外，
+    // 按目录扫描永远看不到。PaperZD 的动画源没有列表属性，"注册"就是序列自身的
+    // AnimSource 指针，所以必须从动画源反查，也只能靠清空那个指针来移除。
+    const string orphanPath = "/Game/ZDBridgeTest/Test_Sequence.Test_Sequence";
+    var orphanId = SequenceFrameIdentity.BuildOrphanSequenceStableId(orphanPath);
+    AssertEqual(true, SequenceFrameIdentity.IsOrphanSequenceStableId(orphanId));
+    // 不能和帧、占用资产的身份混淆。
+    AssertEqual(false, SequenceFrameIdentity.IsFrameStableId(orphanId));
+    AssertEqual(false, SequenceFrameIdentity.IsOwnedAssetStableId(orphanId));
+
+    var unrealItem = new UnrealBridgeSnapshotItem(
+        orphanId,
+        SequenceFrameIdentity.OrphanGroupStableId,
+        UnrealBridgeModule.SequenceFrames,
+        "非规范序列 · Test_Sequence",
+        "HASH-ORPHAN",
+        "Test_Sequence",
+        string.Empty,
+        orphanPath,
+        string.Empty,
+        "Test_Sequence");
+    var change = new UnrealBridgeChange(
+        orphanId,
+        UnrealBridgeModule.SequenceFrames,
+        unrealItem.DisplayName,
+        UnrealBridgeChangeKind.DeleteCandidate,
+        null,
+        unrealItem,
+        true,
+        SequenceFrameIdentity.OrphanGroupStableId);
+
+    // 有对象路径的删除候选：可执行。
+    AssertEqual(true, UnrealBridgePublishSupportPolicy.CanExecute(change));
+
+    // 计划只带解绑路径，不产生任何动作——只勾非规范序列也是合法的一批。
+    var (character, root) = CreateSequenceCharacterWithFrames("Click", 1);
+    try
+    {
+        var plan = new UnrealBridgeSequencePublishService()
+            .BuildSequenceSyncPlan(character, @"C:\Unreal\CrossingVoid.uproject", [change]);
+        AssertEqual(0, plan.Actions.Count);
+        AssertSequence([orphanPath], plan.DetachSequenceObjectPaths.ToArray());
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+
+    // 大小写对齐要连着改两次名，中间那个 *__ZDCaseMigration 一旦被引用方记进包里、
+    // 而重定向器随后被清理，引用就永久悬空——实测打断了 Misaka_AnimBP 的 Play Sequence 节点，
+    // 此后每次导出编辑器都报 "references an unknown sequence" 并让 commandlet 返回非 0。
+    var caseScript = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
+    AssertEqual(true, caseScript.Contains("_fixup_redirectors"));
+    AssertEqual(true, caseScript.Contains("fixup_referencers"));
+    // 修复必须发生在两次改名之后，否则中间名仍会被记下来。
+    var secondRename = caseScript.IndexOf("_rename_asset(temporary_package, target_package", StringComparison.Ordinal);
+    var fixupCall = caseScript.IndexOf("_fixup_redirectors([package, temporary_package]", StringComparison.Ordinal);
+    AssertEqual(true, secondRename > 0 && fixupCall > secondRename);
+
+    // 非规范序列必须能进选择树，否则它只体现在计数里、列表却是空的。
+    var workspace = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Models", "UnrealSyncWorkspaceModels.cs"), Encoding.UTF8);
+    AssertEqual(true, workspace.Contains("IsOrphanSequenceStableId(change.StableId)"));
+    // 分组表头不能作为快照条目产出，否则它自己会被判成一条待删除。
+    var snapshot = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Services", "UnrealBridgeSemanticSnapshotService.cs"), Encoding.UTF8);
+    AssertEqual(false, snapshot.Contains("Add(items, SequenceFrameIdentity.OrphanGroupStableId"));
+
+    // 脚本侧只解绑，绝不删资产：串错位置的序列往往仍是有用素材。
+    var syncScript = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
+    AssertEqual(true, syncScript.Contains("detach_sequences_from_animation_source"));
+    AssertEqual(true, syncScript.Contains("detachSequenceObjectPaths"));
+
+    // 导出侧必须从动画源反查，而不是靠目录扫描。
+    var exportScript = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "Unreal", "export_zd_assets.py"), Encoding.UTF8);
+    AssertEqual(true, exportScript.Contains("_orphan_animation_sequences"));
+    AssertEqual(true, exportScript.Contains("scan_animation_source"));
+    AssertEqual(true, exportScript.Contains("orphanSequences"));
+
+    // C++ 侧解绑不能顺手删资产。
+    var bridge = File.ReadAllText(
+        @"I:\UnrealProject_Moon\SRC_REPO\CrossingVoid\Plugins\ZDBridge\Source\ZDBridge\Private\ZDBridgeLibrary.cpp",
+        Encoding.UTF8);
+    var detachStart = bridge.IndexOf("UZDBridgeLibrary::DetachSequencesFromAnimationSource", StringComparison.Ordinal);
+    AssertEqual(true, detachStart > 0);
+    var detachBody = bridge[detachStart..];
+    AssertEqual(true, detachBody.Contains("SetAnimSource(nullptr)"));
+    AssertEqual(false, detachBody.Contains("ForceDeleteObjects"));
+    AssertEqual(false, detachBody.Contains("DeleteAsset"));
+}
+
+static void SyncCompletionLeavesVisibleFeedback()
+{
+    // 同步刚结束时中栏一片空白：CompletePublishOperation 把 _hasImportDetection 置假，
+    // 而 DetectionResultVisibility 要求它为真，于是整块结果面板直接折叠——
+    // 刚跑完一次成功的同步，界面却像什么都没发生过。刷新一次才又有内容。
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService())
+    {
+        IsEngineToToolbox = false,
+    };
+    viewModel.SelectedPublishStage = viewModel.PublishStages
+        .First(stage => stage.Stage == UnrealBridgePublishStage.ZdAnimationTracks);
+    viewModel.ReturnToWorkflowStep(5);
+
+    var payload = SequenceFrameIdentity.BuildActionPayload("Click", 12);
+    var item = new UnrealBridgeSnapshotItem(
+        SequenceFrameIdentity.BuildActionStableId("Click"),
+        $"module:{UnrealBridgeModule.SequenceFrames}",
+        UnrealBridgeModule.SequenceFrames,
+        "点击", "SAME", payload, string.Empty, string.Empty, string.Empty, "Click");
+    var unchanged = new UnrealBridgeChange(
+        item.StableId,
+        UnrealBridgeModule.SequenceFrames,
+        item.DisplayName,
+        UnrealBridgeChangeKind.Unchanged,
+        item,
+        item,
+        false,
+        item.StableId);
+
+    // 复扫结果：检查过内容、没有剩余差异。
+    viewModel.SetPublishSelectionTree([], [unchanged]);
+    AssertEqual(true, viewModel.HasContentDetection);
+
+    viewModel.CompletePublishOperation(executedCount: 7, deferredCount: 0);
+
+    // 结果面板必须还在，否则中栏什么都不显示。
+    AssertEqual(true, viewModel.HasContentDetection);
+    AssertEqual(Visibility.Visible, viewModel.DetectionResultVisibility);
+    // 复扫的统计要保留，不能归零成"共检查 0 项"。
+    AssertEqual(true, viewModel.DetectionResultSummaryText.Contains("共检查 1 项", StringComparison.Ordinal));
+    // 执行结果要看得见。
+    AssertEqual(Visibility.Visible, viewModel.ImportResultVisibility);
+    AssertEqual(true, viewModel.ImportResultMessage.Contains("7", StringComparison.Ordinal));
+    // 但同步按钮不能因此被误启用：树已清空，没有可执行的选择。
+    AssertEqual(false, viewModel.HasPublishSelection);
+    AssertEqual(false, viewModel.CanStartPublish);
 }
 
 sealed class SingleThreadTestSynchronizationContext : SynchronizationContext, IDisposable
