@@ -156,7 +156,10 @@ internal sealed class UnrealAssetNormalizationService
     {
         var normalizedPath = objectPath.Replace('\\', '/').TrimEnd('/');
         var marker = $"/{characterCode}/";
-        return normalizedPath.Contains(marker, StringComparison.Ordinal);
+        // Unreal 的资产路径大小写不敏感：工程里目录是 /Game/ZD/misaka/ 而代号写作
+        // Misaka 时，按 Ordinal 比会判成「不在规范位置」，条目变成待处理，
+        // 第三步直接被拦住。本文件其余十处比较用的都是 OrdinalIgnoreCase，唯独这里没跟上。
+        return normalizedPath.Contains(marker, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string Sanitize(string value) =>

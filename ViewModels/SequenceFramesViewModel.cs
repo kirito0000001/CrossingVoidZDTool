@@ -56,6 +56,7 @@ internal sealed class SequenceFramesViewModel : ObservableObject
     private bool _isPreloadingPreview;
     private bool _pauseEditorPreviewWhenVoiceEnds;
     private SequenceEditorPlaybackMode _editorPlaybackMode = SequenceEditorPlaybackMode.Loop;
+    private bool _isReadOnly;
     private SequenceFrameSection? _previewSection;
     private SequenceFrameSection? _selectedSection;
     private SequenceFrameItem? _selectedEditorFrame;
@@ -305,6 +306,31 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         ? null
         : PreviewFrames[_previewIndex];
 
+    /// <summary>
+    /// 查看模式。已完成角色是「看」不是「改」，但看序列本身必须允许——
+    /// 以前这层限制是在 XAML 上给整块左栏设 IsHitTestVisible=false 实现的，
+    /// 而把序列送进右侧预览器的那个播放按钮也在这块里面，
+    /// 于是只读模式下根本没有任何可达路径能看序列。
+    /// 现在界面保持可交互，改数据的入口由下面这些守卫挡住。
+    /// </summary>
+    public bool IsReadOnly
+    {
+        get => _isReadOnly;
+        set => SetProperty(ref _isReadOnly, value);
+    }
+
+    /// <summary>拒绝写操作时用：调用方据此提示用户，而不是静默什么都不做。</summary>
+    public bool RejectWhenReadOnly()
+    {
+        if (!IsReadOnly)
+        {
+            return false;
+        }
+
+        StatusText = "查看模式下不能修改序列帧，请先从角色台点「继续制作」。";
+        return true;
+    }
+
     public async Task LoadAsync(CharacterCard? character, CancellationToken cancellationToken = default)
     {
         BaseSectionGroups.Clear();
@@ -370,12 +396,22 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     public async Task ImportAsync(CharacterCard character, SequenceFrameSection section, IReadOnlyList<string> sourceFilePaths, CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         await Task.Run(() => _sequenceFrameService.ImportFrames(character, section.Action, sourceFilePaths), cancellationToken);
         await LoadAsync(character, cancellationToken);
     }
 
     public async Task DeleteFrameAsync(CharacterCard character, SequenceFrameSection section, SequenceFrameItem frame, CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var frames = await Task.Run(() => _sequenceFrameService.DeleteFrame(character, section.Action, frame), cancellationToken);
         ApplyFrameMutation(section, frames, frame.Index);
     }
@@ -386,6 +422,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         IReadOnlyList<SequenceFrameItem> selectedFrames,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var selectedIndex = selectedFrames.Count == 0 ? 1 : selectedFrames.Min(frame => frame.Index);
         var frames = await Task.Run(
             () => _sequenceFrameService.DeleteFrames(character, section.Action, selectedFrames),
@@ -419,6 +460,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         SequenceFrameInsertPosition position,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var frames = await Task.Run(
             () => _sequenceFrameService.InsertBlankFrame(character, section.Action, anchorFrame, position),
             cancellationToken);
@@ -447,6 +493,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     public async Task ReorderFramesAsync(CharacterCard character, SequenceFrameSection section, IReadOnlyList<SequenceFrameItem> orderedFrames, CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var selectedIndex = SelectedEditorFrame is null
             ? 1
             : Math.Max(
@@ -466,6 +517,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         string sourceFilePath,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var frames = await Task.Run(
             () => _sequenceFrameService.ReplaceFrame(character, section.Action, frame, sourceFilePath),
             cancellationToken);
@@ -479,6 +535,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         IReadOnlyList<string> sourceFilePaths,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var frames = await Task.Run(
             () => _sequenceFrameService.ReplaceFrameWithSources(character, section.Action, frame, sourceFilePaths),
             cancellationToken);
@@ -492,6 +553,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         int durationFrames,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var frames = await Task.Run(
             () => _sequenceFrameService.SetFrameDuration(character, section.Action, frame, durationFrames),
             cancellationToken);
@@ -854,6 +920,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         IProgress<ProgressUpdate>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return 0;
+        }
+
         var skills = await Task.Run(() => _skillsService.Load(character), cancellationToken);
         var updatedCount = await Task.Run(
             () => _sequenceFrameService.ReplaceDuplicateFrameReferences(
@@ -874,6 +945,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         IProgress<ProgressUpdate>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return 0;
+        }
+
         var indexedItems = CollectionItems
             .Select((item, index) => new { Item = item, Index = index })
             .ToList();

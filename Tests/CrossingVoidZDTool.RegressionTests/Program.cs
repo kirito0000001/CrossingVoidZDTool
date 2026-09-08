@@ -122,6 +122,8 @@ var tests = new (string Name, Action Run)[]
     ("角色数据写到一半崩溃不会丢原文件", CharacterDataWriteIsAtomic),
     ("语音名字识别不被角色代号误伤", VoiceClassificationIgnoresCharacterCodeNoise),
     ("语音分类表与桥接脚本标签一致", VoiceSpecsMatchBridgeScriptLabels),
+    ("查看模式能看序列但改不了", ReadOnlySequenceCanBeViewedButNotEdited),
+    ("语音规范路径按分类落到对应目录", VoicePathPolicyBuildsCanonicalFolder),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
@@ -4903,6 +4905,80 @@ static void BlueprintSetupSelfCheckPasses()
     AssertEqual(true, source.Contains(".casefold()", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("def _missing_object_targets", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("def _reconcile_applied", StringComparison.Ordinal));
+}
+
+static void ReadOnlySequenceCanBeViewedButNotEdited()
+{
+    // 已完成角色进「查看」模式后看不了序列：把序列送进右侧预览器的那个播放按钮
+    // 被整块左栏的 IsHitTestVisible=false 一起挡住了，而右侧预览器自己没有
+    // 任何自动选中逻辑，于是没有任何可达路径能看序列。
+    // 限制应该只落在「改」上，不该把「看」一起禁掉。
+    WithSequenceFrameWorkspace((service, character, action, sourcePaths, voicePath) =>
+    {
+        service.ImportFrames(character, action, [sourcePaths[0], sourcePaths[1]]);
+        var viewModel = new SequenceFramesViewModel(service, new CharacterSkillsService())
+        {
+            IsReadOnly = true,
+        };
+        viewModel.LoadAsync(character).GetAwaiter().GetResult();
+
+        var section = viewModel.BaseSectionGroups.SelectMany(group => group.Sections)
+            .Single(item => item.Action.Code == action.Code);
+
+        // 看：选中动作后右侧必须真的有帧可放
+        viewModel.SelectSection(section);
+        AssertEqual(true, viewModel.PreviewFrames.Count > 0);
+        AssertEqual(section.Action.Code, viewModel.PreviewSection?.Action.Code);
+
+        // 改：一律拒绝，且要给出可见的理由而不是静默不动
+        var before = section.Frames.Count;
+        viewModel.DeleteFrameAsync(character, section, section.Frames[0]).GetAwaiter().GetResult();
+        AssertEqual(before, section.Frames.Count);
+        AssertEqual(true, viewModel.StatusText.Contains("查看模式", StringComparison.Ordinal));
+
+        viewModel.ImportAsync(character, section, [sourcePaths[0]]).GetAwaiter().GetResult();
+        AssertEqual(before, section.Frames.Count);
+        AssertEqual(0, viewModel.ResolveAllDuplicateFramesAsync(character).GetAwaiter().GetResult());
+
+        // 磁盘上的帧文件一个都不能少
+        var frameFiles = Directory.GetFiles(
+            Path.Combine(character.FolderPath, "ZDMaterial", action.Code, "Frames"), "*.png");
+        AssertEqual(before, frameFiles.Length);
+    });
+}
+
+static void VoicePathPolicyBuildsCanonicalFolder()
+{
+    // UnrealBridgeVoicePathPolicy 是纯策略、零 IO，却一直没有任何测试覆盖，
+    // 而第三步语音改名的目标路径全靠它算。
+    const string current = "/Game/GameActor2D/Misaka/Sound/Other/Misaka-Defeat-1.Misaka-Defeat-1";
+
+    AssertEqual(true, UnrealBridgeVoicePathPolicy.TryBuildCanonicalObjectPath(
+        current, "{\"kind\":\"Defeat\"}", "Misaka-Defeat-1", out var defeatPath));
+    AssertEqual(
+        "/Game/GameActor2D/Misaka/Sound/Defeat/Misaka-Defeat-1.Misaka-Defeat-1",
+        defeatPath);
+
+    // 新加的音效分类要能落到自己的目录
+    AssertEqual(true, UnrealBridgeVoicePathPolicy.TryBuildCanonicalObjectPath(
+        current, "{\"kind\":\"SoundEffect\"}", "Misaka-SE-1", out var sePath));
+    AssertEqual(
+        "/Game/GameActor2D/Misaka/Sound/SoundEffect/Misaka-SE-1.Misaka-SE-1",
+        sePath);
+
+    // 连字符是合法的 Unreal 资产名字符，规范路径里必须原样保留
+    // （CONTEXT.md 的「语音规范名称」明确要求，不能改写成下划线）
+    AssertEqual(true, defeatPath.Contains("Misaka-Defeat-1", StringComparison.Ordinal));
+
+    // 认不出分类就不给目标路径，让调用方走原有的兜底
+    AssertEqual(false, UnrealBridgeVoicePathPolicy.TryBuildCanonicalObjectPath(
+        current, "{}", "Misaka-Defeat-1", out _));
+    AssertEqual(false, UnrealBridgeVoicePathPolicy.TryBuildCanonicalObjectPath(
+        current, "{\"kind\":\"Defeat\"}", string.Empty, out _));
+
+    // 路径里没有 /Sound/ 段时同样不给结论
+    AssertEqual(false, UnrealBridgeVoicePathPolicy.TryBuildCanonicalObjectPath(
+        "/Game/GameActor2D/Misaka/AssetMaterial/X.X", "{\"kind\":\"Defeat\"}", "X", out _));
 }
 
 static void VoiceClassificationIgnoresCharacterCodeNoise()

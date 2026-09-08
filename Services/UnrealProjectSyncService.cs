@@ -2339,18 +2339,6 @@ internal sealed class UnrealProjectSyncService
             .ToArray();
         return service.ReplaceWithImages(character, kind, sourcePaths);
     }
-
-    public int SyncAllMaterialBucketsToToolbox(CharacterCard character, UnrealProjectSyncCharacterCandidate candidate)
-    {
-        var importedCount = 0;
-        foreach (var bucket in candidate.MaterialBuckets)
-        {
-            importedCount += SyncMaterialBucketToToolbox(character, bucket);
-        }
-
-        return importedCount;
-    }
-
     public void SyncCharacterInfoToToolbox(CharacterCard character, UnrealProjectSyncCharacterCandidate candidate)
     {
         if (!candidate.CharacterInfo.HasItemData)
@@ -2397,40 +2385,7 @@ internal sealed class UnrealProjectSyncService
 
         characterInfoService.Save(character, data);
     }
-
-    public int SyncAllSkillsToToolbox(CharacterCard character, UnrealProjectSyncCharacterCandidate candidate)
-    {
-        using var entryNotifications = CharacterSkillEntry.SuppressEditNotifications();
-        using var multiplierNotifications = SkillMultiplierLevel.SuppressEditNotifications();
-
-        var data = new CharacterSkillsService().Load(character);
-        var count = 0;
-        foreach (var slot in candidate.SkillsPreview.CoreSlots)
-        {
-            count += ApplySkillSlot(data, slot, candidate);
-        }
-
-        count += ApplySkillSlot(data, candidate.SkillsPreview.SupportSkillSlot, candidate);
-        count += ApplyLinkSkills(data, candidate.SkillsPreview.LinkSkills, candidate);
-        new CharacterSkillsService().Save(character, data);
-        return count;
-    }
-
-    public int SyncSkillSlotToToolbox(
-        CharacterCard character,
-        UnrealProjectSyncCharacterCandidate candidate,
-        UnrealProjectSyncSkillSlotPreview slot)
-    {
-        using var entryNotifications = CharacterSkillEntry.SuppressEditNotifications();
-        using var multiplierNotifications = SkillMultiplierLevel.SuppressEditNotifications();
-
-        var data = new CharacterSkillsService().Load(character);
-        var count = ApplySkillSlot(data, slot, candidate);
-        new CharacterSkillsService().Save(character, data);
-        return count;
-    }
-
-    /// <param name="identitySuffix">
+   /// <param name="identitySuffix">
     /// 稳定身份里的槽位后缀（core:0 / support / link:…），必须和
     /// UnrealBridgeSemanticSnapshotService 用的一致，否则写回来的身份对不上快照。
     /// </param>
@@ -2511,21 +2466,6 @@ internal sealed class UnrealProjectSyncService
         new CharacterSkillsService().Save(character, data);
         return 1;
     }
-
-    public int SyncAllSequenceFramesToToolbox(CharacterCard character, UnrealProjectSyncCharacterCandidate candidate)
-    {
-        var skills = new CharacterSkillsService().Load(character);
-        var actions = SequenceFrameService.BuildActions(skills, new CharacterFormService().GetFormLimit(character));
-        var service = new SequenceFrameService();
-        var syncedCount = 0;
-        foreach (var action in candidate.SequenceFramesPreview.Actions.Where(action => action.HasFramePreview))
-        {
-            syncedCount += SyncSequenceActionToToolbox(character, action, service, actions);
-        }
-
-        return syncedCount;
-    }
-
     public int SyncSequenceActionToToolbox(
         CharacterCard character,
         UnrealProjectSyncSequenceActionPreview action)
@@ -2534,21 +2474,6 @@ internal sealed class UnrealProjectSyncService
         var actions = SequenceFrameService.BuildActions(skills, new CharacterFormService().GetFormLimit(character));
         return SyncSequenceActionToToolbox(character, action, new SequenceFrameService(), actions);
     }
-
-    public int SyncAllBuffsToToolbox(CharacterCard character, UnrealProjectSyncCharacterCandidate candidate)
-    {
-        var buffService = new BuffService();
-        var data = buffService.Load(character);
-        data.Buffs.Clear();
-        foreach (var buff in candidate.BuffsPreview.Buffs.Where(buff => buff.HasReadableData))
-        {
-            data.Buffs.Add(ToBuffEntry(buff, character, buffService));
-        }
-
-        buffService.Save(character, data);
-        return data.Buffs.Count;
-    }
-
     public int SyncBuffToToolbox(
         CharacterCard character,
         UnrealProjectSyncBuffPreview buff)
