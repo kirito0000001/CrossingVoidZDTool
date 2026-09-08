@@ -115,6 +115,9 @@ var tests = new (string Name, Action Run)[]
     ("中栏任何状态都有东西显示", WorkspaceNeverShowsBlankPanel),
     ("中栏分组与条目始终一致", WorkspaceGroupsStayConsistentWithItems),
     ("直接改列表中栏也会跟着刷新", WorkspaceReactsToRawCollectionChanges),
+    ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
+    ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
+    ("进入某一步先落步再检测", EnteringStepNavigatesBeforeDetecting),
     ("每一步的进度都按阶段分段", WorkflowProgressIsPhasedForEveryStep),
     ("在线执行不可用时退回离线", RemoteExecutionFallsBackToOffline),
     ("依次检测只检测不写入", DetectAllStepsNeverWrites),
@@ -4611,32 +4614,169 @@ static void RemoteExecutionFallsBackToOffline()
     AssertEqual(2, CountOccurrences(window, "await RunUnrealTaskWithOfflineFallbackAsync("));
 }
 
+static (UnrealProjectSyncViewModel Sync, UnrealSyncWorkflowController Controller, FakeWorkflowHost Host, string Root)
+    CreateWorkflowController(int step = 1)
+{
+    var root = CreateTemporaryTestFolder();
+    var projectPath = Path.Combine(root, "CrossingVoid.uproject");
+    File.WriteAllText(projectPath, "{}");
+    var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴") with { IsCompleted = true };
+    Directory.CreateDirectory(character.ToolFolderPath);
+
+    var sync = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    sync.Load(Path.Combine(root, "UnrealEditor.exe"), projectPath);
+    sync.IsEngineToToolbox = false;
+    sync.RefreshDraftSources([character]);
+    sync.SelectSource(sync.CharacterSources.Single());
+    // 选中角色会顺手跑一遍第一步的本地检测（那一步不碰虚幻，很便宜）。
+    // 用例要的是「这一步还没检测过」的起点，先清干净。
+    sync.FoundationChecks.Clear();
+    sync.ReturnToWorkflowStep(step);
+
+    var host = new FakeWorkflowHost();
+    return (sync, new UnrealSyncWorkflowController(sync, host), host, root);
+}
+
 static void DetectAllStepsNeverWrites()
 {
-    var window = ReadUnrealSyncWindowSource();
-    var start = window.IndexOf("private async void UnrealSyncDetectAllStepsButton_Click(", StringComparison.Ordinal);
-    AssertEqual(true, start > 0);
-    var end = window.IndexOf("private async void ReloadUnrealWorkflowStepButton_Click(", start, StringComparison.Ordinal);
-    AssertEqual(true, end > start);
-    var body = window[start..end];
-
     // 依次检测只跑检测。第三、五步的同步和第四、六步的写入都会改动 Unreal 工程，
     // 那是要人确认的事，不该被一个按钮顺手做掉。
-    AssertEqual(true, body.Contains("EnterWorkflowStepAsync"));
-    foreach (var writeEntry in new[]
-             {
-                 "PublishCurrentCharacterAssetsToUnrealButton_Click",
-                 "ApplyUnrealLightConfigurationButton_Click",
-                 "ApplyUnrealBlueprintSetupButton_Click",
-                 "apply: true",
-             })
-    {
-        AssertEqual(false, body.Contains(writeEntry));
-    }
+    //
+    // 以前这条只能靠在 MainWindow 源码里搜「有没有出现写入方法的名字」来保证——
+    // 改个命名就假报警，真把写入塞进去也未必搜得到。编排搬进控制器之后可以直接
+    // 说死：控制器能对界面做的事只有这三件，里面根本没有写入的口子。
+    var members = typeof(IUnrealSyncWorkflowHost)
+        .GetMethods()
+        .Select(method => method.Name)
+        .OrderBy(name => name, StringComparer.Ordinal)
+        .ToArray();
+    AssertSequence(["Log", "Notify", "RunStepDetectionAsync"], members);
 
-    // 第三、五步的检测必须是可等待的，否则循环会在检测还没跑完时就往下走
-    AssertEqual(true, window.Contains("await DetectUnrealPublishChangesAsync();"));
-    AssertEqual(false, window.Contains("DetectUnrealPublishChangesButton_Click(this, new RoutedEventArgs());"));
+    // 检测必须是可等待的，否则循环会在检测还没跑完时就往下走。
+    AssertEqual(typeof(Task), typeof(IUnrealSyncWorkflowHost).GetMethod("RunStepDetectionAsync")!.ReturnType);
+
+    var (_, controller, host, root) = CreateWorkflowController(4);
+    try
+    {
+        var finished = false;
+        host.OnDetect = async _ =>
+        {
+            await Task.Yield();
+            finished = true;
+        };
+
+        controller.EnterStepAsync(4).GetAwaiter().GetResult();
+        // 控制器等到了检测真的跑完才返回
+        AssertEqual(true, finished);
+        AssertSequence([4], host.DetectedSteps.ToArray());
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void DetectAllStepsStopsAtFirstBlockedStep()
+{
+    // 依次检测的价值是把六步的等待一次排完，不是替人做决定：
+    // 走到一个还有事要做的步骤就得停下来说清楚卡在哪。
+    var (sync, controller, host, root) = CreateWorkflowController(4);
+    try
+    {
+        // 第四步检测完还留着没处理的项 -> 不满足离开条件
+        host.OnDetect = _ =>
+        {
+            sync.SetLightConfigurationResult(new UnrealLightConfigurationResult
+            {
+                Succeeded = true,
+                CharacterCode = "Misaka",
+                Items =
+                [
+                    new UnrealLightConfigurationResultItem
+                    {
+                        StableId = "item.icon", GroupName = "Item", DisplayName = "道具图标",
+                        Status = UnrealLightConfigurationStatus.Pending
+                    }
+                ],
+            });
+            return Task.CompletedTask;
+        };
+
+        controller.DetectAllStepsAsync().GetAwaiter().GetResult();
+
+        // 只检测了第四步就停住，绝不能顺手把第五、六步也跑掉
+        AssertSequence([4], host.DetectedSteps.ToArray());
+        AssertEqual(4, sync.WorkflowStep);
+        var notice = host.Notices.Single();
+        AssertEqual("第四步尚未完成", notice.Title);
+        AssertEqual(UnrealSyncNoticeSeverity.Informational, notice.Severity);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void DetectAllStepsStopsOnStepFailure()
+{
+    // 某一步检测失败还继续往下跑，后面几步都是在错误状态上白等。
+    var (sync, controller, host, root) = CreateWorkflowController(4);
+    try
+    {
+        host.OnDetect = _ =>
+        {
+            sync.SetWorkspaceFailure("导出失败：找不到 Item 资产");
+            return Task.CompletedTask;
+        };
+
+        controller.DetectAllStepsAsync().GetAwaiter().GetResult();
+
+        AssertSequence([4], host.DetectedSteps.ToArray());
+        var notice = host.Notices.Single();
+        AssertEqual(UnrealSyncNoticeSeverity.Error, notice.Severity);
+        AssertEqual("第 4 步检测失败", notice.Title);
+        // 失败原因要带出来，光说「失败了」等于没说
+        AssertEqual(true, notice.Message.Contains("找不到 Item 资产", StringComparison.Ordinal));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void EnteringStepNavigatesBeforeDetecting()
+{
+    // 「进入某一步」的本职是落步，检测只是顺带。两件事绑死的话，
+    // 检测失败或被别的操作占用就会把人卡在上一步，界面停在原地却已经跑起了虚幻。
+    var (sync, controller, host, root) = CreateWorkflowController();
+    try
+    {
+        var stepWhenDetecting = 0;
+        host.OnDetect = _ =>
+        {
+            stepWhenDetecting = sync.WorkflowStep;
+            throw new InvalidOperationException("检测炸了");
+        };
+
+        var threw = false;
+        try
+        {
+            controller.EnterStepAsync(4).GetAwaiter().GetResult();
+        }
+        catch (InvalidOperationException)
+        {
+            threw = true;
+        }
+
+        AssertEqual(true, threw);
+        // 检测开始时步号已经落到第四步了，不是等检测成功才落
+        AssertEqual(4, stepWhenDetecting);
+        AssertEqual(4, sync.WorkflowStep);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
 }
 
 static void WorkflowProgressIsPhasedForEveryStep()
@@ -5251,34 +5391,46 @@ static void WorkflowStepIsNotClampedBelowLastStep()
     viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep + 1);
     AssertEqual(UnrealSyncWorkflow.MaxStep, viewModel.WorkflowStep);
 
-    // 「进入某一步」的本职是落步，检测只是顺带；两件事不能绑死，
-    // 否则检测失败或被占用就会把人卡在上一步。
-    var window = ReadUnrealSyncWindowSource();
-    var navigate = window.IndexOf("sync.ReturnToWorkflowStep(step);", StringComparison.Ordinal);
-    var detect = window.IndexOf("await RunWorkflowStepDetectionAsync(sync, step);", StringComparison.Ordinal);
-    AssertEqual(true, navigate > 0 && detect > navigate);
-
-    // 六步共用同一个进入口，各步不再各写一套导航。
-    AssertEqual(1, CountOccurrences(window, "private async Task EnterWorkflowStepAsync("));
-    AssertEqual(1, CountOccurrences(window, "private async Task RunWorkflowStepDetectionAsync("));
-
     // 「上一步」只导航，绝不触发检测。往回走是「我要看看上一步」，
     // 不是「重新查一遍上一步」——那一步没缓存时中栏会显示未检测占位，
     // 要不要真查由用户点「重新加载」决定。
-    var previousStart = window.IndexOf(
-        "private void UnrealSyncPreviousStepButton_Click(", StringComparison.Ordinal);
-    AssertEqual(true, previousStart > 0);
-    var previousEnd = window.IndexOf(
-        Environment.NewLine + "        private ", previousStart + 10, StringComparison.Ordinal);
-    if (previousEnd < 0)
+    var (sync, controller, host, root) = CreateWorkflowController(UnrealSyncWorkflow.MaxStep);
+    try
     {
-        previousEnd = window.IndexOf("\n        private ", previousStart + 10, StringComparison.Ordinal);
+        controller.GoToPreviousStep();
+        AssertEqual(UnrealSyncWorkflow.MaxStep - 1, sync.WorkflowStep);
+        AssertEqual(0, host.DetectedSteps.Count);
+
+        // 一直往回退也不会退过第一步，更不会一路触发检测
+        for (var i = 0; i < UnrealSyncWorkflow.MaxStep + 2; i++)
+        {
+            controller.GoToPreviousStep();
+        }
+
+        AssertEqual(UnrealSyncWorkflow.MinStep, sync.WorkflowStep);
+        AssertEqual(0, host.DetectedSteps.Count);
+
+        // 已经有数据的步骤不重复检测：进第六步只该记一条复用日志
+        controller.EnterStepAsync(UnrealSyncWorkflow.MaxStep).GetAwaiter().GetResult();
+        AssertSequence([UnrealSyncWorkflow.MaxStep], host.DetectedSteps.ToArray());
+        sync.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+        {
+            Succeeded = true, CharacterCode = "Misaka", Items = []
+        });
+        controller.EnterStepAsync(UnrealSyncWorkflow.MaxStep).GetAwaiter().GetResult();
+        AssertSequence([UnrealSyncWorkflow.MaxStep], host.DetectedSteps.ToArray());
+        AssertEqual(1, host.Logs.Count(log => log.Contains("复用本步缓存", StringComparison.Ordinal)));
+
+        // 「重新加载」是明确要求重查，有缓存也得真跑
+        controller.ReloadCurrentStepAsync().GetAwaiter().GetResult();
+        AssertSequence(
+            [UnrealSyncWorkflow.MaxStep, UnrealSyncWorkflow.MaxStep],
+            host.DetectedSteps.ToArray());
     }
-    AssertEqual(true, previousEnd > previousStart);
-    var previousBody = window[previousStart..previousEnd];
-    AssertEqual(true, previousBody.Contains("ReturnToWorkflowStep(", StringComparison.Ordinal));
-    AssertEqual(false, previousBody.Contains("EnterWorkflowStepAsync", StringComparison.Ordinal));
-    AssertEqual(false, previousBody.Contains("RunWorkflowStepDetectionAsync", StringComparison.Ordinal));
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
 }
 
 static void WorkflowStepCacheLivesInCharacterFolder()
@@ -9664,6 +9816,32 @@ static int RunPortablePathMigration(string[] args)
 }
 
 
+
+/// <summary>
+/// 假的界面侧。记下控制器要求检测了哪几步、说了什么话，
+/// 这样六步编排可以整段跑起来断言，而不用去匹配 MainWindow 的源码文本。
+/// </summary>
+sealed class FakeWorkflowHost : IUnrealSyncWorkflowHost
+{
+    public List<int> DetectedSteps { get; } = [];
+
+    public List<UnrealSyncNotice> Notices { get; } = [];
+
+    public List<string> Logs { get; } = [];
+
+    /// <summary>让用例决定这一步检测「跑出了什么结果」。</summary>
+    public Func<int, Task>? OnDetect { get; set; }
+
+    public Task RunStepDetectionAsync(int step)
+    {
+        DetectedSteps.Add(step);
+        return OnDetect?.Invoke(step) ?? Task.CompletedTask;
+    }
+
+    public void Notify(UnrealSyncNotice notice) => Notices.Add(notice);
+
+    public void Log(string message) => Logs.Add(message);
+}
 
 sealed class SingleThreadTestSynchronizationContext : SynchronizationContext, IDisposable
 {
