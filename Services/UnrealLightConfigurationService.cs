@@ -92,6 +92,22 @@ internal sealed class UnrealLightConfigurationService
         File.Move(temporaryPath, path, overwrite: true);
     }
 
+    public ProcessStartInfo BuildProcessStartInfoWithProgress(
+        string editorPath,
+        string projectPath,
+        string requestPath,
+        string resultPath,
+        string progressPath)
+    {
+        var startInfo = BuildProcessStartInfo(editorPath, projectPath, requestPath, resultPath);
+        if (!string.IsNullOrWhiteSpace(progressPath))
+        {
+            startInfo.EnvironmentVariables["ZD_LIGHT_CONFIG_PROGRESS"] = progressPath;
+        }
+
+        return startInfo;
+    }
+
     public ProcessStartInfo BuildProcessStartInfo(
         string editorPath,
         string projectPath,
@@ -141,14 +157,18 @@ internal sealed class UnrealLightConfigurationService
     public async Task<UnrealLightConfigurationResult> ExecuteAsync(
         ProcessStartInfo startInfo,
         string resultPath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string progressPath = "",
+        IProgress<UnrealExportProgressState>? progress = null)
     {
         TryDelete(resultPath);
+        TryDelete(progressPath);
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("无法启动 Unreal 基础配置进程。");
         var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
         var startedAt = DateTime.UtcNow;
+        var lastProgressAt = DateTime.MinValue;
         while (!process.HasExited)
         {
             if (cancellationToken.IsCancellationRequested)
@@ -162,6 +182,9 @@ internal sealed class UnrealLightConfigurationService
                 throw new TimeoutException("Unreal 基础配置超过 20 分钟，已终止命令进程。");
             }
 
+            // 虚幻那一侧十几秒的静默期：脚本会把阶段写进进度文件，
+            // 这里轮询转发出去，进度条才不会整段一动不动。
+            ReportProgress(progressPath, progress, ref lastProgressAt);
             await Task.Delay(500, cancellationToken);
         }
 
@@ -192,6 +215,40 @@ internal sealed class UnrealLightConfigurationService
         catch (JsonException ex)
         {
             throw new InvalidDataException($"Unreal 基础配置结果无法解析：{resultPath}", ex);
+        }
+    }
+
+    /// <summary>进度文件没变就不重复转发，免得每 500 毫秒刷一次同样的文案。</summary>
+    private static void ReportProgress(
+        string progressPath,
+        IProgress<UnrealExportProgressState>? progress,
+        ref DateTime lastWriteUtc)
+    {
+        if (progress is null || string.IsNullOrWhiteSpace(progressPath))
+        {
+            return;
+        }
+
+        try
+        {
+            var info = new FileInfo(progressPath);
+            if (!info.Exists || info.LastWriteTimeUtc <= lastWriteUtc)
+            {
+                return;
+            }
+
+            lastWriteUtc = info.LastWriteTimeUtc;
+            var state = JsonSerializer.Deserialize(
+                File.ReadAllText(progressPath, Encoding.UTF8),
+                AppJsonSerializerContext.Default.UnrealExportProgressState);
+            if (state is not null)
+            {
+                progress.Report(state);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or JsonException)
+        {
+            // 正在被写的进度文件读不全是常态，下一轮再读。
         }
     }
 

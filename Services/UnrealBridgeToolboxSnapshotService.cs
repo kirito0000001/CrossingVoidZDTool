@@ -170,21 +170,22 @@ internal sealed class UnrealBridgeToolboxSnapshotService
         var service = new SequenceFrameService();
         foreach (var section in service.LoadSections(character, skills))
         {
-            var actionKey = NormalizeId(section.Action.Code);
-            var actionId = $"sequence:{actionKey}";
-            var data = service.LoadData(character);
-            var fps = data.ActionSettings.FirstOrDefault(setting =>
-                string.Equals(setting.ActionCode, section.Action.Code, StringComparison.OrdinalIgnoreCase))?.Fps ?? SequenceFrameService.DefaultFps;
+            // 动作与帧的稳定 ID 必须和 Unreal 语义快照用同一套规则生成，
+            // 否则两侧永远配不上对，第五步只能看到“全部新增 + 全部待删除”。
+            var actionId = SequenceFrameIdentity.BuildActionStableId(section.Action.Code);
+            var fps = service.GetActionFps(character, section.Action);
             items.Add(CreateItem(
                 actionId,
                 $"module:{UnrealBridgeModule.SequenceFrames}",
                 UnrealBridgeModule.SequenceFrames,
                 section.Action.DisplayName,
-                BuildPayload(("actionCode", section.Action.Code), ("fps", Format(fps))),
+                SequenceFrameIdentity.BuildActionPayload(section.Action.Code, fps),
                 string.Empty));
 
-            foreach (var frame in section.Frames.OrderBy(frame => frame.Index))
+            var orderedFrames = section.Frames.OrderBy(frame => frame.Index).ToArray();
+            for (var ordinal = 0; ordinal < orderedFrames.Length; ordinal++)
             {
+                var frame = orderedFrames[ordinal];
                 var payload = BuildPayload(
                     ("actionCode", section.Action.Code),
                     ("index", Format(frame.Index)),
@@ -192,7 +193,7 @@ internal sealed class UnrealBridgeToolboxSnapshotService
                     ("isBlank", frame.IsBlank ? "true" : "false"),
                     ("voiceFileName", frame.VoiceFileName));
                 items.Add(CreateItem(
-                    $"sequence-frame:{frame.SyncId}",
+                    SequenceFrameIdentity.BuildFrameStableId(section.Action.Code, ordinal),
                     actionId,
                     UnrealBridgeModule.SequenceFrames,
                     $"{section.Action.DisplayName} 第 {frame.Index} 帧",

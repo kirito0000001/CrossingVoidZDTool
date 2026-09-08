@@ -139,10 +139,7 @@ internal sealed class UnrealProjectSyncService
             ? string.Empty
             : GetExportScriptPath();
         var exportScriptExists = File.Exists(exportScriptPath);
-        var exportManifestPath = string.IsNullOrWhiteSpace(exportDirectoryPath)
-            ? string.Empty
-            : Path.Combine(exportDirectoryPath, ExportManifestFileName);
-        var exportManifest = LoadExportManifest(exportManifestPath);
+        var (exportManifestPath, exportManifest) = ResolveExportManifest(exportDirectoryPath);
         var exportManifestExists = exportManifest is not null;
         items.Add(new UnrealProjectSyncCheckItem(
             "工具箱导出脚本",
@@ -248,8 +245,9 @@ internal sealed class UnrealProjectSyncService
         var soundRootPath = Path.Combine(actorRootPath, "Sound");
         var soundObjectPath = $"{actorObjectPath}/Sound";
         var itemObjectPath = $"{TargetCharacterItemContentPath}/Item_{characterCode}.Item_{characterCode}";
+        // 同样要走合并解析：分步导出不写 characters.json，只读它会拿不到资产类型。
         var manifest = requireAssetTypes
-            ? LoadExportManifest(Path.Combine(GetExportDirectoryPath(projectPath), ExportManifestFileName))
+            ? ResolveExportManifest(GetExportDirectoryPath(projectPath)).Manifest
             : null;
         var checks = new List<UnrealPublishFoundationCheckItem>
         {
@@ -471,7 +469,6 @@ internal sealed class UnrealProjectSyncService
 
         var exportDirectoryPath = GetExportDirectoryPath(normalizedProjectPath);
         Directory.CreateDirectory(exportDirectoryPath);
-        var manifestPath = Path.Combine(exportDirectoryPath, GetExportManifestFileName(scope));
         var editorCommandPath = ResolveEditorCommandPath(normalizedEnginePath);
         var startInfo = new ProcessStartInfo
         {
@@ -481,18 +478,50 @@ internal sealed class UnrealProjectSyncService
             CreateNoWindow = true,
             WorkingDirectory = Path.GetDirectoryName(editorCommandPath) ?? string.Empty
         };
-        startInfo.Environment["ZD_TOOLBOX_PROJECT_PATH"] = normalizedProjectPath;
-        startInfo.Environment["ZD_TOOLBOX_EXPORT_MANIFEST"] = manifestPath;
-        startInfo.Environment["ZD_TOOLBOX_EXPORT_PROGRESS"] = GetExportProgressPath(manifestPath);
-        startInfo.Environment["ZD_TOOLBOX_TARGET_PATHS"] = $"[{string.Join(", ", ExportTargetContentPaths.Select(ToJsonStringLiteral))}]";
-        startInfo.Environment["ZD_TOOLBOX_EXPORT_SCOPE"] = scope.ToString();
-        if (selectedCharacterCodes is { Count: > 0 })
+        foreach (var (key, value) in BuildExportEnvironment(normalizedProjectPath, scope, selectedCharacterCodes))
         {
-            startInfo.Environment["ZD_TOOLBOX_SELECTED_CHARACTERS"] =
-                $"[{string.Join(", ", selectedCharacterCodes.Select(ToJsonStringLiteral))}]";
+            startInfo.Environment[key] = value;
         }
+
         return startInfo;
     }
+
+    /// <summary>
+    /// 导出脚本认的那批环境变量。
+    ///
+    /// 抽出来是因为桥接同步要在同一个编辑器会话里顺手把复扫导出做掉：
+    /// 一次同步原本要开三次编辑器，而实测每次会话 13-15 秒里约 9 秒是纯启动开销。
+    /// 两边必须用同一套变量，否则复扫会写到别的清单上。
+    /// </summary>
+    public IReadOnlyDictionary<string, string> BuildExportEnvironment(
+        string projectPath,
+        UnrealProjectSyncExportScope scope,
+        IReadOnlyCollection<string>? selectedCharacterCodes)
+    {
+        var normalizedProjectPath = NormalizePath(projectPath);
+        var manifestPath = GetExportManifestPath(normalizedProjectPath, scope);
+        var values = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["ZD_TOOLBOX_PROJECT_PATH"] = normalizedProjectPath,
+            ["ZD_TOOLBOX_EXPORT_MANIFEST"] = manifestPath,
+            ["ZD_TOOLBOX_EXPORT_PROGRESS"] = GetExportProgressPath(manifestPath),
+            ["ZD_TOOLBOX_TARGET_PATHS"] = $"[{string.Join(", ", ExportTargetContentPaths.Select(ToJsonStringLiteral))}]",
+            ["ZD_TOOLBOX_EXPORT_SCOPE"] = scope.ToString(),
+        };
+        if (selectedCharacterCodes is { Count: > 0 })
+        {
+            values["ZD_TOOLBOX_SELECTED_CHARACTERS"] =
+                $"[{string.Join(", ", selectedCharacterCodes.Select(ToJsonStringLiteral))}]";
+        }
+
+        return values;
+    }
+
+    /// <summary>某个导出范围对应的清单文件路径。</summary>
+    public string GetExportManifestPath(string projectPath, UnrealProjectSyncExportScope scope) =>
+        Path.Combine(
+            GetExportDirectoryPath(NormalizePath(projectPath)),
+            GetExportManifestFileName(scope));
 
     private static string GetExportManifestFileName(UnrealProjectSyncExportScope scope) =>
         scope switch
@@ -625,7 +654,7 @@ internal sealed class UnrealProjectSyncService
         var manifestPath = Path.Combine(GetExportDirectoryPath(normalizedProjectPath), GetExportManifestFileName(scope));
         var progressPath = GetExportProgressPath(manifestPath);
         var taskExecutionService = new UnrealPythonTaskExecutionService();
-        var useRunningEditor = taskExecutionService.ShouldUseRunningEditor();
+        var useRunningEditor = taskExecutionService.ShouldUseRunningEditor(enginePath, normalizedProjectPath);
         var offlineStartInfo = BuildExportProcessStartInfo(
             enginePath,
             projectPath,
@@ -650,6 +679,7 @@ internal sealed class UnrealProjectSyncService
             launch.UsesRunningEditor ? "正在连接已打开的 Unreal Editor..." : "正在启动 Unreal Editor 命令进程...",
             35,
             startInfo.FileName));
+        var runStartedAtUtc = DateTime.UtcNow;
         using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("无法启动 Unreal Python 任务进程。");
         var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
@@ -702,25 +732,30 @@ internal sealed class UnrealProjectSyncService
         cancellationToken.ThrowIfCancellationRequested();
         progress?.Report(new ProgressUpdate("正在读取 Unreal 导出结果...", 94, manifestPath));
         var output = await outputTask + await errorTask;
-        if (process.ExitCode != 0)
+        var detail = string.IsNullOrWhiteSpace(output)
+            ? "Unreal 未返回标准输出；请查看项目 Saved/Logs 下的最新日志。"
+            : output.Trim();
+        if (detail.Length > 4000)
         {
-            var detail = string.IsNullOrWhiteSpace(output)
-                ? "Unreal 未返回标准输出；请查看项目 Saved/Logs 下的最新日志。"
-                : output.Trim();
-            if (detail.Length > 4000)
-            {
-                detail = detail[^4000..];
-            }
-
-            throw new InvalidOperationException(
-                $"Unreal 角色数据导出失败，退出码 {process.ExitCode}。\n{detail}");
+            detail = detail[^4000..];
         }
 
         var manifest = LoadExportManifest(manifestPath);
-        if (manifest is null)
+        // 导出成没成功，以清单为准，不以退出码为准。
+        // commandlet 只要编辑器在别处报过错就返回非 0——实测工程里有个蓝图编译不过，
+        // 于是每次检测都被判成「导出失败」，而日志里明写着 Python script executed successfully、
+        // 清单也照常写出来了。清单缺失或不是这一轮写的，才是真失败。
+        var manifestIsFresh = manifest is not null && TryGetLastWriteUtc(manifestPath) > runStartedAtUtc;
+        if (manifest is null || !manifestIsFresh)
         {
-            throw new InvalidOperationException($"Unreal 导出进程已结束，但没有生成有效清单：{manifestPath}");
+            throw new InvalidOperationException(process.ExitCode != 0
+                ? $"Unreal 角色数据导出失败，退出码 {process.ExitCode}。\n{detail}"
+                : $"Unreal 导出进程已结束，但没有生成有效清单：{manifestPath}");
         }
+
+        var exportWarning = process.ExitCode == 0
+            ? string.Empty
+            : $"Unreal 退出码为 {process.ExitCode}，但导出清单已正常写出；退出码多半来自与导出无关的编辑器报错。\n{detail}";
 
         var assetCount = manifest?.Assets.Count ?? 0;
         var characterItemCount = manifest?.CharacterItems.Count ?? 0;
@@ -730,7 +765,7 @@ internal sealed class UnrealProjectSyncService
             "项目角色导出完成。",
             100,
             $"导出资产 {assetCount} 个，角色物品 {characterItemCount} 个，序列预览 {characterSequenceCount} 个，BUFF {(manifest?.CharacterBuffs.Count ?? 0)} 组。"));
-        return new UnrealProjectSyncExportRunResult(process.ExitCode, manifestPath, totalCount, output);
+        return new UnrealProjectSyncExportRunResult(process.ExitCode, manifestPath, totalCount, output, exportWarning);
     }
 
     public string GetExportDirectoryPath(string projectPath)
@@ -741,6 +776,19 @@ internal sealed class UnrealProjectSyncService
     private static string GetExportProgressPath(string manifestPath)
     {
         return Path.Combine(Path.GetDirectoryName(manifestPath)!, "characters.progress.json");
+    }
+
+    private static DateTime TryGetLastWriteUtc(string path)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            return info.Exists ? info.LastWriteTimeUtc : DateTime.MinValue;
+        }
+        catch (IOException)
+        {
+            return DateTime.MinValue;
+        }
     }
 
     private static UnrealExportProgressState? TryReadExportProgress(string path)
@@ -824,6 +872,58 @@ internal sealed class UnrealProjectSyncService
         return Path.Combine(
             contentPath,
             packagePath.Replace('/', Path.DirectorySeparatorChar) + ".uasset");
+    }
+
+    /// <summary>分步导出会各自写一个清单文件，完整导出才写 characters.json。</summary>
+    private static readonly string[] ExportManifestFileNames =
+    [
+        ExportManifestFileName,
+        SequenceExportManifestFileName,
+        "characters-materials.json",
+        "characters-normalization.json"
+    ];
+
+    /// <summary>
+    /// 解析导出目录里可用的清单。第三到第五步只写各自范围的清单，
+    /// 从来不会生成 characters.json；如果只读 characters.json，
+    /// Unreal 侧就会整体为空，差异里只剩工具箱侧的新增，删除永远是 0。
+    /// 这里按修改时间从新到旧合并各分段，缺哪段补哪段。
+    /// </summary>
+    private static (string Path, UnrealProjectExportManifest? Manifest) ResolveExportManifest(string exportDirectoryPath)
+    {
+        if (string.IsNullOrWhiteSpace(exportDirectoryPath) || !Directory.Exists(exportDirectoryPath))
+        {
+            return (string.IsNullOrWhiteSpace(exportDirectoryPath)
+                ? string.Empty
+                : Path.Combine(exportDirectoryPath, ExportManifestFileName), null);
+        }
+
+        var loaded = ExportManifestFileNames
+            .Select(fileName => Path.Combine(exportDirectoryPath, fileName))
+            .Where(File.Exists)
+            .Select(path => (Path: path, Manifest: LoadExportManifest(path), WrittenAt: File.GetLastWriteTimeUtc(path)))
+            .Where(entry => entry.Manifest is not null)
+            .OrderByDescending(entry => entry.WrittenAt)
+            .ToArray();
+        if (loaded.Length == 0)
+        {
+            return (Path.Combine(exportDirectoryPath, ExportManifestFileName), null);
+        }
+
+        var primary = loaded[0];
+        var manifest = primary.Manifest!;
+        foreach (var entry in loaded.Skip(1))
+        {
+            var other = entry.Manifest!;
+            if (manifest.Assets.Count == 0) manifest.Assets = other.Assets;
+            if (manifest.CharacterItems.Count == 0) manifest.CharacterItems = other.CharacterItems;
+            if (manifest.CharacterSummaries.Count == 0) manifest.CharacterSummaries = other.CharacterSummaries;
+            if (manifest.CharacterActors.Count == 0) manifest.CharacterActors = other.CharacterActors;
+            if (manifest.CharacterSequences.Count == 0) manifest.CharacterSequences = other.CharacterSequences;
+            if (manifest.CharacterBuffs.Count == 0) manifest.CharacterBuffs = other.CharacterBuffs;
+        }
+
+        return (primary.Path, manifest);
     }
 
     private static UnrealProjectExportManifest? LoadExportManifest(string path)
@@ -1731,6 +1831,7 @@ internal sealed class UnrealProjectSyncService
                 [],
                 [],
                 [],
+                [],
                 []);
         }
 
@@ -1762,7 +1863,8 @@ internal sealed class UnrealProjectSyncService
             baseActions,
             skillActions,
             linkActions,
-            otherActions);
+            otherActions,
+            sequence.OrphanSequences.Select(BuildExportAssetView).ToArray());
     }
 
     private static UnrealProjectSyncBuffsPreview BuildBuffsPreview(UnrealProjectExportCharacterBuffSet? buffSet)
@@ -1998,7 +2100,8 @@ internal sealed class UnrealProjectSyncService
                 notify.SoundAssetClass,
                 notify.ExportedFilePath,
                 notify.IsCharacterVoice,
-                notify.SequenceObjectPath)).ToArray());
+                notify.SequenceObjectPath)).ToArray(),
+            action.OwnedAssets.Select(BuildExportAssetView).ToArray());
     }
 
     private static UnrealProjectSyncExportAssetView BuildExportAssetView(UnrealProjectExportSequenceAsset asset)
@@ -2327,11 +2430,16 @@ internal sealed class UnrealProjectSyncService
         return count;
     }
 
+    /// <param name="identitySuffix">
+    /// 稳定身份里的槽位后缀（core:0 / support / link:…），必须和
+    /// UnrealBridgeSemanticSnapshotService 用的一致，否则写回来的身份对不上快照。
+    /// </param>
     public int SyncSkillStageToToolbox(
         CharacterCard character,
         UnrealProjectSyncCharacterCandidate candidate,
         UnrealProjectSyncSkillSlotPreview slot,
-        int stageIndex)
+        int stageIndex,
+        string identitySuffix = "")
     {
         if (stageIndex < 0 || stageIndex >= slot.Stages.Count)
         {
@@ -2354,7 +2462,7 @@ internal sealed class UnrealProjectSyncService
         }
 
         entry.SyncId = UnrealBridgeSemanticSnapshotService.CreateOriginIdentity(
-            $"{candidate.Code}|skill|{slot.SlotKey}||{stageIndex}");
+            $"{candidate.Code}|skill|{identitySuffix}|{slot.SlotKey}|{stageIndex}");
         if (target.Count == stageIndex)
         {
             target.Add(entry);
@@ -2368,10 +2476,12 @@ internal sealed class UnrealProjectSyncService
         return 1;
     }
 
+    /// <param name="identitySuffix">同 <see cref="SyncSkillStageToToolbox"/>。</param>
     public int SyncLinkSkillToToolbox(
         CharacterCard character,
         UnrealProjectSyncCharacterCandidate candidate,
-        UnrealProjectSyncLinkSkillPreview linkSkill)
+        UnrealProjectSyncLinkSkillPreview linkSkill,
+        string identitySuffix = "")
     {
         using var entryNotifications = CharacterSkillEntry.SuppressEditNotifications();
         using var multiplierNotifications = SkillMultiplierLevel.SuppressEditNotifications();

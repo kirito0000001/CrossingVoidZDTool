@@ -356,6 +356,21 @@ namespace CrossingVoidZDTool
             }
         }
 
+        /// <summary>
+        /// 逐条明细只落 runtime.log，不进日志面板。
+        /// 面板只留 300 条，上千条明细写进去也是当场被挤掉，
+        /// 白白让每一条都去建 XAML 元素、排一次版。
+        /// </summary>
+        private void AppendDiagnosticLog(LogKind kind, string message)
+        {
+            if (!ShouldWriteLog(kind))
+            {
+                return;
+            }
+
+            AppendRuntimeLog($"[{DateTime.Now:HH:mm:ss}] LogZDTool: {GetLogKindLabel(kind)}: {message}");
+        }
+
         private void AppendLog(LogKind kind, string message, Exception? exception = null)
         {
             if (!ShouldWriteLog(kind))
@@ -375,20 +390,49 @@ namespace CrossingVoidZDTool
             AppendRuntimeLog(displayText.Replace(Environment.NewLine, " | "));
             _logLines.Enqueue((kind, displayText, copyText));
 
-            const int maxLogCount = 300;
-            while (_logLines.Count > maxLogCount)
+            var removedCount = 0;
+            while (_logLines.Count > MaxUiLogCount)
             {
                 _logLines.Dequeue();
+                removedCount++;
             }
 
-            RenderLogItems();
+            AppendLogItem(kind, displayText, copyText, removedCount);
         }
 
+        /// <summary>
+        /// 只追加新的一条、并摘掉溢出的旧条目。
+        /// 以前每写一行日志都要 Items.Clear() 再重建满 300 个 Border，外加一次同步排版，
+        /// 单行实测 400ms；一次第五步检测有上千行日志，界面就会整个僵住十几分钟。
+        /// </summary>
+        private void AppendLogItem(LogKind kind, string displayText, string copyText, int removedCount)
+        {
+            if (LogItemsControl is null || LogScrollViewer is null)
+            {
+                return;
+            }
+
+            for (var index = 0; index < removedCount && LogItemsControl.Items.Count > 0; index++)
+            {
+                DetachLogBlock(LogItemsControl.Items[0]);
+                LogItemsControl.Items.RemoveAt(0);
+            }
+
+            LogItemsControl.Items.Add(CreateLogBlock(kind, displayText, copyText));
+            RequestLogScrollToBottom();
+        }
+
+        /// <summary>整棵重建，只用于清空、切换过滤这种一次性场景。</summary>
         private void RenderLogItems()
         {
             if (LogItemsControl is null || LogScrollViewer is null)
             {
                 return;
+            }
+
+            foreach (var item in LogItemsControl.Items)
+            {
+                DetachLogBlock(item);
             }
 
             LogItemsControl.Items.Clear();
@@ -397,13 +441,40 @@ namespace CrossingVoidZDTool
                 LogItemsControl.Items.Add(CreateLogBlock(kind, displayText, copyText));
             }
 
-            ScrollLogToBottom();
+            RequestLogScrollToBottom();
+        }
+
+        private void DetachLogBlock(object? item)
+        {
+            if (item is Border border)
+            {
+                // 不摘事件，滚出窗口的旧条目会一直被 Tapped 委托拉住不放。
+                border.Tapped -= LogBlock_Tapped;
+            }
+        }
+
+        /// <summary>
+        /// 把「滚到底」合并成一次低优先级派发。ScrollViewer.UpdateLayout() 是同步整树排版，
+        /// 日志刷屏时逐行调用会独占 UI 线程；低优先级则保证排版完成后才滚。
+        /// </summary>
+        private void RequestLogScrollToBottom()
+        {
+            if (_logScrollToBottomPending || LogScrollViewer is null)
+            {
+                return;
+            }
+
+            _logScrollToBottomPending = true;
+            if (!DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, ScrollLogToBottom))
+            {
+                _logScrollToBottomPending = false;
+            }
         }
 
         private void ScrollLogToBottom()
         {
-            LogScrollViewer.UpdateLayout();
-            LogScrollViewer.ChangeView(null, LogScrollViewer.ScrollableHeight, null);
+            _logScrollToBottomPending = false;
+            LogScrollViewer?.ChangeView(null, LogScrollViewer.ScrollableHeight, null, disableAnimation: true);
         }
 
         private Border CreateLogBlock(LogKind kind, string displayText, string copyText)

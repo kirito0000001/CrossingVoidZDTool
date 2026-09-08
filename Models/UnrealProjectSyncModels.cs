@@ -446,7 +446,8 @@ internal sealed record UnrealProjectSyncSequenceFramesPreview(
     IReadOnlyList<UnrealProjectSyncSequenceActionPreview> BaseActions,
     IReadOnlyList<UnrealProjectSyncSequenceActionPreview> SkillActions,
     IReadOnlyList<UnrealProjectSyncSequenceActionPreview> LinkActions,
-    IReadOnlyList<UnrealProjectSyncSequenceActionPreview> OtherActions)
+    IReadOnlyList<UnrealProjectSyncSequenceActionPreview> OtherActions,
+    IReadOnlyList<UnrealProjectSyncExportAssetView> OrphanSequences)
 {
     public IReadOnlyList<UnrealProjectSyncSequenceActionPreview> Actions => BaseActions.Concat(SkillActions).Concat(LinkActions).Concat(OtherActions).ToArray();
 
@@ -479,7 +480,8 @@ internal sealed record UnrealProjectSyncSequenceActionPreview(
     double FramesPerSecond,
     IReadOnlyList<UnrealProjectSyncExportAssetView> OrderedFrames,
     IReadOnlyList<UnrealProjectSyncExportAssetView> PreviewFrames,
-    IReadOnlyList<UnrealProjectSyncSequenceSoundNotifyPreview>? SoundNotifies = null)
+    IReadOnlyList<UnrealProjectSyncSequenceSoundNotifyPreview>? SoundNotifies = null,
+    IReadOnlyList<UnrealProjectSyncExportAssetView>? OwnedAssets = null)
 {
     public int FormIndex => FormIndexes.Count == 0 ? 1 : FormIndexes[0];
 
@@ -593,7 +595,13 @@ internal sealed record UnrealProjectSyncExportRunResult(
     int ExitCode,
     string ManifestPath,
     int AssetCount,
-    string Output);
+    string Output,
+    /// <summary>
+    /// 退出码非 0、但清单确实是这一轮新写出来的时候的诊断信息。
+    /// 编辑器只要在别处报过错（例如某个蓝图编译不过）就会让 commandlet 返回非 0，
+    /// 那跟导出成没成功无关。
+    /// </summary>
+    string Warning = "");
 
 internal sealed class UnrealExportProgressState
 {
@@ -908,6 +916,14 @@ internal sealed class UnrealProjectExportCharacterSequence
 
     [JsonPropertyName("actions")]
     public List<UnrealProjectExportSequenceAction> Actions { get; set; } = [];
+
+    /// <summary>
+    /// 挂在该角色动画源上、却不在其规范 AnimSequences 目录里的序列。
+    /// PaperZD 的动画源没有列表属性，"注册"就是序列自身的 AnimSource 指针，
+    /// 所以这类序列可能躺在项目的任何角落，按目录扫描看不到。
+    /// </summary>
+    [JsonPropertyName("orphanSequences")]
+    public List<UnrealProjectExportSequenceAsset> OrphanSequences { get; set; } = [];
 }
 
 internal sealed class UnrealProjectExportSequenceAction
@@ -956,6 +972,10 @@ internal sealed class UnrealProjectExportSequenceAction
 
     [JsonPropertyName("framesPerSecond")]
     public double FramesPerSecond { get; set; }
+
+    /// <summary>该动作在 Unreal 里占用的全部资产，用于发现已经断开引用的旧素材。</summary>
+    [JsonPropertyName("ownedAssets")]
+    public List<UnrealProjectExportSequenceAsset> OwnedAssets { get; set; } = [];
 
     [JsonPropertyName("orderedFrames")]
     public List<UnrealProjectExportSequenceAsset> OrderedFrames { get; set; } = [];

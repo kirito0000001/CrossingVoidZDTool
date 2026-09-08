@@ -12,9 +12,12 @@ using Microsoft.UI.Xaml;
 
 namespace CrossingVoidZDTool.ViewModels;
 
-internal sealed class UnrealProjectSyncViewModel : ObservableObject
+internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 {
-    private const int CurrentDetectionAlgorithmVersion = 4;
+    // 5：资产类名不再把 TopLevelAssetPath 的对象内存地址带进内容哈希。
+    // 旧缓存里 ownedAssets 的哈希掺了指针，和新导出的永远对不上，
+    // 必须整份作废重新检测，不能拿来做同步前比对。
+    private const int CurrentDetectionAlgorithmVersion = 5;
     private readonly UnrealProjectSyncService _syncService;
     private string _enginePath = string.Empty;
     private string _projectPath = string.Empty;
@@ -47,6 +50,8 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     private readonly HashSet<string> _existingImportStableIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<UnrealSyncSelectionTreeItem, UnrealSyncSelectionTreeItem> _selectionParents = [];
     private bool _hasImportDetection;
+    /// <summary>当前差异树属于哪一步（第三步或第五步）；0 表示还没有已加载的差异树。</summary>
+    private int _loadedPublishStep;
     private int _importSelectedCount;
     private int _importAddedCount;
     private int _importUpdatedCount;
@@ -74,8 +79,11 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     private UnrealSyncSessionCache? _loadedSessionCache;
     private UnrealSyncSessionCache? _pendingSessionCache;
     private string _pendingSessionProjectPath = string.Empty;
+    private CharacterCard? _pendingSessionCharacter;
     private bool _sessionRestored;
     private bool _isRestoringSession;
+    private int _bulkSelectionUpdateDepth;
+    private bool _bulkSelectionUpdatePending;
     private DateTimeOffset? _lastContentDetectionAt;
     private UnrealBridgeSnapshot? _lastImportSnapshot;
     private List<UnrealBridgeChange> _lastPublishChanges = [];
@@ -102,6 +110,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         SharedMaterialSources.Add(new(UnrealSyncSourceKind.SharedMaterial, "活动图片", "项目共享素材", "活动图片 EventImage", IsAvailable: false));
         SharedMaterialSources.Add(new(UnrealSyncSourceKind.SharedMaterial, "其他项目素材", "项目共享素材", "其他项目素材 Shared", IsAvailable: false));
         SelectedPublishStage = PublishStages[0];
+        AttachWorkspaceWatchers();
     }
 
     public ObservableCollection<UnrealProjectSyncCheckItem> CheckItems { get; } = [];
@@ -206,31 +215,24 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             if (SetProperty(ref _isNormalizationWorkspace, value))
             {
                 OnPropertyChanged(nameof(IsDetectionWorkspace));
-                OnPropertyChanged(nameof(NormalizationEmptyVisibility));
-                OnPropertyChanged(nameof(SelectionEmptyVisibility));
                 OnPropertyChanged(nameof(SelectionContentVisibility));
-                OnPropertyChanged(nameof(DetectionResultVisibility));
             }
         }
     }
 
     public bool IsDetectionWorkspace => !IsNormalizationWorkspace;
-    public Visibility NormalizationEmptyVisibility => IsNormalizationWorkspace &&
-        _isNormalizationStepLoaded && VisibleNormalizationItems.Count == 0
-        ? Visibility.Visible
-        : Visibility.Collapsed;
     public bool IsFoundationWorkspace => !IsEngineToToolbox && WorkflowStep == 1;
     public bool IsLightConfigurationWorkspace => !IsEngineToToolbox && WorkflowStep == 4;
     public bool IsSequenceSynchronizationWorkspace => !IsEngineToToolbox && WorkflowStep == 5;
-    public Visibility FoundationWorkspaceVisibility => IsFoundationWorkspace ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility FoundationWorkspaceVisibility =>
+        IsFoundationWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     public Visibility FoundationDetailsVisibility => IsFoundationWorkspace ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility LightConfigurationWorkspaceVisibility => IsLightConfigurationWorkspace && LightConfigurationItems.Count > 0
-        ? Visibility.Visible
-        : Visibility.Collapsed;
-    public Visibility LightConfigurationEmptyVisibility => IsLightConfigurationWorkspace &&
-        _isLightConfigurationLoaded && LightConfigurationItems.Count == 0
-        ? Visibility.Visible
-        : Visibility.Collapsed;
+    public Visibility LightConfigurationWorkspaceVisibility =>
+        IsLightConfigurationWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     public Visibility LightConfigurationDetailsVisibility => IsLightConfigurationWorkspace
         ? Visibility.Visible
         : Visibility.Collapsed;
@@ -244,6 +246,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         3 => "同步素材",
         4 => "基础配置",
         5 => "序列同步",
+        6 => "蓝图置入",
         _ => "同步结果"
     };
     public string WorkspaceDescription => IsEngineToToolbox
@@ -255,6 +258,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             3 => "勾选本次需要同步到 Unreal 的素材。",
             4 => "检查并应用角色入队语音、Item、MetaSound 和语音并发设置。",
             5 => "同步当前角色的序列、帧素材、AnimMaps 映射和语音轨道。",
+            6 => "把角色数据写入角色蓝图和 2DInfor 数据表：对局设置、动作序列、技能与护援连携。",
             _ => "查看最近一次同步执行结果。"
         };
 
@@ -301,7 +305,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         4 => _isLightConfigurationLoaded &&
             LightConfigurationPendingCount == 0 &&
             LightConfigurationErrorCount == 0,
-        5 => false,
+        5 => _hasImportDetection &&
+            _lastPublishChanges.All(change => change.Kind == UnrealBridgeChangeKind.Unchanged),
+        6 => false,
         _ => false
     };
 
@@ -340,6 +346,10 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             OnPropertyChanged(nameof(CanDetectSelectedSource));
             OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
             OnPropertyChanged(nameof(CanApplyLightConfiguration));
+            // 检测结果是在操作还没结束时写进来的，那一刻算出来的可用性必然是假。
+            // 操作收尾时不重算一次，写入按钮就会一直停在灰色。
+            OnPropertyChanged(nameof(CanApplyBlueprintSetup));
+            NotifyWorkspaceStateChanged();
         }
     }
 
@@ -347,17 +357,6 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         ? $"上次检测：{detected.LocalDateTime:yyyy-MM-dd HH:mm:ss}（打开页面不会自动重检，同步前会强制刷新）"
         : "尚未检测内容";
 
-    public Visibility DetectionResultVisibility =>
-        !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
-        HasContentDetection && SelectionTreeRoots.Count == 0
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-
-    public string DetectionResultTitle => IsEngineToToolbox
-        ? "内容检测完成"
-        : DetectionChangedCount == 0
-            ? "本次没有改动"
-            : $"检测到 {DetectionChangedCount} 项改动";
 
     public string DetectionResultSummaryText
     {
@@ -427,24 +426,46 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
     private void NotifyDetectionSummaryChanged()
     {
-        OnPropertyChanged(nameof(DetectionResultTitle));
         OnPropertyChanged(nameof(DetectionResultSummaryText));
     }
 
     public bool HasContentDetection => _hasImportDetection;
+
+    /// <summary>
+    /// 这一步是否已经有可用数据。有就不必再跑一次虚幻检测——
+    /// 六步来回切，每次都重检测是纯粹的等待（离线一次十几秒）。
+    ///
+    /// 第三步和第五步共用同一棵差异树，只是范围不同，
+    /// 所以要靠 <see cref="_loadedPublishStep"/> 区分树里装的是谁的数据，
+    /// 不能只看 <see cref="HasContentDetection"/>。
+    /// </summary>
+    public bool IsWorkflowStepLoaded(int step) => step switch
+    {
+        1 => FoundationChecks.Count > 0,
+        2 => _isNormalizationStepLoaded,
+        3 => _hasImportDetection && _loadedPublishStep == 3,
+        4 => _isLightConfigurationLoaded,
+        5 => _hasImportDetection && _loadedPublishStep == 5,
+        6 => _isBlueprintSetupLoaded,
+        _ => false,
+    };
+
+    /// <summary>差异检测完成或从缓存恢复后，记下这棵树属于哪一步。</summary>
+    public void SetLoadedPublishStep(int step) => _loadedPublishStep = step;
 
     public int WorkflowStep
     {
         get => _workflowStep;
         private set
         {
-            if (SetProperty(ref _workflowStep, Math.Clamp(value, 1, 5)))
+            if (SetProperty(ref _workflowStep, Math.Clamp(value, UnrealSyncWorkflow.MinStep, UnrealSyncWorkflow.MaxStep)))
             {
                 OnPropertyChanged(nameof(WorkflowStep1StatusText));
                 OnPropertyChanged(nameof(WorkflowStep2StatusText));
                 OnPropertyChanged(nameof(WorkflowStep3StatusText));
                 OnPropertyChanged(nameof(WorkflowStep4StatusText));
                 OnPropertyChanged(nameof(WorkflowStep5StatusText));
+        OnPropertyChanged(nameof(WorkflowStep6StatusText));
                 OnPropertyChanged(nameof(WorkflowNextText));
                 OnPropertyChanged(nameof(WorkflowReloadText));
                 OnPropertyChanged(nameof(WorkflowConfirmationVisibility));
@@ -453,21 +474,24 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
                 OnPropertyChanged(nameof(IsFoundationWorkspace));
                 OnPropertyChanged(nameof(IsLightConfigurationWorkspace));
+                OnPropertyChanged(nameof(IsBlueprintSetupWorkspace));
                 OnPropertyChanged(nameof(IsSequenceSynchronizationWorkspace));
                 OnPropertyChanged(nameof(FoundationWorkspaceVisibility));
                 OnPropertyChanged(nameof(FoundationDetailsVisibility));
                 OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
-                OnPropertyChanged(nameof(LightConfigurationEmptyVisibility));
                 OnPropertyChanged(nameof(LightConfigurationDetailsVisibility));
+                OnPropertyChanged(nameof(BlueprintSetupWorkspaceVisibility));
+                OnPropertyChanged(nameof(BlueprintSetupDetailsVisibility));
                 OnPropertyChanged(nameof(SequenceSynchronizationDetailsVisibility));
                 OnPropertyChanged(nameof(WorkspaceTitle));
+                NotifyWorkspaceStateChanged();
                 OnPropertyChanged(nameof(WorkspaceDescription));
-                OnPropertyChanged(nameof(SelectionEmptyVisibility));
                 OnPropertyChanged(nameof(SelectionContentVisibility));
-                OnPropertyChanged(nameof(DetectionResultVisibility));
                 OnPropertyChanged(nameof(CanAdvanceWorkflow));
                 OnPropertyChanged(nameof(CanApplyLightConfiguration));
+                OnPropertyChanged(nameof(CanApplyBlueprintSetup));
                 OnPropertyChanged(nameof(HasNoPublishChanges));
+        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
                 OnPropertyChanged(nameof(CanStartPublish));
                 OnPropertyChanged(nameof(PublishActionText));
                 SaveSessionCache();
@@ -498,6 +522,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         2 => "同步素材",
         3 => "基础配置",
         4 => "序列同步",
+        5 => "蓝图置入",
         _ => "已完成"
     };
     public string WorkflowReloadText => WorkflowStep switch
@@ -507,6 +532,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         3 => "重新加载同步素材",
         4 => "重新加载基础配置",
         5 => "重新加载序列同步",
+        6 => "重新加载蓝图置入",
         _ => "重新加载同步结果"
     };
 
@@ -517,7 +543,8 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     {
         3 => HasNoPublishChanges && IsWorkflowOperationIdle,
         4 => CanAdvanceWorkflow && IsWorkflowOperationIdle,
-        5 => false,
+        5 => CanAdvanceWorkflow && IsWorkflowOperationIdle,
+        6 => false,
         _ => WorkflowStep < 3 && CanAdvanceWorkflow && IsWorkflowOperationIdle
     };
 
@@ -691,10 +718,12 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 OnPropertyChanged(nameof(FoundationWorkspaceVisibility));
                 OnPropertyChanged(nameof(FoundationDetailsVisibility));
                 OnPropertyChanged(nameof(WorkspaceTitle));
+                NotifyWorkspaceStateChanged();
                 OnPropertyChanged(nameof(WorkspaceDescription));
-                OnPropertyChanged(nameof(DetectionResultVisibility));
                 NotifyDetectionSummaryChanged();
                 ClearLightConfigurationState();
+            ClearBlueprintSetupState();
+                ClearBlueprintSetupState();
                 SetSelectionTree([]);
                 SelectedSource = null;
                 ResetImportOperation();
@@ -794,15 +823,11 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         private set => SetProperty(ref _canImportSelection, value);
     }
 
-    public Visibility SelectionEmptyVisibility => !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
-        SelectionTreeRoots.Count == 0 && !HasContentDetection
-        ? Visibility.Visible
-        : Visibility.Collapsed;
-
-    public Visibility SelectionContentVisibility => !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
-        SelectionTreeRoots.Count > 0
-        ? Visibility.Visible
-        : Visibility.Collapsed;
+    public Visibility SelectionContentVisibility =>
+        !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
+        !IsBlueprintSetupWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
+            ? Visibility.Visible
+            : Visibility.Collapsed;
 
     public string SourceGroupTitle => IsEngineToToolbox ? "Unreal 角色" : "已完成角色";
 
@@ -844,8 +869,10 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             if (SetProperty(ref _selectedPublishStage, value))
             {
                 _hasImportDetection = false;
+                _loadedPublishStep = 0;
                 OnPropertyChanged(nameof(HasContentDetection));
                 OnPropertyChanged(nameof(WorkflowStep5StatusText));
+        OnPropertyChanged(nameof(WorkflowStep6StatusText));
                 SetSelectionTree([]);
                 ResetImportOperation();
                 OnPropertyChanged(nameof(PublishStageDescription));
@@ -893,6 +920,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             _lastPublishChanges.Clear();
             ResetDetectionSummary();
             ClearLightConfigurationState();
+            ClearBlueprintSetupState();
             _isNormalizationStepLoaded = false;
             NormalizationItems.Clear();
             VisibleNormalizationItems = [];
@@ -1085,6 +1113,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             SetSelectionTree([]);
             ResetImportOperation();
             ClearLightConfigurationState();
+            ClearBlueprintSetupState();
             CloseNormalizationWorkspace();
             SetNormalizationStepLoaded(false);
             NormalizationItems.Clear();
@@ -1106,7 +1135,44 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 RefreshFoundationChecks(nextCode);
             }
         }
+        ClearWorkspaceFailure();
+        if (!sameSource)
+        {
+            RestoreCharacterWorkflowStep();
+        }
+
+        NotifyWorkspaceStateChanged();
         SaveSessionCache();
+    }
+
+    /// <summary>
+    /// 切到另一个角色时，回到这个角色自己上次停的步骤。
+    ///
+    /// 以前切换只换数据、不换步号，于是「在御坂的第六步切到桐人」会停在
+    /// 桐人的第六步上——而桐人可能连第一步都没做完。更糟的是紧接着那次
+    /// 保存会在桐人目录里写一份空的第六步缓存，把他真实的进度盖出一个假象。
+    /// </summary>
+    private void RestoreCharacterWorkflowStep()
+    {
+        var character = SelectedSource?.DraftCharacter;
+        if (IsEngineToToolbox || character is null || string.IsNullOrWhiteSpace(ProjectPath))
+        {
+            return;
+        }
+
+        var cached = _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache;
+        var step = cached?.WorkflowStep is int value &&
+            value >= UnrealSyncWorkflow.MinStep && value <= UnrealSyncWorkflow.MaxStep
+                ? value
+                : UnrealSyncWorkflow.MinStep;
+        if (WorkflowStep != step)
+        {
+            ReturnToWorkflowStep(step);
+            return;
+        }
+
+        // 步号没变也要把这一步的缓存读回来，否则会显示上一个角色的内容。
+        RestoreWorkflowStepCache(step);
     }
 
     public bool OpenNormalizationWorkspace(bool activateWorkspace = true)
@@ -1121,14 +1187,14 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         }
 
         var inMemoryCache = _loadedSessionCache;
-        var stepCache = _sessionCacheService.LoadStep(ProjectPath, character.Code, 2).Cache;
+        var stepCache = _sessionCacheService.LoadStep(character, ProjectPath, character.Code, 2).Cache;
         var cachedDecisions = stepCache?.NormalizationDecisions ??
             (inMemoryCache is not null && string.Equals(
                 inMemoryCache.SelectedCharacterCode,
                 character.Code,
                 StringComparison.OrdinalIgnoreCase)
                 ? inMemoryCache.NormalizationDecisions
-                : _sessionCacheService.Load(ProjectPath, character.Code).Cache?.NormalizationDecisions ?? []);
+                : _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache?.NormalizationDecisions ?? []);
         var rebuiltItems = BuildNormalizationItems(character, candidate, cachedDecisions);
         ApplyNormalizationItems(rebuiltItems, activateWorkspace);
         return true;
@@ -1151,7 +1217,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 character.Code,
                 StringComparison.OrdinalIgnoreCase)
             ? inMemoryCache.NormalizationDecisions
-            : _sessionCacheService.Load(ProjectPath, character.Code).Cache?.NormalizationDecisions ?? [];
+            : _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache?.NormalizationDecisions ?? [];
         var rebuiltItems = await Task.Run(() => BuildNormalizationItems(character, candidate, cachedDecisions));
         ApplyNormalizationItems(rebuiltItems, activateWorkspace);
         return true;
@@ -1263,7 +1329,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
         _isNormalizationStepLoaded = value;
         OnPropertyChanged(nameof(IsNormalizationStepLoaded));
-        OnPropertyChanged(nameof(NormalizationEmptyVisibility));
+        NotifyWorkspaceStateChanged();
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
         OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
         SaveSessionCache();
@@ -1275,7 +1341,6 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 !item.IsAlreadyNormalized &&
                 (!HideResolvedNormalizationItems || !item.IsResolved))
             .ToArray();
-        OnPropertyChanged(nameof(NormalizationEmptyVisibility));
         OnPropertyChanged(nameof(NormalizationSummaryText));
     }
 
@@ -1297,7 +1362,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
     public void ReturnToWorkflowStep(int step)
     {
-        step = Math.Clamp(step, 1, 5);
+        step = Math.Clamp(step, UnrealSyncWorkflow.MinStep, UnrealSyncWorkflow.MaxStep);
         // 切换步骤会触发 WorkflowStep 的保存。恢复前先抑制这次保存，
         // 避免用当前步骤的空显示树覆盖目标步骤已有缓存。
         _isRestoringSession = true;
@@ -1344,7 +1409,11 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             return;
         }
 
-        var result = _sessionCacheService.LoadStep(ProjectPath, characterCode, step);
+        // 勾选是 180ms 防抖写盘的。这里只读磁盘，所以必须先把挂起的那份落盘，
+        // 否则「勾选后立刻点同步」会读到勾选之前的旧缓存，把刚做的勾选整个抹掉。
+        FlushSessionCache();
+        var result = _sessionCacheService.LoadStep(
+            SelectedSource?.DraftCharacter, ProjectPath, characterCode, step);
         if (result.Status != UnrealSyncSessionCacheLoadStatus.Loaded || result.Cache is null)
         {
             return;
@@ -1360,6 +1429,24 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 RestoreNormalizationItems(cache.NormalizationItems);
                 _isNormalizationStepLoaded = cache.IsNormalizationStepLoaded || cache.NormalizationItems.Count > 0;
                 OnPropertyChanged(nameof(IsNormalizationStepLoaded));
+                return;
+            }
+
+            if (step == 6)
+            {
+                if (cache.IsBlueprintSetupLoaded)
+                {
+                    SetBlueprintSetupResult(
+                        new UnrealBlueprintSetupResult
+                        {
+                            Succeeded = true,
+                            CharacterCode = cache.SelectedCharacterCode,
+                            Items = cache.BlueprintSetupItems,
+                            ErrorMessage = cache.BlueprintSetupResultMessage
+                        },
+                        cache.SelectedBlueprintSetupIds,
+                        selectPendingByDefault: false);
+                }
                 return;
             }
 
@@ -1380,6 +1467,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
             if (step is 3 or 5 && cache.IsPublishDetection)
             {
+                SetLoadedPublishStep(step);
                 var changes = FilterCachedPublishChanges(cache, SelectedSource?.DraftCharacter).ToArray();
                 var roots = step == 5
                     ? UnrealSyncSelectionTreeBuilder.FromSequenceChanges(changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: false)
@@ -1472,9 +1560,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             }
         }
 
-        OnPropertyChanged(nameof(SelectionEmptyVisibility));
         OnPropertyChanged(nameof(SelectionContentVisibility));
-        OnPropertyChanged(nameof(DetectionResultVisibility));
         UpdateImportSelectionSummary();
         ApplyPublishFilter();
     }
@@ -1490,6 +1576,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         _hasImportDetection = true;
         OnPropertyChanged(nameof(HasContentDetection));
         OnPropertyChanged(nameof(WorkflowStep5StatusText));
+        OnPropertyChanged(nameof(WorkflowStep6StatusText));
         SetImportDetectionSummary(snapshot, rootList);
         ImportOperationTitle = "内容检测完成";
         ImportOperationMessage = "展开中间分类并勾选内容，下面会实时显示本次导入影响。";
@@ -1500,7 +1587,6 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         _lastImportSnapshot = snapshot;
         _lastContentDetectionAt = DateTimeOffset.Now;
         OnPropertyChanged(nameof(ContentDetectionStatusText));
-        OnPropertyChanged(nameof(DetectionResultVisibility));
         SaveSessionCache();
     }
 
@@ -1533,8 +1619,17 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     {
         _existingImportStableIds.Clear();
         _hasImportDetection = true;
+        // 默认按当前步骤认领这棵树。检测流程会在建完树、切到目标步骤之前
+        // 用 SetLoadedPublishStep 覆盖成真正的目标步骤；这里只是保证
+        // 视图模型单独使用时也是自洽的，不会出现「有树但没人认领」。
+        if (WorkflowStep is 3 or 5)
+        {
+            _loadedPublishStep = WorkflowStep;
+        }
+        ClearWorkspaceFailure();
         OnPropertyChanged(nameof(HasContentDetection));
         OnPropertyChanged(nameof(WorkflowStep5StatusText));
+        OnPropertyChanged(nameof(WorkflowStep6StatusText));
         ImportOperationTitle = "差异检测完成";
         ImportOperationMessage = "展开中间分类并确认本次需要同步的内容。";
         ImportDetailVisibility = Visibility.Visible;
@@ -1552,11 +1647,11 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             .Select(item => item.Change!)
             .ToList();
         OnPropertyChanged(nameof(HasNoPublishChanges));
+        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
         OnPropertyChanged(nameof(CanStartPublish));
         OnPropertyChanged(nameof(PublishActionText));
         _lastContentDetectionAt = DateTimeOffset.Now;
         OnPropertyChanged(nameof(ContentDetectionStatusText));
-        OnPropertyChanged(nameof(DetectionResultVisibility));
         SaveSessionCache();
     }
 
@@ -1594,15 +1689,31 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
     public bool MatchesCurrentPublishChanges(IReadOnlyList<UnrealBridgeChange> latestChanges)
     {
-        var current = _lastPublishChanges
-            .Select(GetPublishChangeFingerprint)
-            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
-        var latest = latestChanges
-            .Select(GetPublishChangeFingerprint)
-            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
-            .ToArray();
+        // 两侧必须同口径。_lastPublishChanges 的来源不固定：刚检测完是完整差异集，
+        // 而从会话缓存恢复（ReturnToWorkflowStep → RestoreWorkflowStepCache）之后
+        // 会变成去掉 Unchanged 和已验证项的子集。直接比会因为元素个数不同恒判"内容已变化"，
+        // 同步永远走不下去。所以比较前把两侧都归一到"本次真正需要处理的差异"。
+        var current = NormalizePublishChangesForComparison(_lastPublishChanges);
+        var latest = NormalizePublishChangesForComparison(latestChanges);
         return current.SequenceEqual(latest, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private string[] NormalizePublishChangesForComparison(IReadOnlyList<UnrealBridgeChange> changes)
+    {
+        var actionable = FilterPublishChanges(changes)
+            .Where(change => change.Kind != UnrealBridgeChangeKind.Unchanged);
+        var state = SelectedSource?.DraftCharacter is { } character && !string.IsNullOrWhiteSpace(ProjectPath)
+            ? new UnrealBridgeStateService().Load(character, ProjectPath)
+            : null;
+        if (state is not null)
+        {
+            actionable = actionable.Where(change => !IsAlreadyVerified(change, state));
+        }
+
+        return actionable
+            .Select(GetPublishChangeFingerprint)
+            .OrderBy(value => value, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
     }
 
     private static string GetPublishChangeFingerprint(UnrealBridgeChange change) =>
@@ -1626,6 +1737,17 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         {
             if (item.Change is not UnrealBridgeChange change)
             {
+                continue;
+            }
+
+            // 序列行不走素材重定向：删除项显示 Unreal 资产名，新增项显示帧名，
+            // 否则待清理的旧 Sprite 会被标成“待选择工具箱素材”。
+            if (change.Module == UnrealBridgeModule.SequenceFrames)
+            {
+                var sequenceDetail = change.UnrealItem is not null
+                    ? $"Unreal 现有：{TrimGamePrefix(change.UnrealItem.SourceObjectPath)}"
+                    : $"目标：{BuildPublishTargetPreview(change.ToolboxItem)}";
+                item.ApplyDisplay(change.DisplayName, sequenceDetail);
                 continue;
             }
 
@@ -1736,21 +1858,37 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     {
         SetSelectionTree([]);
         _lastPublishChanges.Clear();
-        _hasImportDetection = false;
+        // 同步完成后必须留下反馈。以前这里把 _hasImportDetection 置假、又清空检测计数：
+        // DetectionResultVisibility 要求 HasContentDetection 为真，于是整块结果面板直接折叠，
+        // 中栏什么都不显示——刚跑完一次成功的同步，界面却像什么都没发生过。
+        // 复扫的统计是真实且有意义的（检查了多少项、还剩多少差异），保留它。
+        _hasImportDetection = true;
         OnPropertyChanged(nameof(HasContentDetection));
         OnPropertyChanged(nameof(WorkflowStep5StatusText));
-        OnPropertyChanged(nameof(DetectionResultVisibility));
-        ResetDetectionSummary();
+        OnPropertyChanged(nameof(WorkflowStep6StatusText));
         OnPropertyChanged(nameof(IsPublishSelectionReady));
         OnPropertyChanged(nameof(HasPublishSelection));
         OnPropertyChanged(nameof(HasNoPublishChanges));
+        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
         OnPropertyChanged(nameof(CanStartPublish));
         OnPropertyChanged(nameof(PublishActionText));
-        WorkflowStep = 4;
-        ImportOperationTitle = "素材同步完成";
-        ImportOperationMessage = "正在进入第四步基础配置。";
-        ImportResultMessage = $"已验证 {executedCount} 项，保留未执行 {deferredCount} 项。";
-        ImportResultVisibility = Visibility.Collapsed;
+        // 第五步是最后一步：完成后必须留在第五步。以前无条件跳到第四步，
+        // 序列同步一成功用户就被踢回基础配置，检测结果和选择树全被清空，
+        // 只能重走第四步再回来重新检测。
+        var wasSequenceStep = WorkflowStep == 5;
+        if (!wasSequenceStep)
+        {
+            WorkflowStep = 4;
+        }
+
+        ImportOperationTitle = wasSequenceStep ? "序列同步完成" : "素材同步完成";
+        ImportOperationMessage = wasSequenceStep
+            ? "当前角色的序列已全部同步。"
+            : "正在进入第四步基础配置。";
+        ImportResultMessage = deferredCount > 0
+            ? $"本次已执行 {executedCount} 项，保留未执行 {deferredCount} 项。"
+            : $"本次已执行 {executedCount} 项，复扫未发现剩余差异。";
+        ImportResultVisibility = Visibility.Visible;
     }
 
     public void SetLightConfigurationResult(
@@ -1797,6 +1935,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             : string.IsNullOrWhiteSpace(result.ErrorMessage)
                 ? "基础配置存在未完成项目。"
                 : result.ErrorMessage;
+        ClearWorkspaceFailure();
         NotifyLightConfigurationChanged();
         SaveSessionCache();
     }
@@ -1822,10 +1961,12 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     {
         _lightConfigurationResultMessage = message;
         OnPropertyChanged(nameof(LightConfigurationResultMessage));
+        SetWorkspaceFailure(message);
     }
 
     private void LightConfigurationItem_SelectionChanged(object? sender, EventArgs e)
     {
+        NotifyStepSelectionChanged();
         NotifyLightConfigurationChanged();
         SaveSessionCache();
     }
@@ -1849,7 +1990,6 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(IsLightConfigurationLoaded));
         OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
-        OnPropertyChanged(nameof(LightConfigurationEmptyVisibility));
         OnPropertyChanged(nameof(LightConfigurationSummaryText));
         OnPropertyChanged(nameof(LightConfigurationEmptyTitle));
         OnPropertyChanged(nameof(LightConfigurationSelectionText));
@@ -1861,6 +2001,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         OnPropertyChanged(nameof(CanApplyLightConfiguration));
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
         OnPropertyChanged(nameof(WorkflowStep4StatusText));
+        NotifyWorkspaceStateChanged();
     }
 
     public void FailPublishOperation(string message)
@@ -1881,6 +2022,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
     public void FailImportDetection(string message)
     {
+        SetWorkspaceFailure(message);
         if (IsEngineToToolbox || SelectionTreeRoots.Count == 0)
         {
             ResetImportOperation();
@@ -1906,17 +2048,97 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                 return;
             }
 
-            UpdateImportSelectionSummary();
-            ApplyPublishFilter();
-            SaveSessionCache();
+            if (DeferSelectionRecompute())
+            {
+                return;
+            }
+
+            RecomputeSelectionState();
         }
     }
 
-    private void SelectionGroup_GroupSelectionChanged(object? sender, EventArgs e)
+    /// <summary>
+    /// 批量改勾选时，把「汇总 + 过滤 + 写缓存」压成结尾的一次。
+    /// 这三件事每次都要走一遍整棵树，SaveSessionCache 还会把全部变更记录克隆一份去建缓存对象；
+    /// 恢复上千个叶子勾选时逐个触发，就是上百万次克隆，实测能把进程顶到 5GB 并让 UI 线程一直满载空转。
+    /// </summary>
+    public IDisposable BeginBulkSelectionUpdate()
+    {
+        _bulkSelectionUpdateDepth++;
+        return new BulkSelectionUpdateScope(this);
+    }
+
+    /// <summary>批量期间返回 true，表示这次重算推迟到批量结束时统一做。</summary>
+    private bool DeferSelectionRecompute()
+    {
+        if (_bulkSelectionUpdateDepth <= 0)
+        {
+            return false;
+        }
+
+        _bulkSelectionUpdatePending = true;
+        return true;
+    }
+
+    private void EndBulkSelectionUpdate()
+    {
+        if (_bulkSelectionUpdateDepth > 0)
+        {
+            _bulkSelectionUpdateDepth--;
+        }
+
+        if (_bulkSelectionUpdateDepth > 0 || !_bulkSelectionUpdatePending)
+        {
+            return;
+        }
+
+        _bulkSelectionUpdatePending = false;
+        RecomputeSelectionState();
+    }
+
+    private void RecomputeSelectionState()
     {
         UpdateImportSelectionSummary();
         ApplyPublishFilter();
         SaveSessionCache();
+    }
+
+    private sealed class BulkSelectionUpdateScope(UnrealProjectSyncViewModel owner) : IDisposable
+    {
+        private bool _disposed;
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            owner.EndBulkSelectionUpdate();
+        }
+    }
+
+    /// <summary>按上一次的勾选恢复整棵树，全程只做一次汇总与写盘。</summary>
+    public void RestoreSelectionState(IReadOnlySet<string> selectedStableIds)
+    {
+        using var scope = BeginBulkSelectionUpdate();
+        foreach (var root in SelectionTreeRoots)
+        {
+            root.RestoreCheckedState(selectedStableIds);
+        }
+
+        _bulkSelectionUpdatePending = true;
+    }
+
+    private void SelectionGroup_GroupSelectionChanged(object? sender, EventArgs e)
+    {
+        if (DeferSelectionRecompute())
+        {
+            return;
+        }
+
+        RecomputeSelectionState();
     }
 
     private void NormalizationResolutionChanged()
@@ -1946,9 +2168,13 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         }
 
         _sessionRestored = true;
-        var loadResult = string.IsNullOrWhiteSpace(preferredCharacterCode)
-            ? _sessionCacheService.Load(ProjectPath)
-            : _sessionCacheService.Load(ProjectPath, preferredCharacterCode);
+        // 缓存现在按角色存在各自的工具目录下，所以要拿着角色卡去找，
+        // 没有指定角色时就在所有已完成角色里挑最近写过的那一份。
+        var preferred = _draftSources.FirstOrDefault(item =>
+            string.Equals(item.Code, preferredCharacterCode, StringComparison.OrdinalIgnoreCase));
+        var loadResult = preferred is not null
+            ? _sessionCacheService.LoadLatest(preferred, ProjectPath, preferred.Code)
+            : _sessionCacheService.LoadLatest(_draftSources, ProjectPath);
         var cache = loadResult.Cache;
         if (loadResult.Status != UnrealSyncSessionCacheLoadStatus.Loaded || cache is null)
         {
@@ -1966,6 +2192,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         var hasProgress = cache.IsPublishDetection ||
             cache.ImportSnapshot is not null ||
             cache.IsLightConfigurationLoaded ||
+            cache.IsBlueprintSetupLoaded ||
             cache.WorkflowStep >= 4;
         if (string.IsNullOrWhiteSpace(cache.SelectedCharacterCode) || !hasProgress)
         {
@@ -1989,7 +2216,10 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
 
             SelectedSource = source;
             _lastContentDetectionAt = cache.DetectedAt == default ? null : cache.DetectedAt;
-            WorkflowStep = cache.WorkflowStep is >= 1 and <= 5 ? cache.WorkflowStep : 1;
+            WorkflowStep = cache.WorkflowStep >= UnrealSyncWorkflow.MinStep &&
+                cache.WorkflowStep <= UnrealSyncWorkflow.MaxStep
+                    ? cache.WorkflowStep
+                    : UnrealSyncWorkflow.MinStep;
             if (WorkflowStep == 5 && !cache.IsPublishDetection)
             {
                 WorkflowStep = 4;
@@ -2008,6 +2238,20 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             _isNormalizationStepLoaded = cache.IsNormalizationStepLoaded ||
                 cache.WorkflowStep >= 3 || cache.NormalizationItems.Count > 0;
             OnPropertyChanged(nameof(IsNormalizationStepLoaded));
+            if (cache.IsBlueprintSetupLoaded)
+            {
+                SetBlueprintSetupResult(
+                    new UnrealBlueprintSetupResult
+                    {
+                        Succeeded = true,
+                        CharacterCode = cache.SelectedCharacterCode,
+                        Items = cache.BlueprintSetupItems,
+                        ErrorMessage = cache.BlueprintSetupResultMessage
+                    },
+                    cache.SelectedBlueprintSetupIds,
+                    selectPendingByDefault: false);
+            }
+
             if (cache.IsLightConfigurationLoaded)
             {
                 SetLightConfigurationResult(
@@ -2033,6 +2277,7 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                     cache.SelectedStableIds.Clear();
                     _lastPublishChanges.Clear();
                     _hasImportDetection = false;
+                    _loadedPublishStep = 0;
                     ResetDetectionSummary();
                     OnPropertyChanged(nameof(HasContentDetection));
                     SetSelectionTree([]);
@@ -2058,6 +2303,10 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
                         SetPublishDetectionSummary(cachedChanges);
                     }
                     SetPublishSelectionTree(roots, cachedComparison);
+                    // 只有第三步和第五步自己的缓存才算「这一步已加载」。
+                    // 从第六步的缓存恢复时，树里装的是上一步顺带留下的差异，
+                    // 认成第三步已加载会让人拿着旧范围的数据继续往下走。
+                    SetLoadedPublishStep(cache.WorkflowStep is 3 or 5 ? cache.WorkflowStep : 0);
                 }
             }
             else
@@ -2153,8 +2402,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         return toolboxMatches && (unrealMatches || change.UnrealItem is null);
     }
 
-    private static void ApplySelection(IEnumerable<UnrealSyncSelectionTreeItem> roots, IReadOnlySet<string> selectedIds)
+    private void ApplySelection(IEnumerable<UnrealSyncSelectionTreeItem> roots, IReadOnlySet<string> selectedIds)
     {
+        using var scope = BeginBulkSelectionUpdate();
         foreach (var root in roots)
         {
             root.RestoreCheckedState(selectedIds);
@@ -2261,29 +2511,39 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
             IsLightConfigurationLoaded = _isLightConfigurationLoaded,
             LightConfigurationItems = _lastLightConfigurationItems.ToList(),
             SelectedLightConfigurationIds = GetSelectedLightConfigurationIds().ToHashSet(StringComparer.OrdinalIgnoreCase),
-            LightConfigurationResultMessage = _lightConfigurationResultMessage
+            LightConfigurationResultMessage = _lightConfigurationResultMessage,
+            IsBlueprintSetupLoaded = _isBlueprintSetupLoaded,
+            BlueprintSetupItems = _lastBlueprintSetupItems.ToList(),
+            SelectedBlueprintSetupIds = GetSelectedBlueprintSetupIds().ToHashSet(StringComparer.OrdinalIgnoreCase),
+            BlueprintSetupResultMessage = _blueprintSetupResultMessage
         };
         _loadedSessionCache = cache;
         _pendingSessionCache = cache;
         _pendingSessionProjectPath = ProjectPath;
+        // 缓存写在角色目录下，落盘时需要角色卡；这里连同快照一起捕获，
+        // 免得延迟落盘执行时选中的角色已经换掉了。
+        _pendingSessionCharacter = SelectedSource?.DraftCharacter;
         var version = Interlocked.Increment(ref _sessionSaveVersion);
-        _ = PersistSessionCacheAfterDelayAsync(version, ProjectPath, cache);
+        _ = PersistSessionCacheAfterDelayAsync(version, ProjectPath, _pendingSessionCharacter, cache);
     }
 
     private async Task PersistSessionCacheAfterDelayAsync(
         int version,
         string projectPath,
+        CharacterCard? character,
         UnrealSyncSessionCache cache)
     {
         try
         {
-            await Task.Delay(180);
+            // 全程不回 UI 线程：FlushSessionCache 会在 UI 线程上同步等这个信号量，
+            // 续体一旦需要 UI 线程，两边就会互相等死。
+            await Task.Delay(180).ConfigureAwait(false);
             if (version != Volatile.Read(ref _sessionSaveVersion)) return;
-            await _sessionSaveSemaphore.WaitAsync();
+            await _sessionSaveSemaphore.WaitAsync().ConfigureAwait(false);
             try
             {
                 if (version != Volatile.Read(ref _sessionSaveVersion)) return;
-                await Task.Run(() => _sessionCacheService.Write(projectPath, cache));
+                await Task.Run(() => _sessionCacheService.Write(character, projectPath, cache)).ConfigureAwait(false);
                 if (version == Volatile.Read(ref _sessionSaveVersion)) _pendingSessionCache = null;
             }
             finally
@@ -2297,16 +2557,33 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// 勾选状态变化后重新写一次会话缓存。SetPublishSelectionTree 保存的是重建后的默认态，
+    /// 调用方恢复用户勾选之后需要再存一次，缓存里才是真实勾选。
+    /// </summary>
+    public void SaveSelectionStateToSessionCache()
+    {
+        SaveSessionCache();
+        FlushSessionCache();
+    }
+
     public void FlushSessionCache()
     {
         var cache = _pendingSessionCache;
         var projectPath = _pendingSessionProjectPath;
+        var character = _pendingSessionCharacter;
         if (cache is null || string.IsNullOrWhiteSpace(projectPath)) return;
         Interlocked.Increment(ref _sessionSaveVersion);
-        _sessionSaveSemaphore.Wait();
+        // 这个方法会在 UI 线程上被调用，绝不能无限期阻塞：
+        // 拿不到信号量就直接放弃这次落盘，交给防抖保存完成，界面不能因此卡死。
+        if (!_sessionSaveSemaphore.Wait(TimeSpan.FromSeconds(2)))
+        {
+            return;
+        }
+
         try
         {
-            _sessionCacheService.Write(projectPath, cache);
+            _sessionCacheService.Write(character, projectPath, cache);
             _pendingSessionCache = null;
         }
         finally
@@ -2362,9 +2639,9 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
         OnPropertyChanged(nameof(IsPublishSelectionReady));
         OnPropertyChanged(nameof(HasPublishSelection));
         OnPropertyChanged(nameof(HasNoPublishChanges));
+        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
         OnPropertyChanged(nameof(CanStartPublish));
         OnPropertyChanged(nameof(PublishActionText));
-        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
         OnPropertyChanged(nameof(PendingRedirectCount));
         OnPropertyChanged(nameof(PublishConflictCount));
         OnPropertyChanged(nameof(ReadyPublishCount));
@@ -2392,8 +2669,8 @@ internal sealed class UnrealProjectSyncViewModel : ObservableObject
     private void ResetImportOperation()
     {
         _hasImportDetection = false;
+        _loadedPublishStep = 0;
         OnPropertyChanged(nameof(HasContentDetection));
-        OnPropertyChanged(nameof(DetectionResultVisibility));
         ResetDetectionSummary();
         _existingImportStableIds.Clear();
         _importSelectedCount = 0;

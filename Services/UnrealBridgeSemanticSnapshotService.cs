@@ -50,23 +50,72 @@ internal sealed class UnrealBridgeSemanticSnapshotService
                 $"link:{linkIndex}:{link.SupportCharacterCode}:{link.SkillIndex}");
         }
 
+        // 挂在角色动画源上、却不属于任何规范动作的序列。
+        // 工具箱侧永远不会产出这些条目，所以它们只会以「删除候选」的形式出现。
+        // 注意：第五步只把它们从动画源上解绑，不删资产——串错位置的序列往往仍是有用素材。
+        var orphanSequences = candidate.SequenceFramesPreview.OrphanSequences;
+        if (orphanSequences.Count > 0)
+        {
+            // 不产出分组表头条目：工具箱侧不可能有对应项，它自己会被判成一条"待删除"，
+            // 于是分组标题混进删除候选里，计数比实际多一项。
+            // 分组由子项的 SequenceGroupKey 合成，标题另有解析规则。
+            foreach (var orphan in orphanSequences)
+            {
+                if (string.IsNullOrWhiteSpace(orphan.ObjectPath))
+                {
+                    continue;
+                }
+
+                Add(items,
+                    SequenceFrameIdentity.BuildOrphanSequenceStableId(orphan.ObjectPath),
+                    SequenceFrameIdentity.OrphanGroupStableId,
+                    UnrealBridgeModule.SequenceFrames,
+                    $"非规范序列 · {orphan.AssetName}",
+                    orphan.ObjectPath,
+                    Join(orphan.AssetName, SequenceFrameIdentity.NormalizeAssetClass(orphan.AssetClass)),
+                    string.Empty,
+                    orphan.AssetName);
+            }
+        }
+
         foreach (var action in candidate.SequenceFramesPreview.Actions.Where(action => action.HasData))
         {
-            var actionIdentity = CreateOriginIdentity($"{candidate.Code}|sequence|{action.ActionCode}|{action.FormIndex}");
-            var actionId = $"sequence:{actionIdentity}";
+            // 动作和帧的稳定 ID 与工具箱快照共用一套规则：动作 + 帧位置。
+            // 之前这里把 Unreal 对象路径算进身份，发布改名后身份就变了，两侧再也配不上对。
+            var variantCode = SequenceFrameIdentity.ResolveVariantCode(action.ActionCode, action.FormIndex);
+            var actionId = SequenceFrameIdentity.BuildActionStableId(variantCode);
             Add(items, actionId, $"module:{UnrealBridgeModule.SequenceFrames}", UnrealBridgeModule.SequenceFrames,
                 action.Title, candidate.SequenceFramesPreview.AnimMapsObjectPath,
-                Join(action.ActionCode, action.FormIndex, action.FramesPerSecond));
+                // 与工具箱动作节点共用同一份载荷，帧率取整后比较（工具箱只能产出整数帧率）。
+                SequenceFrameIdentity.BuildActionPayload(
+                    variantCode,
+                    (int)Math.Round(action.FramesPerSecond <= 0 ? SequenceFrameService.DefaultFps : action.FramesPerSecond)));
             var frames = action.OrderedFrames.Count > 0 ? action.OrderedFrames : action.PreviewFrames;
             for (var index = 0; index < frames.Count; index++)
             {
                 var frame = frames[index];
-                var identity = CreateOriginIdentity(
-                    $"{candidate.Code}|sequence-frame|{action.ActionCode}|{action.FormIndex}|{index}|{frame.ObjectPath}");
-                Add(items, $"sequence-frame:{identity}", actionId, UnrealBridgeModule.SequenceFrames,
+                Add(items, SequenceFrameIdentity.BuildFrameStableId(variantCode, index), actionId,
+                    UnrealBridgeModule.SequenceFrames,
                     $"{action.Title} 第 {index + 1} 帧", frame.ObjectPath,
                     Join(action.ActionCode, action.FormIndex, index + 1, frame.IsBlank),
                     frame.ExportedFilePath, frame.AssetName);
+            }
+
+            // 该动作在 Unreal 里实际占用的资产。规范命名的那些会被差异比较过滤掉，
+            // 剩下的（断了引用的旧 Sprite、旧 Flipbook、旧拼写的序列）就是需要清理的删除项。
+            foreach (var owned in action.OwnedAssets ?? [])
+            {
+                if (string.IsNullOrWhiteSpace(owned.ObjectPath))
+                {
+                    continue;
+                }
+
+                Add(items, SequenceFrameIdentity.BuildOwnedAssetStableId(variantCode, owned.ObjectPath), actionId,
+                    UnrealBridgeModule.SequenceFrames,
+                    $"{action.Title} · {owned.AssetName}", owned.ObjectPath,
+                    Join(action.ActionCode, action.FormIndex, owned.AssetName,
+                        SequenceFrameIdentity.NormalizeAssetClass(owned.AssetClass)),
+                    string.Empty, owned.AssetName);
             }
         }
 

@@ -105,10 +105,20 @@ def _object_path(asset_data):
 
 
 def _asset_class(asset_data):
-    value = _property(asset_data, "asset_class_path", "asset_class")
-    if "." in value:
-        value = value.rsplit(".", 1)[-1]
-    return value
+    # asset_class_path 是 TopLevelAssetPath 结构体，str() 出来带对象内存地址，
+    # 每次扫描都不一样；这个值会写进 assetClass 参与内容比对，必须取稳定的 asset_name。
+    for name in ("asset_class_path", "asset_class"):
+        try:
+            raw = getattr(asset_data, name)
+        except Exception:
+            continue
+        value = _text(getattr(raw, "asset_name", "")).strip() or _text(raw).strip()
+        if not value:
+            continue
+        if "." in value:
+            value = value.rsplit(".", 1)[-1]
+        return value
+    return ""
 
 
 def _package_disk_files(package_name):

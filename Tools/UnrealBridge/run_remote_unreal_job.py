@@ -70,7 +70,10 @@ def main():
             engine_root,
             args.timeout)
         if node is None:
+            # 这个标记让工具箱能把「连不上编辑器」和「脚本自己失败」区分开：
+            # 前者可以退回离线执行，后者退回去也是一样的错。
             raise RuntimeError(
+                "ZD_REMOTE_UNAVAILABLE "
                 "No running Unreal Editor with Python Remote Execution enabled matches "
                 "the selected project and engine. The target Editor may also be busy running "
                 "another remote Python task. Enable Project Settings > Plugins > Python > "

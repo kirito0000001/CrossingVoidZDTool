@@ -602,6 +602,17 @@ internal sealed class SequenceFrameService
         SaveManifest(character, action, manifest);
     }
 
+    /// <summary>
+    /// 读取动作的帧率。每个动作的 sequence.json 是权威来源：
+    /// ZDToolboxData 的 ActionSettings 可能缺项，也可能残留旧代号拼写（例如 Defense/Defence），
+    /// 按字符串直接查会静默回落到默认帧率，发布出去的动画速度就是错的。
+    /// </summary>
+    public int GetActionFps(CharacterCard character, SequenceFrameAction action)
+    {
+        var manifest = LoadOrCreateManifest(character, action);
+        return Math.Clamp(manifest.Fps <= 0 ? DefaultFps : manifest.Fps, 1, 60);
+    }
+
     public void SetActionFps(CharacterCard character, SequenceFrameAction action, int fps)
     {
         var manifest = LoadOrCreateManifest(character, action);

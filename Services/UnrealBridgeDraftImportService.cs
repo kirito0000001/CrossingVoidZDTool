@@ -314,23 +314,30 @@ internal sealed class UnrealBridgeDraftImportService
         IReadOnlySet<string> selectedStableIds)
     {
         var importedCount = 0;
-        foreach (var slot in candidate.SkillsPreview.CoreSlots.Append(candidate.SkillsPreview.SupportSkillSlot))
+        // 身份后缀必须和 UnrealBridgeSemanticSnapshotService 用的一模一样：
+        // 主技能是 core:{下标}、护援技是 support、连携技是 link:{下标}:{搭档}:{序号}。
+        // 这里以前一律传空串，于是选中的技能永远匹配不上快照里的稳定身份，
+        // 结果是「从虚幻导入角色时技能一条都进不来」，而且不报任何错。
+        foreach (var (slot, suffix) in EnumerateSkillSlotsWithSuffix(candidate))
         {
             for (var stageIndex = 0; stageIndex < slot.Stages.Count; stageIndex++)
             {
-                if (selectedStableIds.Contains(GetSkillStableId(candidate.Code, slot.SlotKey, string.Empty, stageIndex)))
+                if (selectedStableIds.Contains(GetSkillStableId(candidate.Code, slot.SlotKey, suffix, stageIndex)))
                 {
-                    importedCount += _semanticImportService.SyncSkillStageToToolbox(character, candidate, slot, stageIndex);
+                    importedCount += _semanticImportService.SyncSkillStageToToolbox(
+                        character, candidate, slot, stageIndex, suffix);
                 }
             }
         }
 
-        foreach (var link in candidate.SkillsPreview.LinkSkills)
+        for (var linkIndex = 0; linkIndex < candidate.SkillsPreview.LinkSkills.Count; linkIndex++)
         {
+            var link = candidate.SkillsPreview.LinkSkills[linkIndex];
+            var suffix = $"link:{linkIndex}:{link.SupportCharacterCode}:{link.SkillIndex}";
             if (link.SkillSlot.Stages.Count > 0 &&
-                selectedStableIds.Contains(GetSkillStableId(candidate.Code, link.SkillSlot.SlotKey, link.SupportCharacterCode, 0)))
+                selectedStableIds.Contains(GetSkillStableId(candidate.Code, link.SkillSlot.SlotKey, suffix, 0)))
             {
-                importedCount += _semanticImportService.SyncLinkSkillToToolbox(character, candidate, link);
+                importedCount += _semanticImportService.SyncLinkSkillToToolbox(character, candidate, link, suffix);
             }
         }
 
@@ -436,9 +443,7 @@ internal sealed class UnrealBridgeDraftImportService
         foreach (var sourceAction in candidate.SequenceFramesPreview.Actions.Where(action =>
                      selectedStableIds.Contains(GetSequenceStableId(candidate.Code, action))))
         {
-            var actionCode = NormalizeSequenceActionCode(sourceAction.ActionCode, sourceAction.FormIndex);
-            var targetAction = toolboxActions.FirstOrDefault(action =>
-                string.Equals(action.Code, actionCode, StringComparison.OrdinalIgnoreCase));
+            var targetAction = ResolveToolboxSequenceAction(toolboxActions, sourceAction);
             if (targetAction is null || !sections.TryGetValue(targetAction.Code, out var section))
             {
                 continue;
@@ -514,9 +519,7 @@ internal sealed class UnrealBridgeDraftImportService
         foreach (var sourceAction in candidate.SequenceFramesPreview.Actions.Where(action =>
                      action.HasFramePreview && selectedStableIds.Contains(GetSequenceStableId(candidate.Code, action))))
         {
-            var actionCode = NormalizeSequenceActionCode(sourceAction.ActionCode, sourceAction.FormIndex);
-            var targetAction = toolboxActions.FirstOrDefault(action =>
-                string.Equals(action.Code, actionCode, StringComparison.OrdinalIgnoreCase));
+            var targetAction = ResolveToolboxSequenceAction(toolboxActions, sourceAction);
             if (targetAction is null)
             {
                 continue;
@@ -533,24 +536,23 @@ internal sealed class UnrealBridgeDraftImportService
         }
     }
 
-    private static string NormalizeSequenceActionCode(string value, int formIndex)
+    /// <summary>
+    /// 把 Unreal 侧的动作对应到工具箱动作。原来这里手写了一张 Defence→Defense、OnDamage→Ondm 的表，
+    /// 而工具箱的动作代号其实是 Defence / OnDamage，映射出来的代号在工具箱里根本不存在，
+    /// 这些动作会被静默跳过。现在统一交给 SequenceActionCatalog 解析。
+    /// </summary>
+    private static SequenceFrameAction? ResolveToolboxSequenceAction(
+        IReadOnlyList<SequenceFrameAction> toolboxActions,
+        UnrealProjectSyncSequenceActionPreview sourceAction)
     {
-        var code = value.Trim() switch
-        {
-            "Defence" => "Defense",
-            "OnDamage" => "Ondm",
-            "KO" => "Ko",
-            "FlyDown" => "Flydown",
-            "FlyStart" => "Flystart",
-            "StandUP" => "Standup",
-            var other => other
-        };
-        if (formIndex > 1 && !(code.Length >= 2 && char.IsDigit(code[^1]) && char.IsDigit(code[^2])))
-        {
-            code += formIndex.ToString("00");
-        }
-
-        return code;
+        var variantCode = SequenceFrameIdentity.ResolveVariantCode(sourceAction.ActionCode, sourceAction.FormIndex);
+        var actionKey = SequenceActionCatalog.NormalizeActionKey(variantCode);
+        return toolboxActions.FirstOrDefault(action =>
+            string.Equals(
+                SequenceActionCatalog.NormalizeActionKey(
+                    SequenceFrameIdentity.ResolveVariantCode(action.Code, action.FormIndex)),
+                actionKey,
+                StringComparison.OrdinalIgnoreCase));
     }
 
     private static void AssignImportedSkillIdentities(
@@ -560,7 +562,7 @@ internal sealed class UnrealBridgeDraftImportService
     {
         var service = new CharacterSkillsService();
         var data = service.Load(character);
-        foreach (var slot in candidate.SkillsPreview.CoreSlots.Append(candidate.SkillsPreview.SupportSkillSlot))
+        foreach (var (slot, suffix) in EnumerateSkillSlotsWithSuffix(candidate))
         {
             var target = ResolveSkillCollection(data, slot.SlotKey);
             if (target is null)
@@ -571,26 +573,27 @@ internal sealed class UnrealBridgeDraftImportService
             var count = Math.Min(target.Count, slot.Stages.Count);
             for (var index = 0; index < count; index++)
             {
-                if (!selectedStableIds.Contains(GetSkillStableId(candidate.Code, slot.SlotKey, string.Empty, index)))
+                if (!selectedStableIds.Contains(GetSkillStableId(candidate.Code, slot.SlotKey, suffix, index)))
                 {
                     continue;
                 }
 
                 target[index].SyncId = UnrealBridgeSemanticSnapshotService.CreateOriginIdentity(
-                    $"{candidate.Code}|skill|{slot.SlotKey}||{index}");
+                    $"{candidate.Code}|skill|{suffix}|{slot.SlotKey}|{index}");
             }
         }
 
         for (var index = 0; index < Math.Min(data.ComboSkills.Count, candidate.SkillsPreview.LinkSkills.Count); index++)
         {
             var link = candidate.SkillsPreview.LinkSkills[index];
-            if (!selectedStableIds.Contains(GetSkillStableId(candidate.Code, link.SkillSlot.SlotKey, link.SupportCharacterCode, 0)))
+            var suffix = $"link:{index}:{link.SupportCharacterCode}:{link.SkillIndex}";
+            if (!selectedStableIds.Contains(GetSkillStableId(candidate.Code, link.SkillSlot.SlotKey, suffix, 0)))
             {
                 continue;
             }
 
             data.ComboSkills[index].SyncId = UnrealBridgeSemanticSnapshotService.CreateOriginIdentity(
-                $"{candidate.Code}|skill|{link.SkillSlot.SlotKey}|{link.SupportCharacterCode}|0");
+                $"{candidate.Code}|skill|{suffix}|{link.SkillSlot.SlotKey}|0");
         }
 
         service.Save(character, data);
@@ -637,15 +640,34 @@ internal sealed class UnrealBridgeDraftImportService
     private static string GetBuffStableId(UnrealProjectSyncBuffPreview buff) =>
         $"buff:{UnrealBridgeSemanticSnapshotService.CreateOriginIdentity(buff.ObjectPath)}";
 
+    // 必须和语义快照生成的动作稳定 ID 完全一致，否则勾选的动作在导入时一个都匹配不上。
     private static string GetSequenceStableId(
         string characterCode,
         UnrealProjectSyncSequenceActionPreview action) =>
-        $"sequence:{UnrealBridgeSemanticSnapshotService.CreateOriginIdentity($"{characterCode}|sequence|{action.ActionCode}|{action.FormIndex}")}";
+        SequenceFrameIdentity.BuildActionStableId(action.ActionCode, action.FormIndex);
+
+    /// <summary>
+    /// 技能槽和它在稳定身份里的后缀。顺序和后缀写法都必须与语义快照一致，
+    /// 两边对不上就等于这一项没有被选中过。
+    /// </summary>
+    private static IEnumerable<(UnrealProjectSyncSkillSlotPreview Slot, string Suffix)> EnumerateSkillSlotsWithSuffix(
+        UnrealProjectSyncCharacterCandidate candidate)
+    {
+        for (var slotIndex = 0; slotIndex < candidate.SkillsPreview.CoreSlots.Count; slotIndex++)
+        {
+            yield return (candidate.SkillsPreview.CoreSlots[slotIndex], $"core:{slotIndex}");
+        }
+
+        yield return (candidate.SkillsPreview.SupportSkillSlot, "support");
+    }
 
     private static string GetSkillStableId(
         string characterCode,
         string slotKey,
         string suffix,
         int stageIndex) =>
-        $"skill:{UnrealBridgeSemanticSnapshotService.CreateOriginIdentity($"{characterCode}|skill|{slotKey}|{suffix}|{stageIndex}")}";
+        // 字段顺序必须和 UnrealBridgeSemanticSnapshotService 一致：suffix 在 slotKey 之前。
+        // 两边曾经写反过，于是选中的技能永远匹配不上快照里的稳定身份，
+        // 表现是「从虚幻导入角色时技能一条都进不来」，而且不报任何错。
+        $"skill:{UnrealBridgeSemanticSnapshotService.CreateOriginIdentity($"{characterCode}|skill|{suffix}|{slotKey}|{stageIndex}")}";
 }
