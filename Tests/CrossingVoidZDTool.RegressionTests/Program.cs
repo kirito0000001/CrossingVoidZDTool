@@ -3851,78 +3851,48 @@ static void UnrealBridgeChangesDoNotSelectByDefault()
 
 static void UnrealSyncCharacterSelectorUsesSummaryAndFlyoutList()
 {
+    // 这条用例原来钉的是一套已经不存在的界面：摘要面板 + 弹出式选择器，
+    // 外加一堆写死的像素（行高 52、列表最大高 460）。左栏后来改成了
+    // 「搜索框 + 常驻来源列表」，那些断言就成了描述旧设计的化石。
+    // 现在钉的是还成立的行为：来源能搜、能点、点了有人接、条目认得出是谁。
     var document = XDocument.Load(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
     var codeText = ReadUnrealSyncWindowSource();
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
-    var summary = document.Descendants().Single(element =>
-        string.Equals(
-            element.Attribute(x + "Name")?.Value,
-            "UnrealCharacterSummaryPanel",
-            StringComparison.Ordinal));
-    var selectorButton = document.Descendants().Single(element =>
-        string.Equals(
-            element.Attribute(x + "Name")?.Value,
-            "UnrealCharacterSelectorButton",
-            StringComparison.Ordinal));
-    var refreshButton = document.Descendants().Single(element =>
-        string.Equals(
-            element.Attribute(x + "Name")?.Value,
-            "RefreshUnrealCharactersButton",
-            StringComparison.Ordinal));
-    var flyout = selectorButton.Descendants().Single(element => element.Name.LocalName == "Flyout");
-    var search = document.Descendants().Single(element =>
-        string.Equals(
-            element.Attribute(x + "Name")?.Value,
-            "UnrealSyncSourceSearchBox",
-            StringComparison.Ordinal));
-    var list = document.Descendants().Single(element =>
-        string.Equals(
-            element.Attribute(x + "Name")?.Value,
-            "UnrealSyncCharacterSourceListView",
-            StringComparison.Ordinal));
-    var itemTemplate = list.Descendants().Single(element => element.Name.LocalName == "DataTemplate");
-    var rowGrid = itemTemplate.Elements().Single(element => element.Name.LocalName == "Grid");
-    var displayName = itemTemplate.Descendants().Single(element =>
-        string.Equals(element.Attribute("Text")?.Value, "{Binding DisplayName}", StringComparison.Ordinal));
-    var code = itemTemplate.Descendants().Single(element =>
-        string.Equals(element.Attribute("Text")?.Value, "{Binding SecondaryText}", StringComparison.Ordinal));
 
-    AssertEqual(true, summary.Descendants().Any(element =>
-        string.Equals(
-            element.Attribute("Text")?.Value,
-            "{Binding UnrealProjectSync.SelectedSource.DisplayName, Mode=OneWay}",
-            StringComparison.Ordinal)));
-    AssertEqual(true, summary.Descendants().Any(element =>
-        string.Equals(
-            element.Attribute("Text")?.Value,
-            "{Binding UnrealProjectSync.SelectedSource.SecondaryText, Mode=OneWay}",
-            StringComparison.Ordinal)));
-    AssertEqual("搜索中文名、英文代号或素材类别", search.Attribute("PlaceholderText")?.Value ?? string.Empty);
-    AssertEqual(true, list.Ancestors().Any(element => ReferenceEquals(element, flyout)));
-    AssertEqual("Auto", list.Attribute("ScrollViewer.VerticalScrollBarVisibility")?.Value ?? string.Empty);
-    AssertEqual("Disabled", list.Attribute("ScrollViewer.HorizontalScrollBarVisibility")?.Value ?? string.Empty);
-    AssertEqual("460", list.Attribute("MaxHeight")?.Value ?? string.Empty);
+    XElement Named(string name) => document.Descendants().Single(element =>
+        string.Equals(element.Attribute(x + "Name")?.Value, name, StringComparison.Ordinal));
+
+    var search = Named("UnrealSyncSourceSearchBox");
+    var list = Named("UnrealSyncCharacterSourceListView");
+    var refreshButton = Named("RefreshUnrealCharactersButton");
+
+    // 搜索框要真的绑到搜索文本上，否则输入了也筛不动。
+    AssertEqual(
+        "{Binding UnrealProjectSync.SourceSearchText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}",
+        search.Attribute("Text")?.Value ?? string.Empty);
+    AssertEqual(false, string.IsNullOrWhiteSpace(search.Attribute("PlaceholderText")?.Value));
+
+    // 列表要绑到来源集合，并且点击能选中角色。
+    AssertEqual(
+        "{Binding UnrealProjectSync.CharacterSources, Mode=OneWay}",
+        list.Attribute("ItemsSource")?.Value ?? string.Empty);
     AssertEqual("True", list.Attribute("IsItemClickEnabled")?.Value ?? string.Empty);
     AssertEqual("UnrealSyncSourceListView_ItemClick", list.Attribute("ItemClick")?.Value ?? string.Empty);
-    AssertEqual("52", rowGrid.Attribute("Height")?.Value ?? string.Empty);
-    AssertEqual("Stretch", rowGrid.Attribute("HorizontalAlignment")?.Value ?? string.Empty);
-    AssertEqual(false, itemTemplate.Descendants().Any(element => element.Name.LocalName == "Button"));
-    AssertEqual(true, list.Descendants().Any(element =>
-        element.Name.LocalName == "Setter" &&
-        string.Equals(element.Attribute("Property")?.Value, "HorizontalAlignment", StringComparison.Ordinal) &&
-        string.Equals(element.Attribute("Value")?.Value, "Stretch", StringComparison.Ordinal)));
-    AssertEqual("NoWrap", displayName.Attribute("TextWrapping")?.Value ?? string.Empty);
-    AssertEqual("CharacterEllipsis", displayName.Attribute("TextTrimming")?.Value ?? string.Empty);
-    AssertEqual("NoWrap", code.Attribute("TextWrapping")?.Value ?? string.Empty);
-    AssertEqual("CharacterEllipsis", code.Attribute("TextTrimming")?.Value ?? string.Empty);
+
+    // 条目上要能看出是哪个角色：中文名 + 代号。
+    var itemTemplate = list.Descendants().Single(element => element.Name.LocalName == "DataTemplate");
+    AssertEqual(true, itemTemplate.Descendants().Any(element =>
+        string.Equals(element.Attribute("Text")?.Value, "{Binding DisplayName}", StringComparison.Ordinal)));
+    AssertEqual(true, itemTemplate.Descendants().Any(element =>
+        string.Equals(element.Attribute("Text")?.Value, "{Binding SecondaryText}", StringComparison.Ordinal)));
+
+    // 刷新按钮接到拉取角色的处理器。
     AssertEqual("GetUnrealProjectCharactersButton_Click", refreshButton.Attribute("Click")?.Value ?? string.Empty);
-    AssertEqual(true, refreshButton.Descendants().Any(element =>
-        string.Equals(element.Attribute("Text")?.Value, "刷新来源列表", StringComparison.Ordinal)));
+
+    // 点击处理器要真的认这个条目类型，否则点了没反应。
     AssertEqual(true, codeText.Contains("UnrealSyncSourceListView_ItemClick", StringComparison.Ordinal));
     AssertEqual(true, codeText.Contains("e.ClickedItem is not UnrealSyncSourceItem source", StringComparison.Ordinal));
-    AssertEqual(true, codeText.Contains("UnrealCharacterSelectorButton.Flyout.Hide();", StringComparison.Ordinal));
 }
-
 static void UnrealProjectCharacterSummaryUsesChineseNameWithoutFreshDetails()
 {
     var root = Path.Combine(Path.GetTempPath(), $"CrossingVoidZDTool-UnrealSummary-{Guid.NewGuid():N}");
@@ -4218,9 +4188,12 @@ static void UnrealSyncSelectionTreeProtectsUnsafeChanges()
 
 static void UnrealSyncSelectionTreeSupportsTriStateSelection()
 {
+    // 这里测的是父子三态本身，所以用不要求导出文件的模块。
+    // 图片和语音要「导出文件存在」才可勾选（没有文件就没东西可导入），
+    // 用它们会让本用例的构造数据永远不可勾选，跟三态无关。
     var snapshot = CreateUnrealBridgeSnapshot(
-        ("material:first", UnrealBridgeModule.BaseMaterials, "素材一", "first"),
-        ("material:second", UnrealBridgeModule.BaseMaterials, "素材二", "second"));
+        ("skill:first", UnrealBridgeModule.Skills, "技能一", "first"),
+        ("skill:second", UnrealBridgeModule.Skills, "技能二", "second"));
     var root = UnrealSyncSelectionTreeBuilder.FromSnapshot(snapshot).Single();
 
     AssertEqual<bool?>(true, root.IsChecked);
@@ -4228,7 +4201,7 @@ static void UnrealSyncSelectionTreeSupportsTriStateSelection()
 
     root.Children[0].IsChecked = false;
     AssertEqual<bool?>(null, root.IsChecked);
-    AssertSequence(["material:second"], UnrealSyncSelectionTreeBuilder.SelectedStableIds([root]).ToArray());
+    AssertSequence(["skill:second"], UnrealSyncSelectionTreeBuilder.SelectedStableIds([root]).ToArray());
 
     root.ToggleGroupSelection();
     AssertEqual(true, root.Children.All(child => child.IsChecked == true));
@@ -4258,7 +4231,7 @@ static void UnrealSyncSelectionTreeSupportsTriStateSelection()
 static void UnrealImportOperationSummaryTracksLeafSelection()
 {
     var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
-    var snapshot = CreateUnrealBridgeSnapshot(
+    var snapshot = CreateImportableUnrealBridgeSnapshot(
         ("material:existing", UnrealBridgeModule.BaseMaterials, "已有图标", "A"),
         ("material:new", UnrealBridgeModule.BaseMaterials, "新增图标", "B"),
         ("voice:new", UnrealBridgeModule.Voices, "新增语音", "C"));
@@ -7183,6 +7156,26 @@ static UnrealBridgeSnapshot CreateUnrealBridgeSnapshot(
             item.Hash,
             PayloadJson: "{}",
             AssetPath: string.Empty)).ToArray());
+}
+
+/// <summary>
+/// 构造一份「可导入」的快照：图片和语音必须有真实存在的导出文件才允许勾选
+/// （没有文件就没东西可导入），所以这些用例不能用 AssetPath 为空的默认构造。
+/// </summary>
+static UnrealBridgeSnapshot CreateImportableUnrealBridgeSnapshot(
+    params (string StableId, UnrealBridgeModule Module, string Name, string Hash)[] items)
+{
+    var existingFile = Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml");
+    return new UnrealBridgeSnapshot(
+        "Misaka",
+        items.Select(item => new UnrealBridgeSnapshotItem(
+            item.StableId,
+            ParentStableId: string.Empty,
+            item.Module,
+            item.Name,
+            item.Hash,
+            PayloadJson: "{}",
+            AssetPath: existingFile)).ToArray());
 }
 
 static string CreateTemporaryTestFolder()
