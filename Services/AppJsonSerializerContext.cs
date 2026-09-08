@@ -41,6 +41,8 @@ namespace CrossingVoidZDTool.Services;
 [JsonSerializable(typeof(UnrealLightConfigurationRequest))]
 [JsonSerializable(typeof(UnrealLightConfigurationResult))]
 [JsonSerializable(typeof(UnrealLightConfigurationResultItem))]
+[JsonSerializable(typeof(UnrealAssetBrowsePayload))]
+[JsonSerializable(typeof(string[]))]
 internal sealed partial class AppJsonSerializerContext : JsonSerializerContext
 {
 }

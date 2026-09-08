@@ -4533,26 +4533,40 @@ static void BlueprintSetupApplyButtonEnablesAfterScan()
 
 static void BlueprintSetupSupportsSelectAllToggle()
 {
+    // 全选/全不选/反选是六步通用的一组，不再由第六步自己实现一遍。
     var viewModel = CreateBlueprintSetupViewModel(3);
-    AssertEqual(3, viewModel.BlueprintSetupSelectedCount);
-    AssertEqual(true, viewModel.AreAllBlueprintSetupItemsSelected);
-    AssertEqual("全部取消", viewModel.BlueprintSetupSelectAllText);
+    AssertEqual(3, viewModel.SelectedStepItemCount);
+    AssertEqual(3, viewModel.SelectableStepItemCount);
+    AssertEqual(true, viewModel.AreAllStepItemsSelected);
+    AssertEqual("已选择 3 / 3 项", viewModel.StepSelectionText);
 
-    viewModel.ToggleAllBlueprintSetupSelection();
-    AssertEqual(0, viewModel.BlueprintSetupSelectedCount);
-    AssertEqual(false, viewModel.AreAllBlueprintSetupItemsSelected);
-    AssertEqual("全选待写入", viewModel.BlueprintSetupSelectAllText);
+    viewModel.SetStepSelection(false);
+    AssertEqual(0, viewModel.SelectedStepItemCount);
+    AssertEqual(false, viewModel.AreAllStepItemsSelected);
     AssertEqual(false, viewModel.CanApplyBlueprintSetup);
 
-    viewModel.ToggleAllBlueprintSetupSelection();
-    AssertEqual(3, viewModel.BlueprintSetupSelectedCount);
+    viewModel.SetStepSelection(true);
+    AssertEqual(3, viewModel.SelectedStepItemCount);
     AssertEqual(true, viewModel.CanApplyBlueprintSetup);
 
+    // 反选：全勾时反选应当变成一个都不勾。
+    viewModel.InvertStepSelection();
+    AssertEqual(0, viewModel.SelectedStepItemCount);
+    viewModel.BlueprintSetupItems[0].IsSelected = true;
+    viewModel.InvertStepSelection();
+    AssertEqual(2, viewModel.SelectedStepItemCount);
+
     // 无差异的条目不可勾选，全选不能把它算进来。
+    viewModel.SetStepSelection(true);
     AssertEqual(3, viewModel.BlueprintSetupItems.Count);
     AssertSequence(
         ["bp.seq.Field0", "bp.seq.Field1", "bp.seq.Field2"],
         viewModel.GetSelectedBlueprintSetupIds().OrderBy(item => item, StringComparer.Ordinal).ToArray());
+
+    // 第一步没有可勾选的东西，整组按钮该藏起来。
+    viewModel.ReturnToWorkflowStep(1);
+    AssertEqual(false, viewModel.HasStepSelection);
+    AssertEqual(Visibility.Collapsed, viewModel.StepSelectionVisibility);
 }
 
 static void WorkspaceNeverShowsBlankPanel()

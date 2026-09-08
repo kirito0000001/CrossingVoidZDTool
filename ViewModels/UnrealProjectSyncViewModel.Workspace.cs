@@ -165,5 +165,7 @@ internal sealed partial class UnrealProjectSyncViewModel
         OnPropertyChanged(nameof(WorkspacePlaceholderTitle));
         OnPropertyChanged(nameof(WorkspacePlaceholderDescription));
         OnPropertyChanged(nameof(IsWorkspacePlaceholderError));
+        // 勾选统计跟着步骤和内容一起变，两边总是同时失效。
+        NotifyStepSelectionChanged();
     }
 }

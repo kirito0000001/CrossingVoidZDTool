@@ -348,7 +348,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             // 检测结果是在操作还没结束时写进来的，那一刻算出来的可用性必然是假。
             // 操作收尾时不重算一次，写入按钮就会一直停在灰色。
             OnPropertyChanged(nameof(CanApplyBlueprintSetup));
-            OnPropertyChanged(nameof(CanToggleBlueprintSetupSelection));
             NotifyWorkspaceStateChanged();
         }
     }
@@ -1938,6 +1937,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     private void LightConfigurationItem_SelectionChanged(object? sender, EventArgs e)
     {
+        NotifyStepSelectionChanged();
         NotifyLightConfigurationChanged();
         SaveSessionCache();
     }

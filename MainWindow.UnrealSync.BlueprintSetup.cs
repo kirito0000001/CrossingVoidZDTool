@@ -18,13 +18,6 @@ namespace CrossingVoidZDTool
     /// <summary>第六步「蓝图置入」：角色蓝图白名单字段与 2DInfor 三张数据表。</summary>
     public sealed partial class MainWindow
     {
-        private void ToggleUnrealBlueprintSetupSelectionButton_Click(object sender, RoutedEventArgs e)
-        {
-            var sync = _applicationViewModel.UnrealProjectSync;
-            sync.ToggleAllBlueprintSetupSelection();
-            LogUserOperation($"蓝图置入：{sync.BlueprintSetupSelectionText}");
-        }
-
         private async void ApplyUnrealBlueprintSetupButton_Click(object sender, RoutedEventArgs e)
         {
             LogUserOperation("应用 Unreal 蓝图置入");

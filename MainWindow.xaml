@@ -2917,6 +2917,57 @@
                                                 x:Name="UnrealPublishWorkspacePanel"
                                                 Spacing="10"
                                                 Visibility="{Binding UnrealProjectSync.PublishWorkspaceVisibility, Mode=OneWay}">
+                                                <StackPanel
+                                                    Spacing="6"
+                                                    Visibility="{Binding UnrealProjectSync.StepSelectionVisibility, Mode=OneWay}">
+                                                    <TextBlock FontSize="16" FontWeight="SemiBold" Text="{Binding UnrealProjectSync.StepSelectionText, Mode=OneWay}" />
+                                                    <Grid ColumnSpacing="6">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="*" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <Button
+                                                            HorizontalAlignment="Stretch"
+                                                            HorizontalContentAlignment="Center"
+                                                            Click="UnrealSyncSelectAllButton_Click"
+                                                            Content="全选"
+                                                            IsEnabled="{Binding UnrealProjectSync.CanChangeStepSelection, Mode=OneWay}" />
+                                                        <Button
+                                                            Grid.Column="1"
+                                                            HorizontalAlignment="Stretch"
+                                                            HorizontalContentAlignment="Center"
+                                                            Click="UnrealSyncSelectNoneButton_Click"
+                                                            Content="全不选"
+                                                            IsEnabled="{Binding UnrealProjectSync.CanChangeStepSelection, Mode=OneWay}" />
+                                                        <Button
+                                                            Grid.Column="2"
+                                                            HorizontalAlignment="Stretch"
+                                                            HorizontalContentAlignment="Center"
+                                                            Click="UnrealSyncInvertSelectionButton_Click"
+                                                            Content="反选"
+                                                            IsEnabled="{Binding UnrealProjectSync.CanChangeStepSelection, Mode=OneWay}" />
+                                                    </Grid>
+                                                    <Grid ColumnSpacing="6">
+                                                        <Grid.ColumnDefinitions>
+                                                            <ColumnDefinition Width="*" />
+                                                            <ColumnDefinition Width="*" />
+                                                        </Grid.ColumnDefinitions>
+                                                        <Button
+                                                            HorizontalAlignment="Stretch"
+                                                            HorizontalContentAlignment="Center"
+                                                            Click="UnrealSyncCopyStepReportButton_Click"
+                                                            Content="复制清单"
+                                                            ToolTipService.ToolTip="把这一步的差异复制成文本" />
+                                                        <Button
+                                                            Grid.Column="1"
+                                                            HorizontalAlignment="Stretch"
+                                                            HorizontalContentAlignment="Center"
+                                                            Click="UnrealSyncBrowseAssetsButton_Click"
+                                                            Content="在 Unreal 中定位"
+                                                            ToolTipService.ToolTip="在已打开的编辑器里选中这些资产" />
+                                                    </Grid>
+                                                </StackPanel>
                                                  <StackPanel Spacing="10" Visibility="{Binding UnrealProjectSync.WorkflowConfirmationVisibility, Mode=OneWay}">
                                                      <TextBlock FontWeight="SemiBold" Text="{Binding UnrealProjectSync.PublishActionText, Mode=OneWay}" />
                                                      <ComboBox ItemsSource="{Binding UnrealProjectSync.PublishFilterOptions, Mode=OneWay}" SelectedItem="{Binding UnrealProjectSync.PublishFilter, Mode=TwoWay}" />
@@ -2945,13 +2996,6 @@
                                                  <StackPanel Spacing="8" Visibility="{Binding UnrealProjectSync.BlueprintSetupDetailsVisibility, Mode=OneWay}">
                                                      <TextBlock FontSize="16" FontWeight="SemiBold" Text="蓝图置入" />
                                                      <TextBlock Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.BlueprintSetupSummaryText, Mode=OneWay}" TextWrapping="Wrap" />
-                                                     <TextBlock FontSize="16" FontWeight="SemiBold" Text="{Binding UnrealProjectSync.BlueprintSetupSelectionText, Mode=OneWay}" />
-                                                     <Button
-                                                         HorizontalAlignment="Stretch"
-                                                         HorizontalContentAlignment="Center"
-                                                         Click="ToggleUnrealBlueprintSetupSelectionButton_Click"
-                                                         Content="{Binding UnrealProjectSync.BlueprintSetupSelectAllText, Mode=OneWay}"
-                                                         IsEnabled="{Binding UnrealProjectSync.CanToggleBlueprintSetupSelection, Mode=OneWay}" />
                                                      <Button
                                                          HorizontalAlignment="Stretch"
                                                          HorizontalContentAlignment="Center"

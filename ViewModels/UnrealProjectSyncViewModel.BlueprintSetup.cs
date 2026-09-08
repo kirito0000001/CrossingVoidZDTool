@@ -62,46 +62,6 @@ internal sealed partial class UnrealProjectSyncViewModel
         !_isApplyingBlueprintSetup &&
         IsWorkflowOperationIdle;
 
-    /// <summary>可勾选的都勾上了才算全选；一条都没有时不算。</summary>
-    public bool AreAllBlueprintSetupItemsSelected =>
-        BlueprintSetupItems.Count(item => item.IsSelectable) > 0 &&
-        BlueprintSetupItems.Where(item => item.IsSelectable).All(item => item.IsSelected);
-
-    public string BlueprintSetupSelectAllText =>
-        AreAllBlueprintSetupItemsSelected ? "全部取消" : "全选待写入";
-
-    public bool CanToggleBlueprintSetupSelection => IsBlueprintSetupWorkspace &&
-        _isBlueprintSetupLoaded &&
-        BlueprintSetupPendingCount > 0 &&
-        !_isApplyingBlueprintSetup &&
-        IsWorkflowOperationIdle;
-
-    /// <summary>
-    /// 一键全选或全取消。
-    ///
-    /// 逐条改勾选会各自触发一次会话缓存落盘，几十条就是几十次写盘；
-    /// 这里先压住通知，改完再统一刷新一次。
-    /// </summary>
-    public void ToggleAllBlueprintSetupSelection()
-    {
-        var select = !AreAllBlueprintSetupItemsSelected;
-        _isBulkBlueprintSetupSelection = true;
-        try
-        {
-            foreach (var item in BlueprintSetupItems.Where(item => item.IsSelectable))
-            {
-                item.IsSelected = select;
-            }
-        }
-        finally
-        {
-            _isBulkBlueprintSetupSelection = false;
-        }
-
-        NotifyBlueprintSetupChanged();
-        SaveSessionCache();
-    }
-
     public string WorkflowStep6StatusText => WorkflowStep < 6
         ? "待处理"
         : !_isBlueprintSetupLoaded
@@ -217,6 +177,7 @@ internal sealed partial class UnrealProjectSyncViewModel
             return;
         }
 
+        NotifyStepSelectionChanged();
         NotifyBlueprintSetupChanged();
         SaveSessionCache();
     }
@@ -252,9 +213,6 @@ internal sealed partial class UnrealProjectSyncViewModel
         OnPropertyChanged(nameof(BlueprintSetupUnchangedCount));
         OnPropertyChanged(nameof(BlueprintSetupSelectedCount));
         OnPropertyChanged(nameof(CanApplyBlueprintSetup));
-        OnPropertyChanged(nameof(AreAllBlueprintSetupItemsSelected));
-        OnPropertyChanged(nameof(BlueprintSetupSelectAllText));
-        OnPropertyChanged(nameof(CanToggleBlueprintSetupSelection));
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
         OnPropertyChanged(nameof(WorkflowStep6StatusText));
     }
