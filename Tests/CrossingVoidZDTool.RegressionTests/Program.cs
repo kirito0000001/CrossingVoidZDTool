@@ -5649,7 +5649,10 @@ static void UnrealBridgeDiffRecognizesNormalizationRename()
         .Single();
 
     AssertEqual(UnrealBridgeChangeKind.Renamed, change.Kind);
-    AssertEqual(true, change.IsSelected);
+    // 默认勾选的决定早已从差异服务移到选择树：Compare 一律产出未勾选的变更，
+    // 由 UnrealSyncSelectionTreeBuilder 按 selectPendingByDefault 决定勾不勾。
+    // 这条断言留着是为了钉住这个分工——差异服务不该再自己决定勾选。
+    AssertEqual(false, change.IsSelected);
 }
 
 static void UnrealBridgeDiffUsesEndpointBaselinesForUnchangedItems()
@@ -5881,7 +5884,10 @@ static void UnrealBridgeDiffDetectsSourceFileChangeAfterMigration()
         .Single();
 
     AssertEqual(UnrealBridgeChangeKind.Updated, change.Kind);
-    AssertEqual(true, change.IsSelected);
+    // 默认勾选的决定早已从差异服务移到选择树：Compare 一律产出未勾选的变更，
+    // 由 UnrealSyncSelectionTreeBuilder 按 selectPendingByDefault 决定勾不勾。
+    // 这条断言留着是为了钉住这个分工——差异服务不该再自己决定勾选。
+    AssertEqual(false, change.IsSelected);
 }
 
 static void UnrealBridgeImportCreatesDraftAndWritesReadableModules()
@@ -6697,7 +6703,16 @@ static void UnrealBridgeExporterIncludesSharedBuffIcons()
 
     AssertEqual(true, script.Contains("SHARED_BUFF_ICON_ROOT = \"/Game/AssetMaterial/ImageS/BUFF\"", StringComparison.Ordinal));
     AssertEqual(true, script.Contains("SHARED_BUFF_ICON_ROOT,", StringComparison.Ordinal));
-    AssertEqual(true, script.Contains("if selected_codes and target_path not in (SHARED_BUFF_ICON_ROOT, SHARED_BATTLE_EFFECT_ROOT):", StringComparison.Ordinal));
+    // 共享目录不参与「按选中角色过滤」——BUFF 图标是全角色公用的，
+    // 被过滤掉就会在差异里表现成「Unreal 里没有这些图标」。
+    // 这里断言的是意图，不是那一行的字面写法：豁免名单后来加过 TEAM_SELECT_ROOT，
+    // 原先按整行比对的断言就是这么红掉的。
+    var exemption = System.Text.RegularExpressions.Regex.Match(
+        script,
+        @"elif selected_codes and target_path not in \(([^)]*)\):");
+    AssertEqual(true, exemption.Success);
+    AssertEqual(true, exemption.Groups[1].Value.Contains("SHARED_BUFF_ICON_ROOT", StringComparison.Ordinal));
+    AssertEqual(true, exemption.Groups[1].Value.Contains("SHARED_BATTLE_EFFECT_ROOT", StringComparison.Ordinal));
     AssertEqual(true, service.Contains("TargetSharedBuffIconContentPath,", StringComparison.Ordinal));
 }
 
@@ -6846,19 +6861,25 @@ static void UnrealBridgeVoicePublishCreatesCategoryFolder()
         baseline).Single();
 
     AssertEqual(UnrealBridgeChangeKind.Renamed, change.Kind);
-    AssertEqual(true, change.IsSelected);
+    // 默认勾选的决定早已从差异服务移到选择树：Compare 一律产出未勾选的变更，
+    // 由 UnrealSyncSelectionTreeBuilder 按 selectPendingByDefault 决定勾不勾。
+    // 这条断言留着是为了钉住这个分工——差异服务不该再自己决定勾选。
+    AssertEqual(false, change.IsSelected);
 
+    // 执行计划只收被勾选的变更；勾选由选择树负责，这里直接模拟用户勾上。
     var operation = new UnrealBridgeExecutionPlanService().Build(
         UnrealBridgeDirection.PublishToUnreal,
         "ALO_Yuki",
         @"D:\UnrealMap\CrossingVoid\CrossingVoid.uproject",
-        [change],
+        [change with { IsSelected = true }],
         deletionsConfirmed: false,
         isFirstPublish: false,
         templateCharacterCode: string.Empty).Operations.Single();
 
+    // 语音的规范名用连字符，和图片素材一致（项目里就是 Misaka-Formation-1 这种）。
+    // 这条断言原来写的是下划线，是命名规范改成连字符之前留下的。
     AssertEqual(
-        "/Game/GameActor2D/ALO_Yuki/Sound/Formation/ALO_Yuki_Formation_1.ALO_Yuki_Formation_1",
+        "/Game/GameActor2D/ALO_Yuki/Sound/Formation/ALO_Yuki-Formation-1.ALO_Yuki-Formation-1",
         operation.TargetObjectPath);
 }
 
@@ -6881,9 +6902,23 @@ static void UnrealBridgePublishPolicySelectsOnlyMappedFileAssets()
     AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(new UnrealBridgeChange(
         semanticItem.StableId, semanticItem.Module, semanticItem.DisplayName, UnrealBridgeChangeKind.Updated,
         semanticItem, semanticItem, true)));
-    AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(new UnrealBridgeChange(
+    // 新增的文件素材也能自动执行——第三步要靠这条才能把新图片同步进去。
+    // 这条断言原来写的是 false，那是「新增必须先在第二步选好重定向目标」
+    // 时期留下的；现在有源文件就直接建，没有源文件（例如空白帧）另有分支。
+    AssertEqual(true, UnrealBridgePublishSupportPolicy.CanExecute(new UnrealBridgeChange(
         fileItem.StableId, fileItem.Module, fileItem.DisplayName, UnrealBridgeChangeKind.Added,
         fileItem, null, true)));
+
+    // 但源文件不存在的新增仍然不能自动执行：没东西可导入。
+    var missingFileItem = fileItem with { AssetPath = Path.Combine(Directory.GetCurrentDirectory(), "不存在的素材.png") };
+    AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(new UnrealBridgeChange(
+        missingFileItem.StableId, missingFileItem.Module, missingFileItem.DisplayName,
+        UnrealBridgeChangeKind.Added, missingFileItem, null, true)));
+
+    // 语义模块（角色信息这种）任何情况下都不走文件同步。
+    AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(new UnrealBridgeChange(
+        semanticItem.StableId, semanticItem.Module, semanticItem.DisplayName,
+        UnrealBridgeChangeKind.Added, semanticItem, null, true)));
 }
 
 static void UnrealBridgePostExecutionRestoresRenamedIdentity()
