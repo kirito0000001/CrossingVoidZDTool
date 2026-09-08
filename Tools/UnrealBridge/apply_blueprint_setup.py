@@ -19,6 +19,29 @@ import unreal
 
 PROTOCOL_VERSION = 1
 
+_PROGRESS_PATH = os.environ.get("ZD_BLUEPRINT_SETUP_PROGRESS", "")
+
+
+def _progress(message, percent, detail="", indeterminate=False):
+    """写一份进度快照给工具箱轮询。
+
+    这一步在虚幻侧要跑十几秒，不回报的话工具箱的进度条整段静止，
+    看起来跟卡死没区别。写失败就算了——进度回报不该影响主流程。
+    """
+    if not _PROGRESS_PATH:
+        return
+    try:
+        os.makedirs(os.path.dirname(_PROGRESS_PATH), exist_ok=True)
+        with open(_PROGRESS_PATH, "w", encoding="utf-8") as handle:
+            json.dump({
+                "message": message,
+                "detail": detail,
+                "percent": float(percent),
+                "isIndeterminate": bool(indeterminate),
+            }, handle, ensure_ascii=False)
+    except Exception:
+        pass
+
 CHARACTER_ACTOR_ROOT = "/Game/GameActor2D"
 TABLE_ROOT = "/Game/AssetMaterial/ExcelTexts/2DInfor"
 SUB_SKILL_TABLE = TABLE_ROOT + "/2DSubSkill"
@@ -332,6 +355,7 @@ def _enum_name(value):
 
 def _scan(request, report):
     code = _text(request.get("characterCode"))
+    _progress("正在读取角色蓝图...", 10, code)
     row_name = _text(request.get("characterName"))
     blueprint_path = "{}/{}/{}.{}".format(CHARACTER_ACTOR_ROOT, code, code, code)
     cdo = _character_cdo(code)
@@ -356,6 +380,7 @@ def _scan(request, report):
                [current_anti], [anti])
 
     # --- 动作序列
+    _progress("正在比对动作序列...", 35)
     for binding in request.get("sequences", []) or []:
         property_name = _text(binding.get("propertyName"))
         targets = [_text(item) for item in binding.get("objectPaths", []) or []]
@@ -375,6 +400,7 @@ def _scan(request, report):
                     "站街 Flipbook", _text(request.get("idleFlipbookObjectPath")))
 
     # --- 技能
+    _progress("正在比对技能与数据表...", 60)
     sub_skill_row = _table_row_for(SUB_SKILL_TABLE, row_name)
     combo_row = _table_row_for(COMBO_TABLE, row_name)
     for payload in request.get("skills", []) or []:
@@ -393,6 +419,7 @@ def _scan(request, report):
             _scan_table_skill(report, COMBO_TABLE, partner_row, row_name, slot_key, payload, partner)
 
     # --- 护援头像
+    _progress("正在比对护援头像...", 88)
     support_row = _table_row_for(SUPPORT_IMAGE_TABLE, row_name)
     for stable_id, json_key, display_name, target in (
             ("table.supportImage.sub1p", "Sub1P", "1P 护援头像", _text(request.get("support1PObjectPath"))),
@@ -677,16 +704,19 @@ def _run():
     try:
         applied = []
         saved = []
+        _progress("正在准备蓝图置入...", 2, _text(request.get("characterCode")), True)
         if _text(request.get("mode")).lower() == "apply":
             _apply(request, {_text(value) for value in request.get("selectedStableIds", []) or []},
                    applied, saved)
         # 应用之后再扫一遍，界面上直接看到写入后的状态。
+        _progress("正在复查写入结果...", 92)
         report = Report()
         _scan(request, report)
         result["items"] = report.items
         result["appliedStableIds"] = applied
         result["savedAssets"] = saved
         result["succeeded"] = True
+        _progress("蓝图置入完成。", 100)
     except Exception:
         result["errorMessage"] = traceback.format_exc()
         unreal.log_error("ZDToolbox blueprint setup failed:\n" + result["errorMessage"])

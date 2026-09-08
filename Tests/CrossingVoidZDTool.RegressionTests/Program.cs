@@ -98,6 +98,7 @@ var tests = new (string Name, Action Run)[]
     ("同步进度按角色和步骤存进角色目录", WorkflowStepCacheLivesInCharacterFolder),
     ("已加载的步骤不再重复触发虚幻检测", WorkflowStepSkipsDetectionWhenAlreadyLoaded),
     ("中栏任何状态都有东西显示", WorkspaceNeverShowsBlankPanel),
+    ("每一步的进度都按阶段分段", WorkflowProgressIsPhasedForEveryStep),
     ("蓝图置入写入按钮在检测结束后可用", BlueprintSetupApplyButtonEnablesAfterScan),
     ("蓝图置入支持一键全选和全取消", BlueprintSetupSupportsSelectAllToggle),
     ("虚幻工具箱快照只让修改项哈希变化", UnrealBridgeToolboxSnapshotHashesAreItemScoped),
@@ -4567,6 +4568,65 @@ static void BlueprintSetupSupportsSelectAllToggle()
     viewModel.ReturnToWorkflowStep(1);
     AssertEqual(false, viewModel.HasStepSelection);
     AssertEqual(Visibility.Collapsed, viewModel.StepSelectionVisibility);
+}
+
+static void WorkflowProgressIsPhasedForEveryStep()
+{
+    // 以前只有第五步用了分段权重，其余步骤全是写死的百分比（15、45、90…），
+    // 而且第四、六步调虚幻的那十几秒进度条完全不动，看着像卡死。
+
+    // 扫描只有一个阶段，不该显示成「阶段 1/1」那种废话。
+    var scan = WorkflowProgressPlan.ForStepScan();
+    AssertEqual(1, scan.PhaseCount);
+    AssertEqual("正在读取", scan.Caption(WorkflowProgressPlan.Scan, "正在读取"));
+
+    // 写入分「写入 + 复查」两段；开了备份就是三段，且备份占大头。
+    var apply = WorkflowProgressPlan.ForStepApply(includesBackup: false);
+    AssertEqual(2, apply.PhaseCount);
+    AssertEqual("阶段 1/2 · 正在写入", apply.Caption(WorkflowProgressPlan.Apply, "正在写入"));
+
+    var backedUp = WorkflowProgressPlan.ForStepApply(includesBackup: true);
+    AssertEqual(3, backedUp.PhaseCount);
+    AssertEqual(1, backedUp.PhaseNumber(WorkflowProgressPlan.Backup));
+    AssertEqual(2, backedUp.PhaseNumber(WorkflowProgressPlan.Apply));
+    AssertEqual(3, backedUp.PhaseNumber(WorkflowProgressPlan.Verify));
+    // 压一份几个 G 的工程实测约 66 秒，是这条流程里最长的一段，
+    // 它就该占掉进度条的大部分，不该被抹平成三等分。
+    var backupBand = backedUp[WorkflowProgressPlan.Backup];
+    AssertEqual(true, backupBand.End - backupBand.Start > 50);
+
+    // 阶段区间必须首尾相接、不重叠，否则进度条会跳。
+    var previousEnd = 0d;
+    foreach (var phase in new[] { WorkflowProgressPlan.Backup, WorkflowProgressPlan.Apply, WorkflowProgressPlan.Verify })
+    {
+        var band = backedUp[phase];
+        AssertEqual(true, Math.Abs(band.Start - previousEnd) < 0.001);
+        AssertEqual(true, band.End > band.Start);
+        previousEnd = band.End;
+    }
+    // 收尾留了一小段尾巴，不该顶到 100。
+    AssertEqual(true, previousEnd is > 90 and < 100);
+
+    // 子进度映射到区间内
+    var band2 = backedUp[WorkflowProgressPlan.Apply];
+    AssertEqual(true, Math.Abs(band2.At(0) - band2.Start) < 0.001);
+    AssertEqual(true, Math.Abs(band2.At(100) - band2.End) < 0.001);
+    // 越界的子进度要夹住，不能把进度条推出这一段
+    AssertEqual(true, Math.Abs(band2.At(500) - band2.End) < 0.001);
+
+    // 第四、六步的桥接脚本都要回报进度，否则那十几秒还是静止的。
+    foreach (var script in new[] { "apply_blueprint_setup.py", "configure_unreal_light_settings.py" })
+    {
+        var text = File.ReadAllText(Path.Combine(
+            Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", script), Encoding.UTF8);
+        AssertEqual(true, text.Contains("def _progress("));
+        // 光有函数没用，得真的在流程里调
+        AssertEqual(true, CountOccurrences(text, "_progress(") >= 4);
+    }
+
+    // 界面这一侧要把进度文件转成分段推进
+    var window = ReadUnrealSyncWindowSource();
+    AssertEqual(2, CountOccurrences(window, "new Progress<UnrealExportProgressState>("));
 }
 
 static void WorkspaceNeverShowsBlankPanel()

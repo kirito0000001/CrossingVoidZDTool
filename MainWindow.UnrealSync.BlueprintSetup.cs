@@ -44,13 +44,23 @@ namespace CrossingVoidZDTool
             try
             {
                 // 备份开关只看整体设置，和第三、五步同一条规则。
+                var plan = WorkflowProgressPlan.ForStepApply(Settings.BackupBeforeUnrealSync);
                 if (Settings.BackupBeforeUnrealSync)
                 {
+                    UpdateGlobalProgress(
+                        plan.Caption(WorkflowProgressPlan.Backup, "正在压缩备份 Unreal 项目"),
+                        plan[WorkflowProgressPlan.Backup].At(0),
+                        character.Code,
+                        true);
                     await CreateUnrealProjectBackupAsync(character.Code, sync.EnginePath, sync.ProjectPath);
                 }
 
-                UpdateGlobalProgress("正在写入并复查蓝图数据...", 45, $"{selectedIds.Count} 项", true);
-                var result = await ExecuteUnrealBlueprintSetupAsync(character, apply: true, selectedIds);
+                UpdateGlobalProgress(
+                    plan.Caption(WorkflowProgressPlan.Apply, "正在写入蓝图数据"),
+                    plan[WorkflowProgressPlan.Apply].At(0),
+                    $"{selectedIds.Count} 项",
+                    true);
+                var result = await ExecuteUnrealBlueprintSetupAsync(character, apply: true, selectedIds, plan);
                 // 写完后脚本会重扫一遍，这里直接用复查结果刷新界面，
                 // 勾选清空避免把已写入的项再算作待处理。
                 sync.SetBlueprintSetupResult(
@@ -136,7 +146,8 @@ namespace CrossingVoidZDTool
         private async Task<UnrealBlueprintSetupResult> ExecuteUnrealBlueprintSetupAsync(
             CharacterCard character,
             bool apply,
-            IReadOnlyCollection<string> selectedStableIds)
+            IReadOnlyCollection<string> selectedStableIds,
+            WorkflowProgressPlan? progressPlan = null)
         {
             var sync = _applicationViewModel.UnrealProjectSync;
             var service = new UnrealBlueprintSetupService();
@@ -159,21 +170,37 @@ namespace CrossingVoidZDTool
             request.Mode = apply ? "Apply" : "Scan";
             service.SaveRequest(requestPath, request);
 
+            var progressPath = Path.Combine(workFolder, apply ? "apply.progress.json" : "scan.progress.json");
             var offlineStartInfo = service.BuildProcessStartInfo(
                 sync.EnginePath,
                 sync.ProjectPath,
                 requestPath,
-                resultPath);
+                resultPath,
+                progressPath);
             var launch = new UnrealPythonTaskExecutionService().BuildLaunch(
                 sync.EnginePath,
                 sync.ProjectPath,
                 service.GetScriptPath(),
                 Path.Combine(workFolder, apply ? "apply.remote-job.json" : "scan.remote-job.json"),
                 offlineStartInfo);
+            // 虚幻那一侧十几秒是纯静默的，脚本会把阶段写进进度文件，
+            // 这里把它转成进度条上的分段推进。
+            var plan = progressPlan ?? (apply
+                ? WorkflowProgressPlan.ForStepApply(includesBackup: false)
+                : WorkflowProgressPlan.ForStepScan());
+            var phase = apply ? WorkflowProgressPlan.Apply : WorkflowProgressPlan.Scan;
+            var band = plan[phase];
+            var progress = new Progress<UnrealExportProgressState>(state => UpdateGlobalProgress(
+                plan.Caption(phase, state.Message),
+                band.At(state.Percent),
+                state.Detail,
+                state.IsIndeterminate));
             return await service.ExecuteAsync(
                 launch.StartInfo,
                 resultPath,
-                GetGlobalProgressCancellationToken());
+                GetGlobalProgressCancellationToken(),
+                progressPath,
+                progress);
         }
     }
 }

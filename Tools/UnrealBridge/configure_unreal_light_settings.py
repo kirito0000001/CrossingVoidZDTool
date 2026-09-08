@@ -9,6 +9,30 @@ import unreal
 
 
 PROTOCOL_VERSION = 1
+_PROGRESS_PATH = os.environ.get("ZD_LIGHT_CONFIG_PROGRESS", "")
+
+
+def _progress(message, percent, detail="", indeterminate=False):
+    """写一份进度快照给工具箱轮询。
+
+    这一步在虚幻侧要跑十几秒，不回报的话工具箱的进度条整段静止，
+    看起来跟卡死没区别。写失败就算了——进度回报不该影响主流程。
+    """
+    if not _PROGRESS_PATH:
+        return
+    try:
+        os.makedirs(os.path.dirname(_PROGRESS_PATH), exist_ok=True)
+        with open(_PROGRESS_PATH, "w", encoding="utf-8") as handle:
+            json.dump({
+                "message": message,
+                "detail": detail,
+                "percent": float(percent),
+                "isIndeterminate": bool(indeterminate),
+            }, handle, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 STATUS_UNCHANGED = 0
 STATUS_PENDING = 1
 STATUS_ERROR = 2
@@ -915,6 +939,7 @@ def _save_changed_assets(assets):
 
 
 def _execute(request):
+    _progress("正在准备基础配置...", 2, "", True)
     selected = set(_get(request, "SelectedStableIds", "selectedStableIds", default=[]))
     applied = []
     saved_assets = []
@@ -927,11 +952,13 @@ def _execute(request):
                 applied.append("team.voice")
             except Exception as error:
                 execution_errors["team.voice"] = str(error)
+        _progress("正在写入 Item 配置...", 25)
         item_ids = sorted(stable_id for stable_id in selected if stable_id.startswith("item."))
         if item_ids:
             item_applied, item_errors = _apply_item(request, selected, changed_assets)
             applied.extend(item_applied)
             execution_errors.update(item_errors)
+        _progress("正在写入 MetaSound 配置...", 45)
         meta_ids = sorted(stable_id for stable_id in selected if stable_id.startswith("meta."))
         if meta_ids:
             meta_applied, meta_errors = _apply_meta(request, selected, changed_assets)
@@ -943,6 +970,7 @@ def _execute(request):
                 applied.append("voice.talk-concurrency")
             except Exception as error:
                 execution_errors["voice.talk-concurrency"] = str(error)
+        _progress("正在保存改动的资产...", 70)
         try:
             saved_assets = _save_changed_assets(changed_assets)
         except Exception as error:
@@ -950,6 +978,7 @@ def _execute(request):
                 execution_errors.setdefault(stable_id, str(error))
             applied = []
 
+    _progress("正在复查基础配置...", 85)
     entries = _build_entries(request)
     for item in entries:
         if item["stableId"] in execution_errors and item["status"] != STATUS_UNCHANGED:

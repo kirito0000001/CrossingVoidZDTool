@@ -279,7 +279,8 @@ internal sealed class UnrealBlueprintSetupService
         string editorPath,
         string projectPath,
         string requestPath,
-        string resultPath)
+        string resultPath,
+        string progressPath = "")
     {
         var startInfo = new ProcessStartInfo
         {
@@ -302,6 +303,11 @@ internal sealed class UnrealBlueprintSetupService
         // 在线执行时这两个变量由远程作业转发，所以必须带 ZD_ 前缀。
         startInfo.EnvironmentVariables["ZD_BLUEPRINT_SETUP_REQUEST"] = requestPath;
         startInfo.EnvironmentVariables["ZD_BLUEPRINT_SETUP_RESULT"] = resultPath;
+        if (!string.IsNullOrWhiteSpace(progressPath))
+        {
+            startInfo.EnvironmentVariables["ZD_BLUEPRINT_SETUP_PROGRESS"] = progressPath;
+        }
+
         return startInfo;
     }
 
@@ -312,14 +318,18 @@ internal sealed class UnrealBlueprintSetupService
     public async Task<UnrealBlueprintSetupResult> ExecuteAsync(
         ProcessStartInfo startInfo,
         string resultPath,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string progressPath = "",
+        IProgress<UnrealExportProgressState>? progress = null)
     {
         TryDelete(resultPath);
+        TryDelete(progressPath);
         using var process = Process.Start(startInfo)
             ?? throw new InvalidOperationException("无法启动 Unreal 蓝图置入进程。");
         var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
         var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
         var startedAt = DateTime.UtcNow;
+        var lastProgressAt = DateTime.MinValue;
         while (!process.HasExited)
         {
             if (cancellationToken.IsCancellationRequested)
@@ -333,11 +343,48 @@ internal sealed class UnrealBlueprintSetupService
                 throw new TimeoutException("Unreal 蓝图置入超过 20 分钟，已终止命令进程。");
             }
 
+            // 虚幻那一侧十几秒的静默期：脚本会把阶段写进进度文件，
+            // 这里轮询转发出去，进度条才不会整段一动不动。
+            ReportProgress(progressPath, progress, ref lastProgressAt);
             await Task.Delay(500, cancellationToken);
         }
 
         var output = await outputTask + await errorTask;
         return ReadResult(resultPath, output, process.ExitCode);
+    }
+
+    /// <summary>进度文件没变就不重复转发，免得每 500 毫秒刷一次同样的文案。</summary>
+    private static void ReportProgress(
+        string progressPath,
+        IProgress<UnrealExportProgressState>? progress,
+        ref DateTime lastWriteUtc)
+    {
+        if (progress is null || string.IsNullOrWhiteSpace(progressPath))
+        {
+            return;
+        }
+
+        try
+        {
+            var info = new FileInfo(progressPath);
+            if (!info.Exists || info.LastWriteTimeUtc <= lastWriteUtc)
+            {
+                return;
+            }
+
+            lastWriteUtc = info.LastWriteTimeUtc;
+            var state = JsonSerializer.Deserialize(
+                File.ReadAllText(progressPath, Encoding.UTF8),
+                AppJsonSerializerContext.Default.UnrealExportProgressState);
+            if (state is not null)
+            {
+                progress.Report(state);
+            }
+        }
+        catch (Exception ex) when (ex is IOException or JsonException)
+        {
+            // 正在被写的进度文件读不全是常态，下一轮再读。
+        }
     }
 
     public static UnrealBlueprintSetupResult ReadResult(string resultPath, string processOutput, int exitCode)
