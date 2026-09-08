@@ -48,6 +48,16 @@ SUB_SKILL_TABLE = TABLE_ROOT + "/2DSubSkill"
 COMBO_TABLE = TABLE_ROOT + "/12SkInfor"
 SUPPORT_IMAGE_TABLE = TABLE_ROOT + "/SupImage"
 
+# 失败原因按 stableId 前缀登记（怎么匹配见 _failure_reason）。
+# 保存失败、写表失败都是整张资产一起失效，不是某一条的问题，所以键取到资产这一层：
+# 蓝图侧的 stableId 全都以 "bp." 打头，用 "bp" 一个键就能覆盖它下面的每一条。
+BLUEPRINT_FAILURE_KEY = "bp"
+TABLE_FAILURE_KEYS = {
+    SUB_SKILL_TABLE: "table.SubSkill",
+    COMBO_TABLE: "table.Combo",
+    SUPPORT_IMAGE_TABLE: "table.supportImage",
+}
+
 GROUP_NAMES = {
     "onset": "对局设置",
     "sequence": "动作序列",
@@ -541,8 +551,12 @@ def _target_skill_values(payload, request_key, value_kind):
 
 # ---------------------------------------------------------------- 应用
 
-def _apply(request, selected, applied, saved, failures):
-    """按勾选写入。只动被选中的字段，其余原样不碰。"""
+def _apply(request, selected, applied, saved, failures, fatals):
+    """按勾选写入。只动被选中的字段，其余原样不碰。
+
+    failures 收「哪一批条目没写成」，fatals 收「整趟活白干了」——
+    后者会把顶层 succeeded 判成 False，见 _run()。
+    """
     if not selected:
         return
 
@@ -605,10 +619,21 @@ def _apply(request, selected, applied, saved, failures):
                 unreal.log_error("ZDToolbox blueprint setup skill write failed: {} {}".format(
                     slot_key, message))
 
-    if touched_blueprint and _save_asset(blueprint_path):
-        saved.append(blueprint_path)
+    if touched_blueprint:
+        if _save_asset(blueprint_path):
+            saved.append(blueprint_path)
+        else:
+            # 保存失败是整体性的：改动只落在这个进程的 CDO 内存里，
+            # 离线 commandlet 一退出就全没了。而复查读的正是同一份 CDO，
+            # 每一条都会判成「无差异」——光看条目状态永远发现不了，
+            # 界面还会报「已写入并复查 N 项，错误 0」。所以既要记进 failures
+            # 让每一条降级，也要记进 fatals 让整趟判错。
+            message = "角色蓝图保存失败：" + blueprint_path + "，本次改动没有落盘。"
+            failures[BLUEPRINT_FAILURE_KEY] = message
+            fatals.append(message)
+            unreal.log_error("ZDToolbox blueprint setup save failed: " + blueprint_path)
 
-    _apply_tables(request, selected, applied, saved)
+    _apply_tables(request, selected, applied, saved, failures)
 
 
 def _bridge_json(text):
@@ -675,7 +700,7 @@ def _save_asset(object_path):
         return False
 
 
-def _apply_tables(request, selected, applied, saved):
+def _apply_tables(request, selected, applied, saved, failures):
     """
     数据表按行写入，走 ZDBridge.UpsertDataTableRow。
 
@@ -683,6 +708,9 @@ def _apply_tables(request, selected, applied, saved):
     行名字段同名，整表回灌会把行名覆盖成技能名字数组，27 行护援技会一次全废。
     Python 侧也没有单行写入的 API（DataTableFunctionLibrary 只有删行和整表回灌），
     所以逐行写入放在桥接插件里做。
+
+    落盘同样在 C++ 里完成（AddRow 之后紧跟 SavePackage，存不下会以 ok=false 回报），
+    这一侧不要再补一次 save_asset，只负责把失败原因收下来。
     """
     row_name = _text(request.get("characterName"))
     if not row_name:
@@ -725,8 +753,13 @@ def _apply_tables(request, selected, applied, saved):
         if report.get("ok"):
             saved.append(table_path)
         else:
+            # 原因不收进 failures 的话诊断就断在这里：复查是按行重新读表，
+            # 而 C++ 是先 AddRow 再 SavePackage，存盘失败时内存里的行已经是新值，
+            # 复查照样判「无差异」，这一条就成了没人认领的哑失败。
+            message = _text(report.get("error", "")) or "未知原因"
+            failures[TABLE_FAILURE_KEYS.get(table_path, table_path)] = message
             unreal.log_error("ZDToolbox blueprint setup table write failed: {} {}".format(
-                table_path, report.get("error", "")))
+                table_path, message))
 
 
 def _remember(applied, prefix, fields):
@@ -735,23 +768,39 @@ def _remember(applied, prefix, fields):
 
 # ---------------------------------------------------------------- 入口
 
+def _failure_reason(failures, stable_id):
+    """按 stableId 前缀找失败原因。
+
+    长的前缀先试：同时有「整张蓝图没保存」和「SkillSlot3 转换失败」时，
+    条目要拿到更具体的那一条，而不是看字典先迭代到谁。
+    """
+    for prefix in sorted(failures, key=len, reverse=True):
+        if stable_id == prefix or stable_id.startswith(prefix + "."):
+            return failures[prefix]
+    return ""
+
+
 def _reconcile_applied(report, applied, failures):
     """拿复查结果给写入结论纠偏，顺便把失败原因贴到对应条目上。"""
     claimed = set(applied)
     confirmed = []
     for item in report.items:
         stable_id = item["stableId"]
-        reason = ""
-        for prefix, message in failures.items():
-            if stable_id == prefix or stable_id.startswith(prefix + "."):
-                reason = message
-                break
-        if item["status"] == STATUS_PENDING and (stable_id in claimed or reason):
+        reason = _failure_reason(failures, stable_id)
+        written = stable_id in claimed
+        if item["status"] == STATUS_PENDING and (written or reason):
             item["status"] = STATUS_ERROR
             item["errorMessage"] = (
                 "写入没有生效：" + reason if reason
                 else "写入已执行，复查时这一项仍与目标不一致。")
-        elif stable_id in claimed:
+        elif written and reason:
+            # 复查说「无差异」却带着失败原因——保存失败就长这样：值已经写进
+            # 内存里的 CDO / 数据表，复查读的就是这一份，必然判成一致。
+            # 这种整体性失败按条目比状态是比不出来的，只能靠失败原因
+            # 把它从「已写入」里摘掉，否则它会被当成写入成功。
+            item["status"] = STATUS_ERROR
+            item["errorMessage"] = "写入没有生效：" + reason
+        elif written:
             confirmed.append(stable_id)
     return confirmed
 
@@ -780,10 +829,11 @@ def _run():
         applied = []
         saved = []
         failures = {}
+        fatals = []
         _progress("正在准备蓝图置入...", 2, _text(request.get("characterCode")), True)
         if _text(request.get("mode")).lower() == "apply":
             _apply(request, {_text(value) for value in request.get("selectedStableIds", []) or []},
-                   applied, saved, failures)
+                   applied, saved, failures, fatals)
         # 应用之后再扫一遍，界面上直接看到写入后的状态。
         _progress("正在复查写入结果...", 92)
         report = Report()
@@ -795,8 +845,13 @@ def _run():
         result["items"] = report.items
         result["appliedStableIds"] = applied
         result["savedAssets"] = saved
-        result["succeeded"] = True
-        _progress("蓝图置入完成。", 100)
+        # 没落盘就不算成功。改动还在内存里，复查一路判「无差异」，
+        # 只看条目的话这一趟会报成「已写入并复查 N 项，错误 0」，
+        # 而进程一退出改动就没了——工具箱那边必须看到一个明确的失败。
+        result["succeeded"] = not fatals
+        if fatals:
+            result["errorMessage"] = "\n".join(fatals)
+        _progress("蓝图置入完成。" if not fatals else "蓝图置入未完成：改动没有落盘。", 100)
     except Exception:
         result["errorMessage"] = traceback.format_exc()
         unreal.log_error("ZDToolbox blueprint setup failed:\n" + result["errorMessage"])

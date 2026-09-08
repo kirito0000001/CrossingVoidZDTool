@@ -115,6 +115,9 @@ var tests = new (string Name, Action Run)[]
     ("中栏任何状态都有东西显示", WorkspaceNeverShowsBlankPanel),
     ("中栏分组与条目始终一致", WorkspaceGroupsStayConsistentWithItems),
     ("直接改列表中栏也会跟着刷新", WorkspaceReactsToRawCollectionChanges),
+    ("逐项勾选会刷新右栏的已选择计数", SingleItemSelectionRefreshesStepSelectionText),
+    ("重置导入操作会刷新中栏与流程状态", ResetImportOperationRefreshesWorkspaceAndWorkflow),
+    ("改过分类的语音不会被基线当成已同步", ReclassifiedVoiceSurvivesBaselineFilter),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
@@ -4894,6 +4897,193 @@ static void BlueprintSetupSelfCheckPasses()
     AssertEqual(true, source.Contains(".casefold()", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("def _missing_object_targets", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("def _reconcile_applied", StringComparison.Ordinal));
+}
+
+static void ReclassifiedVoiceSurvivesBaselineFilter()
+{
+    // 用户报的：在工具箱里把一条语音从「待分配」归到「失败语音」，
+    // 第三步却怎么都同步不上去，Unreal 里那条一直躺在 Sound/Other。
+    //
+    // 差异服务其实判对了（Renamed，目标 Sound/Defeat），丢失发生在它之上：
+    // 恢复分步缓存时会拿基线把「已经同步过的」剔掉，而那个判定只比内容哈希。
+    // 改分类时文件字节没变、Unreal 那侧也没被动过，两个哈希都和基线一致，
+    // 于是这条 Renamed 被整条抹掉——界面还会因此报「全部素材无差异」。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var projectPath = Path.Combine(root, "CrossingVoid.uproject");
+        File.WriteAllText(projectPath, "{}");
+        var enginePath = Path.Combine(root, "UnrealEditor.exe");
+        File.WriteAllText(enginePath, "x");
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴") with { IsCompleted = true };
+        Directory.CreateDirectory(character.ToolFolderPath);
+
+        const string stableId = "voice:shared-sync-id";
+        const string oldRelative = "Sound/Other/Misaka-Defeat-1.wav";
+        const string newRelative = "Sound/Defeat/Misaka-Defeat-1.wav";
+        const string unrealPath = "/Game/GameActor2D/Misaka/Sound/Other/Misaka-Defeat-1.Misaka-Defeat-1";
+
+        // 工具箱侧已经归到 Defeat；Unreal 侧还在 Other。字节没变，所以两边哈希都和基线一致。
+        var toolboxItem = new UnrealBridgeSnapshotItem(
+            stableId, "module:Voices", UnrealBridgeModule.Voices, "失败语音 #1",
+            "wave-bytes-hash", "{\"kind\":\"Defeat\"}",
+            Path.Combine(character.FolderPath, "Sound", "Defeat", "Misaka-Defeat-1.wav"),
+            ToolboxRelativePath: newRelative,
+            NormalizedName: "Misaka-Defeat-1");
+        var unrealItem = new UnrealBridgeSnapshotItem(
+            stableId, "module:Voices", UnrealBridgeModule.Voices, "Misaka-Defeat-1",
+            "unreal-preview-hash", "{}", string.Empty,
+            SourceObjectPath: unrealPath,
+            OriginIdentity: "package-guid",
+            NormalizedName: "Misaka-Defeat-1");
+        var change = new UnrealBridgeChange(
+            stableId, UnrealBridgeModule.Voices, "失败语音 #1",
+            UnrealBridgeChangeKind.Renamed, toolboxItem, unrealItem, true);
+
+        // 基线记的是改分类之前的状态：路径还是 Other，哈希和现在一模一样
+        new UnrealBridgeStateService().Save(character, projectPath, new UnrealBridgeSyncState
+        {
+            CharacterCode = character.Code,
+            UnrealProjectPath = projectPath,
+            Entries =
+            {
+                [stableId] = new UnrealBridgeSyncStateEntry(
+                    "wave-bytes-hash",
+                    "unreal-preview-hash",
+                    unrealPath,
+                    "package-guid",
+                    oldRelative,
+                    "Misaka-Defeat-1"),
+            },
+        });
+
+        // 先把这条差异写进第三步的分步缓存
+        var writer = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        writer.Load(enginePath, projectPath);
+        writer.IsEngineToToolbox = false;
+        writer.RefreshDraftSources([character]);
+        writer.SelectSource(writer.CharacterSources.Single());
+        writer.ReturnToWorkflowStep(3);
+        writer.SetPublishSelectionTree(
+            UnrealSyncSelectionTreeBuilder.FromChanges(
+                [change], UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: true),
+            [change]);
+        writer.FlushSessionCache();
+
+        // 换一个视图模型从缓存恢复——这正是切角色/切步骤时走的那条路
+        var reader = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        reader.Load(enginePath, projectPath);
+        reader.IsEngineToToolbox = false;
+        reader.RefreshDraftSources([character]);
+        reader.SelectSource(reader.CharacterSources.Single());
+
+        var restored = reader.SelectionTreeRoots
+            .SelectMany(item => item.Children)
+            .Select(item => item.StableId)
+            .ToArray();
+        AssertSequence([stableId], restored);
+        // 只剩这一条差异时，绝不能对外宣称「全部素材无差异」
+        AssertEqual(false, reader.HasNoPublishChanges);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SingleItemSelectionRefreshesStepSelectionText()
+{
+    // 右栏那句「已选择 N / M 项」是按步骤算的，和导入摘要不是一回事。
+    // 第四、六步的单项勾选都记得通知它，唯独第三、五步这条路径漏了：
+    // 逐个勾选素材时计数一直卡在旧值，要点全选或切步骤才跳回来。
+    const string actionCode = "Sk1";
+    var changes = new List<UnrealBridgeChange>
+    {
+        // 树是「动作根 + 帧叶子」两层，少了根节点就建不出子项
+        new(
+            SequenceFrameIdentity.BuildActionStableId(actionCode),
+            UnrealBridgeModule.SequenceFrames,
+            actionCode,
+            UnrealBridgeChangeKind.Unchanged,
+            null,
+            null,
+            false,
+            SequenceFrameIdentity.BuildActionStableId(actionCode)),
+    };
+    for (var frame = 0; frame < 3; frame++)
+    {
+        changes.Add(CreateSequenceDeleteChange(
+            actionCode,
+            "/Game/GameActor2D/Misaka/Material/" + actionCode + "/F" + frame + ".F" + frame));
+    }
+
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    // 计数是按当前步骤算的，默认停在第一步会去数底层检测项
+    viewModel.ReturnToWorkflowStep(5);
+    var roots = UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
+        changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: false);
+    viewModel.SetPublishSelectionTree(roots, changes);
+    AssertEqual(true, viewModel.IsWorkflowStepLoaded(5));
+
+    var leaf = viewModel.SelectionTreeRoots.SelectMany(root => root.Children).First();
+    AssertEqual(false, leaf.IsChecked);
+    var before = viewModel.SelectedStepItemCount;
+
+    var changed = new List<string>();
+    viewModel.PropertyChanged += (_, e) => changed.Add(e.PropertyName ?? string.Empty);
+    leaf.IsChecked = true;
+
+    // 计数本身要变
+    AssertEqual(before + 1, viewModel.SelectedStepItemCount);
+    // 而且必须真的通知出去——否则界面上那行字不会动
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.StepSelectionText)));
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.SelectedStepItemCount)));
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.AreAllStepItemsSelected)));
+}
+
+static void ResetImportOperationRefreshesWorkspaceAndWorkflow()
+{
+    // 重置导入操作会清掉 _hasImportDetection 和 _loadedPublishStep，
+    // 中栏状态、能否进下一步、发布勾选是否就绪全都跟着变。
+    // 但它不动任何 ObservableCollection，所以中栏的集合监听在这条路径上
+    // 不会触发——不显式广播的话，中栏会停在上一刻的可见性上。
+    var changes = new List<UnrealBridgeChange>
+    {
+        new(
+            SequenceFrameIdentity.BuildActionStableId("Click"),
+            UnrealBridgeModule.SequenceFrames,
+            "Click",
+            UnrealBridgeChangeKind.Unchanged,
+            null,
+            null,
+            false,
+            SequenceFrameIdentity.BuildActionStableId("Click")),
+        CreateSequenceDeleteChange("Click", "/Game/GameActor2D/Misaka/Material/Click/F0.F0"),
+    };
+
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    viewModel.IsEngineToToolbox = true;
+    var roots = UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
+        changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: true);
+    viewModel.SetPublishSelectionTree(roots, changes);
+    viewModel.SetLoadedPublishStep(3);
+    AssertEqual(true, viewModel.HasContentDetection);
+
+    var changed = new List<string>();
+    viewModel.PropertyChanged += (_, e) => changed.Add(e.PropertyName ?? string.Empty);
+
+    // 导入方向 + 空树 -> 走到 ResetImportOperation
+    viewModel.SetPublishSelectionTree([], []);
+    viewModel.FailImportDetection("检测失败");
+
+    AssertEqual(false, viewModel.HasContentDetection);
+    AssertEqual(false, viewModel.IsWorkflowStepLoaded(3));
+    // 中栏必须被通知到，否则占位和内容可能双双隐藏
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.WorkspaceState)));
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.WorkspacePlaceholderVisibility)));
+    // 流程可用性也要被通知到
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.CanAdvanceWorkflow)));
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.WorkflowNextButtonEnabled)));
 }
 
 static void WorkspaceReactsToRawCollectionChanges()

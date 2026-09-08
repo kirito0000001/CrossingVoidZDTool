@@ -203,22 +203,6 @@ def _append_anim_maps_sequence(source, sequence, action_name):
             pass
     raise RuntimeError("%s: AnimMaps Supported Animations array is not writable; expected the editor '+' operation" % action_name)
 
-def _select_assets(assets):
-    """Focus the Content Browser on assets when the Python API supports it.
-
-    EditorUtilityLibrary exposes reading the selection, not setting it. Merely
-    syncing the browser is therefore not equivalent to the user's multi-select
-    operation and must not be reported as a successful selection.
-    """
-    try:
-        unreal.EditorAssetLibrary.sync_browser_to_objects(
-            [asset.get_path_name() for asset in assets])
-        unreal.log_warning(
-            'SequenceSync: Content Browser was focused, but Python cannot set its selection')
-    except Exception:
-        return False
-    return False
-
 
 def _bridge_class():
     return getattr(unreal, 'ZDBridgeLibrary', None)
@@ -634,8 +618,6 @@ def _sync_action(action):
     _save(sequence.get_path_name())
     # 第五步不再往角色蓝图里写序列槽位——把序列绑到蓝图属于下一步的职责。
     # 计划里仍然带着 blueprintProperty / blueprintFormSlotIndex，留给那一步用。
-    sequence.modify()
-    _save(sequence.get_path_name())
     new_paths = [texture_path for texture_path in imported if texture_path] + [
         sprite.get_path_name() for sprite in sprites if sprite is not None
     ] + [flipbook.get_path_name(), sequence.get_path_name()]
