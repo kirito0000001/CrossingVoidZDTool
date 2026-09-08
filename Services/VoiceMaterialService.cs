@@ -28,7 +28,8 @@ internal sealed class VoiceMaterialService
         new(VoiceMaterialKind.Ultimate, "终结技语音", "Ultimate", "Ultimate", false),
         new(VoiceMaterialKind.Support, "护援技语音", "Support", "Support", false),
         new(VoiceMaterialKind.Combo, "连携技语音", "Combo", "Combo", false),
-        new(VoiceMaterialKind.Other, "待分配语音", "Other", "OtherVoice", false)
+        new(VoiceMaterialKind.Other, "待分配语音", "Other", "OtherVoice", false),
+        new(VoiceMaterialKind.SoundEffect, "音效", "SoundEffect", "SE", false)
     ];
 
     public IReadOnlyList<VoiceMaterialSection> LoadSections(CharacterCard character)

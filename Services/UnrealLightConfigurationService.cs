@@ -32,8 +32,11 @@ internal sealed class UnrealLightConfigurationService
         var shapeCompletes = GetMaterialObjectPaths(character.Code, materials, BaseMaterialKind.FullMorphPortrait);
         var formation = GetVoiceObjectPaths(character.Code, voices, VoiceMaterialKind.Formation).FirstOrDefault() ?? string.Empty;
         var hurt = GetVoiceObjectPaths(character.Code, voices, VoiceMaterialKind.Hurt);
+        // 受击语音走角色自己的 OnDM MetaSound，不进这里。
+        // 音效也排除：并发控制的语义是「同一时刻只响一条角色语音」，
+        // 而音效本来就要能叠加。待分配语音仍然算语音，照常进并发。
         var talk = voices
-            .Where(section => section.Spec.Kind != VoiceMaterialKind.Hurt)
+            .Where(section => section.Spec.Kind is not (VoiceMaterialKind.Hurt or VoiceMaterialKind.SoundEffect))
             .SelectMany(section => section.Items)
             .OrderBy(item => item.Kind)
             .ThenBy(item => item.Index)

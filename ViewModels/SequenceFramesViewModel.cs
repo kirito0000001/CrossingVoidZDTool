@@ -22,7 +22,9 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         ("Click", VoiceMaterialKind.Click),
         ("Death", VoiceMaterialKind.Death),
         ("Defeat", VoiceMaterialKind.Defeat),
-        ("Ondm", VoiceMaterialKind.Hurt),
+        // 工具箱侧的动作码是 OnDamage；写成 Ondm 时 IsActionCodeInFamily 匹配不上
+        // （它只接受完全相等或「基码+纯数字」），受伤动作的语音下拉就完全不过滤了。
+        ("OnDamage", VoiceMaterialKind.Hurt),
         ("Victory", VoiceMaterialKind.Victory),
         ("Sk1", VoiceMaterialKind.Skill1),
         ("Sk2", VoiceMaterialKind.Skill2),

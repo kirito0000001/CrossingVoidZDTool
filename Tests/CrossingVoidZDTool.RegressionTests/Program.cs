@@ -120,6 +120,8 @@ var tests = new (string Name, Action Run)[]
     ("改过分类的语音不会被基线当成已同步", ReclassifiedVoiceSurvivesBaselineFilter),
     ("元数据损坏时角色不会从角色台消失", CorruptMetadataKeepsCharacterVisible),
     ("角色数据写到一半崩溃不会丢原文件", CharacterDataWriteIsAtomic),
+    ("语音名字识别不被角色代号误伤", VoiceClassificationIgnoresCharacterCodeNoise),
+    ("语音分类表与桥接脚本标签一致", VoiceSpecsMatchBridgeScriptLabels),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
@@ -471,7 +473,7 @@ static void MaterialSequenceNumberWidthsMatchCategoryCount()
 
 static void VoiceSpecsDefineRequiredAndOptionalGroups()
 {
-    AssertEqual(12, VoiceMaterialService.Specs.Count);
+    AssertEqual(13, VoiceMaterialService.Specs.Count);
     AssertSequence(
         [
             VoiceMaterialKind.Formation,
@@ -489,7 +491,9 @@ static void VoiceSpecsDefineRequiredAndOptionalGroups()
             VoiceMaterialKind.Ultimate,
             VoiceMaterialKind.Support,
             VoiceMaterialKind.Combo,
-            VoiceMaterialKind.Other
+            VoiceMaterialKind.Other,
+            // 音效追加在最末尾：有三处按枚举序数排序，插进中间会静默改掉行为
+            VoiceMaterialKind.SoundEffect
         ],
         VoiceMaterialService.Specs.Where(spec => !spec.IsRequired).Select(spec => spec.Kind).ToArray());
     AssertEqual("支持多个，至少 1 个", VoiceMaterialService.GetSpec(VoiceMaterialKind.Formation).RequirementText);
@@ -865,7 +869,7 @@ static void LineArtRefreshLoadsVoiceSections()
 
         viewModel.RefreshAsync(character).GetAwaiter().GetResult();
 
-        AssertEqual(12, viewModel.VoiceSections.Count);
+        AssertEqual(13, viewModel.VoiceSections.Count);
         AssertEqual(6, viewModel.VoiceSections.Sum(section => section.MissingCount));
         AssertEqual(
             0,
@@ -4899,6 +4903,62 @@ static void BlueprintSetupSelfCheckPasses()
     AssertEqual(true, source.Contains(".casefold()", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("def _missing_object_targets", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("def _reconcile_applied", StringComparison.Ordinal));
+}
+
+static void VoiceClassificationIgnoresCharacterCodeNoise()
+{
+    const string sound = "/Game/GameActor2D/Misaka/Sound/Other";
+
+    // 失败语音的常见拼法都要认得。以前 token 只有 defeat/lose/failure，
+    // Vo_Fail1 这种识别不出来，会掉进待分配。
+    foreach (var assetName in new[] { "Vo_Defeat1", "Vo_Defeated1", "Vo_Lose1", "Vo_Fail1", "Vo_Lost1" })
+    {
+        AssertEqual(
+            VoiceMaterialKind.Defeat,
+            UnrealBridgeVoiceClassification.Classify(sound, assetName));
+    }
+
+    // ko / sub 这类两三个字母的 token 排在失败语音前面，
+    // 以前做子串匹配会被角色代号整批误伤：代号里带 ko 的角色（Kokona、Nakoruru）
+    // 所有语音都会被判成终结技语音。
+    foreach (var code in new[] { "Kokona", "Nakoruru", "Subaru", "Linkle", "Steam" })
+    {
+        AssertEqual(
+            VoiceMaterialKind.Defeat,
+            UnrealBridgeVoiceClassification.Classify($"/Game/GameActor2D/{code}/Sound/Other", "Vo_Defeat1"));
+    }
+
+    // 真正该命中的短 token 仍要命中
+    AssertEqual(VoiceMaterialKind.Ultimate, UnrealBridgeVoiceClassification.Classify(sound, "Vo_KO_1"));
+    AssertEqual(VoiceMaterialKind.Support, UnrealBridgeVoiceClassification.Classify(sound, "Vo-Sub-1"));
+    AssertEqual(VoiceMaterialKind.SoundEffect, UnrealBridgeVoiceClassification.Classify(sound, "Vo_SE_1"));
+    AssertEqual(VoiceMaterialKind.SoundEffect, UnrealBridgeVoiceClassification.Classify(sound, "Misaka_SoundEffect_1"));
+
+    // 认不出来的仍然进待分配
+    AssertEqual(VoiceMaterialKind.Other, UnrealBridgeVoiceClassification.Classify(sound, "Vo_Unknown_1"));
+}
+
+static void VoiceSpecsMatchBridgeScriptLabels()
+{
+    // 语音分类在 C# 和 Python 两边各有一份表，而且一条漂移校验都没有——
+    // 实际已经漂了（入队语音/编队语音、受击语音/受伤语音）。这里钉住它。
+    var scriptPath = Path.Combine("Tools", "UnrealBridge", "configure_unreal_light_settings.py");
+    var script = File.ReadAllText(scriptPath, Encoding.UTF8);
+    var start = script.IndexOf("VOICE_CATEGORY_LABELS = {", StringComparison.Ordinal);
+    AssertEqual(true, start >= 0);
+    var end = script.IndexOf("}", start, StringComparison.Ordinal);
+    AssertEqual(true, end > start);
+    var body = script[start..end];
+
+    foreach (var spec in VoiceMaterialService.Specs)
+    {
+        var expected = $"\"{spec.Kind}\": \"{spec.DisplayName}\"";
+        if (!body.Contains(expected, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"桥接脚本的语音标签与 VoiceMaterialService.Specs 不一致，缺少或写错：{expected}");
+        }
+    }
 }
 
 static void CorruptMetadataKeepsCharacterVisible()

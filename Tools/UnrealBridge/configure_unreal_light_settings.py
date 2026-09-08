@@ -38,10 +38,13 @@ STATUS_UNCHANGED = 0
 STATUS_PENDING = 1
 STATUS_ERROR = 2
 
+# 必须与 C# 的 VoiceMaterialService.Specs 逐字一致。
+# 回归用例「语音分类表与桥接脚本标签一致」会校验这张表——
+# 以前没有校验，Formation 和 Hurt 两条已经和 C# 漂开了（入队/编队、受击/受伤）。
 VOICE_CATEGORY_LABELS = {
-    "Formation": "入队语音",
+    "Formation": "编队语音",
     "Click": "点击语音",
-    "Hurt": "受击语音",
+    "Hurt": "受伤语音",
     "Death": "死亡语音",
     "Defeat": "失败语音",
     "Victory": "胜利语音",
@@ -51,6 +54,7 @@ VOICE_CATEGORY_LABELS = {
     "Support": "护援技语音",
     "Combo": "连携技语音",
     "Other": "待分配语音",
+    "SoundEffect": "音效",
 }
 
 

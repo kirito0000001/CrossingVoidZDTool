@@ -381,7 +381,12 @@ internal sealed class UnrealBridgeDraftImportService
                     : VoiceMaterialKind.Other;
                 var objectPath = NormalizeObjectPath(item.Asset.ObjectPath);
                 return (
-                    Kind: sequenceKinds.TryGetValue(objectPath, out var sequenceKind) ? sequenceKind : fallbackKind,
+                    // 反推得 Other 时要退回上一层的分类结论，理由同 UnrealProjectSyncService：
+                    // 十九个标准动作里有十个反推不出分类，一律返回 Other。
+                    Kind: sequenceKinds.TryGetValue(objectPath, out var sequenceKind)
+                        && sequenceKind != VoiceMaterialKind.Other
+                        ? sequenceKind
+                        : fallbackKind,
                     Asset: item.Asset,
                     ObjectPath: objectPath);
             })

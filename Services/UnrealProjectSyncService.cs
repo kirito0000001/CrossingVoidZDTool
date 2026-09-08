@@ -2945,7 +2945,13 @@ internal sealed class UnrealProjectSyncService
         return assets
             .Where(asset => asset.AssetClass.Contains("SoundWave", StringComparison.OrdinalIgnoreCase))
             .Select(asset => (
+                // 序列反推只认得九个动作码，标准动作表却有十九个：DefAtk、Defence、
+                // Dodge、Idle、Move 这些一律返回 Other。以前只要反推命中就直接采用，
+                // 于是一条失败语音只要被其中任何一个序列的 PlaySound 引用过，
+                // 就被钉死成待分配——文件名里明写着 Defeat 也没用。
+                // 反推给不出结论时要退回按名字识别。
                 Kind: sequenceKinds.TryGetValue(NormalizeObjectPath(asset.ObjectPath), out var sequenceKind)
+                    && sequenceKind != VoiceMaterialKind.Other
                     ? sequenceKind
                     : UnrealBridgeVoiceClassification.Classify(asset.PackagePath, asset.AssetName),
                 Asset: asset))

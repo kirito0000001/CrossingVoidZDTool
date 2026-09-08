@@ -18,9 +18,19 @@ internal static class UnrealBridgePublishSupportPolicy
 
         if (change.Kind == UnrealBridgeChangeKind.DeleteCandidate)
         {
-            if (change.Module != UnrealBridgeModule.SequenceFrames)
+            // 语音以前不许删，于是 Unreal 侧多出来的语音只能一直挂在差异列表里，
+            // 第三步的差异永远归不了零。两侧素材本来就该一一对应，放开。
+            // 图片（BaseMaterials）暂时仍不放开：它可能被工具箱不知道的资产引用着，
+            // 误删的代价比语音高，等确认后再单独放。
+            if (change.Module is not (UnrealBridgeModule.SequenceFrames or UnrealBridgeModule.Voices))
             {
                 return false;
+            }
+
+            if (change.Module == UnrealBridgeModule.Voices)
+            {
+                // 得知道删哪一个才敢删
+                return !string.IsNullOrWhiteSpace(change.UnrealItem?.SourceObjectPath);
             }
 
             // 空白帧在 Unreal 里没有对应资产（Flipbook 里 sprite 为 null 的关键帧），
