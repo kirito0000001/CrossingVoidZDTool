@@ -35,7 +35,7 @@ internal sealed class CharacterToolboxDataService
                 return new CharacterToolboxData();
             }
 
-            return ReadToolboxData(path);
+            return ReadToolboxData(path, character.FolderPath);
         }
     }
 
@@ -57,10 +57,13 @@ internal sealed class CharacterToolboxDataService
         lock (GetFileLock(path))
         {
             Directory.CreateDirectory(character.ToolFolderPath);
-            var data = File.Exists(path) ? ReadToolboxData(path) : new CharacterToolboxData();
+            var data = File.Exists(path) ? ReadToolboxData(path, character.FolderPath) : new CharacterToolboxData();
             update(data);
             data.UpdatedAt = DateTime.Now;
-            var nextText = JsonSerializer.Serialize(data, ToolboxDataJsonTypeInfo);
+            // 内存里始终是绝对路径，只有落盘这一步换成 $char/ 写法。
+            var nextText = ToolboxPortablePathService.ToPortableJson(
+                JsonSerializer.Serialize(data, ToolboxDataJsonTypeInfo),
+                character.FolderPath);
             var currentText = File.Exists(path) ? File.ReadAllText(path, Encoding.UTF8) : string.Empty;
             if (string.Equals(currentText, nextText, StringComparison.Ordinal))
             {
@@ -83,12 +86,12 @@ internal sealed class CharacterToolboxDataService
         return FileLocks.GetOrAdd(Path.GetFullPath(path), _ => new object());
     }
 
-    private static CharacterToolboxData ReadToolboxData(string path)
+    private static CharacterToolboxData ReadToolboxData(string path, string characterFolder)
     {
         try
         {
             return JsonSerializer.Deserialize(
-                File.ReadAllText(path, Encoding.UTF8),
+                ToolboxPortablePathService.ToAbsoluteJson(File.ReadAllText(path, Encoding.UTF8), characterFolder),
                 AppJsonSerializerContext.Default.CharacterToolboxData) ?? new CharacterToolboxData();
         }
         catch (JsonException ex)

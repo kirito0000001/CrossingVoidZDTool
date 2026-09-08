@@ -127,7 +127,9 @@ internal sealed class UnrealSyncSessionCacheService
             var temporaryPath = path + ".tmp";
             File.WriteAllText(
                 temporaryPath,
-                JsonSerializer.Serialize(cache, AppJsonSerializerContext.Default.UnrealSyncSessionCache),
+                ToolboxPortablePathService.ToPortableJson(
+                    JsonSerializer.Serialize(cache, AppJsonSerializerContext.Default.UnrealSyncSessionCache),
+                    ResolveCharacterFolder(path)),
                 new UTF8Encoding(false));
             File.Move(temporaryPath, path, true);
             return true;
@@ -253,7 +255,7 @@ internal sealed class UnrealSyncSessionCacheService
             }
 
             var cache = JsonSerializer.Deserialize(
-                File.ReadAllText(path, Encoding.UTF8),
+                ToolboxPortablePathService.ToAbsoluteJson(File.ReadAllText(path, Encoding.UTF8), ResolveCharacterFolder(path)),
                 AppJsonSerializerContext.Default.UnrealSyncSessionCache);
             if (cache is null || cache.ProtocolVersion != SupportedProtocolVersion ||
                 cache.PublishChanges is null || cache.SelectedStableIds is null ||
@@ -272,6 +274,22 @@ internal sealed class UnrealSyncSessionCacheService
         {
             return new(UnrealSyncSessionCacheLoadStatus.Invalid, ErrorMessage: $"同步进度文件读取失败：{path}\n{ex.Message}");
         }
+    }
+
+    /// <summary>
+    /// 缓存落在 <c>&lt;角色&gt;/tool/UnrealSync/</c> 下，所以角色文件夹能从路径本身倒推出来。
+    /// 老的 AppData 缓存不在这个结构里，返回 null 表示不做路径改写。
+    /// </summary>
+    private static string? ResolveCharacterFolder(string path)
+    {
+        var folder = Path.GetDirectoryName(Path.GetFullPath(path));
+        if (folder is null || !string.Equals(Path.GetFileName(folder), FolderName, StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var toolFolder = Path.GetDirectoryName(folder);
+        return toolFolder is null ? null : Path.GetDirectoryName(toolFolder);
     }
 
     private string GetStepPath(CharacterCard? character, string projectPath, string characterCode, int workflowStep)

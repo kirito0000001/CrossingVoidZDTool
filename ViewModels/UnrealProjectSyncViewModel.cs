@@ -110,6 +110,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         SharedMaterialSources.Add(new(UnrealSyncSourceKind.SharedMaterial, "活动图片", "项目共享素材", "活动图片 EventImage", IsAvailable: false));
         SharedMaterialSources.Add(new(UnrealSyncSourceKind.SharedMaterial, "其他项目素材", "项目共享素材", "其他项目素材 Shared", IsAvailable: false));
         SelectedPublishStage = PublishStages[0];
+        AttachWorkspaceWatchers();
     }
 
     public ObservableCollection<UnrealProjectSyncCheckItem> CheckItems { get; } = [];

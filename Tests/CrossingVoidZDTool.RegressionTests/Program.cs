@@ -20,6 +20,11 @@ if (args.Length > 0 && string.Equals(args[0], "smoke", StringComparison.OrdinalI
     return RunUnrealSyncSmoke(args.Skip(1).ToArray());
 }
 
+if (args.Length > 0 && string.Equals(args[0], "migrate-paths", StringComparison.OrdinalIgnoreCase))
+{
+    return RunPortablePathMigration(args.Skip(1).ToArray());
+}
+
 var tests = new (string Name, Action Run)[]
 {
     ("BattleAvatar 固定槽位映射", BattleAvatarSlotsMapToFixedNames),
@@ -103,7 +108,13 @@ var tests = new (string Name, Action Run)[]
     ("同步进度按角色和步骤存进角色目录", WorkflowStepCacheLivesInCharacterFolder),
     ("已加载的步骤不再重复触发虚幻检测", WorkflowStepSkipsDetectionWhenAlreadyLoaded),
     ("切换角色后各自的步骤与结果互不串台", WorkflowStateIsIsolatedPerCharacter),
+    ("角色目录里的路径落盘时不带盘符", CharacterOwnedPathsArePortableOnDisk),
+    ("角色目录搬家后图标路径依然指得到", PortablePathsSurviveCharacterFolderMove),
+    ("旧机器留下的图标路径会被修回来", StaleIconPathIsRepairedOnRead),
+    ("同步缓存只收编工具箱侧路径", SyncCacheKeepsUnrealSidePathsAbsolute),
     ("中栏任何状态都有东西显示", WorkspaceNeverShowsBlankPanel),
+    ("中栏分组与条目始终一致", WorkspaceGroupsStayConsistentWithItems),
+    ("直接改列表中栏也会跟着刷新", WorkspaceReactsToRawCollectionChanges),
     ("每一步的进度都按阶段分段", WorkflowProgressIsPhasedForEveryStep),
     ("在线执行不可用时退回离线", RemoteExecutionFallsBackToOffline),
     ("依次检测只检测不写入", DetectAllStepsNeverWrites),
@@ -4687,6 +4698,173 @@ static void WorkflowProgressIsPhasedForEveryStep()
     AssertEqual(2, CountOccurrences(window, "new Progress<UnrealExportProgressState>("));
 }
 
+static void WorkspaceReactsToRawCollectionChanges()
+{
+    // 中栏空白反复出现的根因是「谁改了数据、谁负责通知」这条约定守不住：
+    // 六步各有若干条清空/填充路径，漏一条面板就停在上一刻的可见性上。
+    // 这里绕开所有 SetXxxResult，直接动集合——中栏必须自己反应过来。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var projectPath = Path.Combine(root, "CrossingVoid.uproject");
+        File.WriteAllText(projectPath, "{}");
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴") with { IsCompleted = true };
+        Directory.CreateDirectory(character.ToolFolderPath);
+
+        var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        viewModel.Load(Path.Combine(root, "UnrealEditor.exe"), projectPath);
+        viewModel.IsEngineToToolbox = false;
+        viewModel.RefreshDraftSources([character]);
+        viewModel.SelectSource(viewModel.CharacterSources.Single());
+
+        // 每一步：先声明这一步已加载（空 -> 无差异），再直接往集合里塞一条。
+        var steps = new (int Step, Action MarkLoaded, Action Add, Func<Visibility> Content)[]
+        {
+            (4,
+                () => viewModel.SetLightConfigurationResult(new UnrealLightConfigurationResult
+                {
+                    Succeeded = true, CharacterCode = character.Code, Items = []
+                }),
+                () => viewModel.LightConfigurationItems.Add(new UnrealLightConfigurationViewItem(
+                    new UnrealLightConfigurationResultItem
+                    {
+                        StableId = "item.icon", GroupName = "Item", DisplayName = "道具图标",
+                        Status = UnrealLightConfigurationStatus.Pending
+                    }, true)),
+                () => viewModel.LightConfigurationWorkspaceVisibility),
+            (6,
+                () => viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+                {
+                    Succeeded = true, CharacterCode = character.Code, Items = []
+                }),
+                () => viewModel.BlueprintSetupItems.Add(new UnrealBlueprintSetupViewItem(
+                    new UnrealBlueprintSetupResultItem
+                    {
+                        StableId = "bp.anti", GroupKey = "onset", GroupName = "对局设置",
+                        DisplayName = "异能角色", Status = UnrealBlueprintSetupStatus.Pending
+                    }, true)),
+                () => viewModel.BlueprintSetupWorkspaceVisibility),
+        };
+
+        foreach (var (step, markLoaded, add, content) in steps)
+        {
+            viewModel.ReturnToWorkflowStep(step);
+            markLoaded();
+
+            // 空列表：占位可见、内容收起——但绝不能两个都收起
+            AssertEqual(UnrealSyncWorkspaceState.NoChanges, viewModel.WorkspaceState);
+            AssertEqual(Visibility.Visible, viewModel.WorkspacePlaceholderVisibility);
+
+            add();
+
+            // 没有任何人显式通知，中栏也得从占位切到内容
+            AssertEqual(UnrealSyncWorkspaceState.HasContent, viewModel.WorkspaceState);
+            AssertEqual(Visibility.Visible, content());
+            AssertEqual(Visibility.Collapsed, viewModel.WorkspacePlaceholderVisibility);
+        }
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void WorkspaceGroupsStayConsistentWithItems()
+{
+    // 中栏渲染的是分组集合，不是条目集合。只要两者失配——有条目但没分组——
+    // 内容面板就会显示成一片空白，而右栏的计数看着一切正常。
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService())
+    {
+        IsEngineToToolbox = false,
+    };
+    viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep);
+
+    // 复刻实际遇到的构成：59 项里 58 项无差异、1 项待写入。
+    var items = new List<UnrealBlueprintSetupResultItem>();
+    for (var index = 0; index < 58; index++)
+    {
+        items.Add(new UnrealBlueprintSetupResultItem
+        {
+            StableId = $"bp.same.{index}",
+            GroupKey = index % 2 == 0 ? "onset" : "sequence",
+            GroupName = index % 2 == 0 ? "对局设置" : "动作序列",
+            DisplayName = $"字段{index}",
+            Status = UnrealBlueprintSetupStatus.Unchanged
+        });
+    }
+    items.Add(new UnrealBlueprintSetupResultItem
+    {
+        StableId = "table.SubSkill.Name",
+        GroupKey = "SubSkill",
+        GroupName = "护援技",
+        DisplayName = "技能名字",
+        Status = UnrealBlueprintSetupStatus.Pending,
+        CurrentValues = ["群体削弱"],
+        TargetValues = [""]
+    });
+
+    viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+    {
+        Succeeded = true,
+        CharacterCode = "Misaka",
+        Items = items
+    });
+
+    // 统计按全部算，中栏只放需要处理的
+    AssertEqual(58, viewModel.BlueprintSetupUnchangedCount);
+    AssertEqual(1, viewModel.BlueprintSetupPendingCount);
+    AssertEqual(1, viewModel.BlueprintSetupItems.Count);
+
+    // 关键：有条目就必须有分组，且分组里的条目数对得上
+    AssertEqual(UnrealSyncWorkspaceState.HasContent, viewModel.WorkspaceState);
+    AssertEqual(Visibility.Visible, viewModel.BlueprintSetupWorkspaceVisibility);
+    AssertEqual(Visibility.Collapsed, viewModel.WorkspacePlaceholderVisibility);
+    AssertEqual(1, viewModel.BlueprintSetupGroups.Count);
+    AssertEqual(
+        viewModel.BlueprintSetupItems.Count,
+        viewModel.BlueprintSetupGroups.Sum(group => group.Items.Count));
+    AssertEqual("护援技", viewModel.BlueprintSetupGroups[0].GroupName);
+
+    // 内容态时，第三、五步那棵树的面板必须让位，否则它会盖在上面显示成空白
+    AssertEqual(Visibility.Collapsed, viewModel.SelectionContentVisibility);
+    AssertEqual(Visibility.Collapsed, viewModel.FoundationWorkspaceVisibility);
+    AssertEqual(Visibility.Collapsed, viewModel.LightConfigurationWorkspaceVisibility);
+
+    // 复刻真实的收尾顺序：先写入结果（操作还没结束），再结束操作。
+    // 中间那一刻是忙碌态，内容面板会收起；结束操作后必须重新亮出来，
+    // 否则占位和内容双双隐藏，中栏一片空白，而右栏计数看着一切正常。
+    var changed = new List<string>();
+    viewModel.PropertyChanged += (_, e) => changed.Add(e.PropertyName ?? string.Empty);
+    viewModel.SetWorkflowOperationRunning(true);
+    AssertEqual(UnrealSyncWorkspaceState.Busy, viewModel.WorkspaceState);
+    AssertEqual(Visibility.Collapsed, viewModel.BlueprintSetupWorkspaceVisibility);
+    viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+    {
+        Succeeded = true,
+        CharacterCode = "Misaka",
+        Items = items
+    });
+    changed.Clear();
+    viewModel.SetWorkflowOperationRunning(false);
+    AssertEqual(UnrealSyncWorkspaceState.HasContent, viewModel.WorkspaceState);
+    AssertEqual(Visibility.Visible, viewModel.BlueprintSetupWorkspaceVisibility);
+    // 光是「算出来对」不够，界面靠通知才会重新读——必须真的通知到。
+    AssertEqual(true, changed.Contains(nameof(viewModel.BlueprintSetupWorkspaceVisibility)));
+    AssertEqual(true, changed.Contains(nameof(viewModel.WorkspacePlaceholderVisibility)));
+
+    // 再来一次（模拟「进这一步先恢复缓存、检测完再刷一次」），分组不能掉队
+    viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+    {
+        Succeeded = true,
+        CharacterCode = "Misaka",
+        Items = items
+    });
+    AssertEqual(1, viewModel.BlueprintSetupGroups.Count);
+    AssertEqual(
+        viewModel.BlueprintSetupItems.Count,
+        viewModel.BlueprintSetupGroups.Sum(group => group.Items.Count));
+}
+
 static void WorkspaceNeverShowsBlankPanel()
 {
     // 中栏以前由九个各自独立的可见性绑定拼出来，「已加载」和「有内容」
@@ -4778,6 +4956,178 @@ static void WorkspaceNeverShowsBlankPanel()
         {
             AssertEqual(false, string.IsNullOrWhiteSpace(viewModel.WorkspacePlaceholderTitle));
         }
+    }
+}
+
+static string SeedIconFile(CharacterCard character, params string[] segments)
+{
+    var path = Path.Combine([character.FolderPath, .. segments]);
+    Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+    File.WriteAllBytes(path, [0x89, 0x50, 0x4E, 0x47]);
+    return path;
+}
+
+static void CharacterOwnedPathsArePortableOnDisk()
+{
+    // 之前 ZDToolboxData.json 里存的是 G:\WinUI\...\Misaka\... 这种整机绝对路径，
+    // 换台机器、挪一次工作区就全指丢了。落盘必须是相对角色目录的写法，
+    // 但内存里仍要是绝对路径，界面加载图片才不用到处拼路径。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var iconPath = SeedIconFile(character, "AssetMaterial", "SkillIcon", "Misaka-1.png");
+
+        var service = new CharacterToolboxDataService();
+        service.Update(character, data =>
+        {
+            data.Skills = new CharacterSkillsData();
+            data.Buffs = new BuffData();
+            data.Skills.FirstSkill.Add(new CharacterSkillEntry { TrueName = "超电磁炮", IconPath = iconPath });
+            data.Buffs.Buffs.Add(new BuffEntry { Name = "带电", IconPath = iconPath });
+        });
+
+        var text = File.ReadAllText(Path.Combine(character.ToolFolderPath, "ZDToolboxData.json"));
+        AssertEqual(true, text.Contains("$char/AssetMaterial/SkillIcon/Misaka-1.png", StringComparison.Ordinal));
+        // 盘符一个都不许留下
+        AssertEqual(false, text.Contains(root, StringComparison.OrdinalIgnoreCase));
+
+        // 读回来必须还原成能直接喂给图片控件的绝对路径
+        var reloaded = service.Load(character);
+        AssertEqual(iconPath, reloaded.Skills.FirstSkill[0].IconPath);
+        AssertEqual(iconPath, reloaded.Buffs.Buffs[0].IconPath);
+        AssertEqual(true, File.Exists(reloaded.Buffs.Buffs[0].IconPath));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void PortablePathsSurviveCharacterFolderMove()
+{
+    // 相对基准取的是角色文件夹本身而不是工作区根，所以角色从 Draft 挪到
+    // Completed（或者整个工作区换个盘）之后不用改写任何一条路径。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var draftFolder = Path.Combine(root, "Draft", "Misaka");
+        var character = CreateCharacter(draftFolder, "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var iconPath = SeedIconFile(character, "AssetMaterial", "SkillIcon", "Misaka-1.png");
+
+        var service = new CharacterToolboxDataService();
+        service.Update(character, data =>
+        {
+            data.Skills = new CharacterSkillsData();
+            data.Skills.FirstSkill.Add(new CharacterSkillEntry { TrueName = "超电磁炮", IconPath = iconPath });
+        });
+
+        var completedFolder = Path.Combine(root, "Completed", "Misaka");
+        Directory.CreateDirectory(Path.GetDirectoryName(completedFolder)!);
+        Directory.Move(draftFolder, completedFolder);
+
+        var moved = CreateCharacter(completedFolder, "Misaka", "御坂美琴") with { IsCompleted = true };
+        var reloaded = service.Load(moved);
+        AssertEqual(
+            Path.Combine(completedFolder, "AssetMaterial", "SkillIcon", "Misaka-1.png"),
+            reloaded.Skills.FirstSkill[0].IconPath);
+        AssertEqual(true, File.Exists(reloaded.Skills.FirstSkill[0].IconPath));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void StaleIconPathIsRepairedOnRead()
+{
+    // 真实数据里遗留的坏账：图标路径还写着别的机器上的位置。
+    // 文件其实就在角色目录里，按角色名之后的那一段拼回去就能找到。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(Path.Combine(root, "SAO_kirito"), "SAO_kirito", "桐人[SAO]");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var iconPath = SeedIconFile(character, "BUFF", "SAO_Kirito_BUFF-1", "Icon.png");
+
+        var stale = @"D:\NewData\CrossingVoidZDProject\SAO_kirito\BUFF\SAO_Kirito_BUFF-1\Icon.png";
+        var missing = @"D:\NewData\CrossingVoidZDProject\SAO_kirito\BUFF\没了\没了.png";
+        var json = JsonSerializer.Serialize(new Dictionary<string, string>
+        {
+            ["IconPath"] = stale,
+            ["ItemIconPath"] = missing,
+            // 图标以外的字段不做这种猜测，虚幻那边的路径本来就该指到工程里去
+            ["AssetPath"] = stale,
+        });
+
+        var restored = ToolboxPortablePathService.ToAbsoluteJson(json, character.FolderPath);
+        using var document = JsonDocument.Parse(restored);
+        AssertEqual(iconPath, document.RootElement.GetProperty("IconPath").GetString());
+        // 真找不到的就老实保留原值，不许凭空编一个出来
+        AssertEqual(missing, document.RootElement.GetProperty("ItemIconPath").GetString());
+        AssertEqual(stale, document.RootElement.GetProperty("AssetPath").GetString());
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SyncCacheKeepsUnrealSidePathsAbsolute()
+{
+    // 分步缓存里两侧路径同名都叫 AssetPath：工具箱那侧要收编成相对，
+    // 虚幻那侧（引擎、工程、导出中间目录）在工作区外面，必须保持绝对。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var projectPath = Path.Combine(root, "Unreal", "CrossingVoid.uproject");
+        Directory.CreateDirectory(Path.GetDirectoryName(projectPath)!);
+        File.WriteAllText(projectPath, "{}");
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var toolboxAsset = SeedIconFile(character, "ZDMaterial", "Click", "Frame0.png");
+        var unrealAsset = Path.Combine(root, "Unreal", "Intermediate", "ZDToolboxExport", "Frame0.png");
+
+        var service = new UnrealSyncSessionCacheService();
+        var cache = new UnrealSyncSessionCache
+        {
+            ProtocolVersion = 3,
+            ProjectPath = projectPath,
+            EnginePath = Path.Combine(root, "Engine", "UnrealEditor.exe"),
+            SelectedCharacterCode = character.Code,
+            WorkflowStep = 3,
+            PublishChanges =
+            [
+                new UnrealBridgeChange(
+                    "click.0",
+                    UnrealBridgeModule.SequenceFrames,
+                    "Click 第 0 帧",
+                    UnrealBridgeChangeKind.Added,
+                    new UnrealBridgeSnapshotItem("click.0", "click", UnrealBridgeModule.SequenceFrames, "Click 第 0 帧", "hash", "{}", toolboxAsset),
+                    new UnrealBridgeSnapshotItem("click.0", "click", UnrealBridgeModule.SequenceFrames, "Click 第 0 帧", "hash", "{}", unrealAsset),
+                    true)
+            ],
+        };
+        AssertEqual(true, service.Write(character, projectPath, cache));
+
+        var cachePath = Directory.GetFiles(
+            UnrealSyncSessionCacheService.GetCacheFolderPath(character), "sync-*-step3.json").Single();
+        var text = File.ReadAllText(cachePath);
+        AssertEqual(true, text.Contains("$char/ZDMaterial/Click/Frame0.png", StringComparison.Ordinal));
+        AssertEqual(true, text.Contains("Intermediate", StringComparison.Ordinal));
+        AssertEqual(false, text.Contains(character.FolderPath.Replace(@"\", @"\\"), StringComparison.OrdinalIgnoreCase));
+
+        var loaded = service.LoadStep(character, projectPath, character.Code, 3);
+        AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, loaded.Status);
+        AssertEqual(toolboxAsset, loaded.Cache!.PublishChanges[0].ToolboxItem!.AssetPath);
+        AssertEqual(unrealAsset, loaded.Cache.PublishChanges[0].UnrealItem!.AssetPath);
+        AssertEqual(projectPath, loaded.Cache.ProjectPath);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
     }
 }
 
@@ -9187,6 +9537,134 @@ static int RunUnrealSyncSmoke(string[] args)
     return failures == 0 ? 0 : 1;
 }
 
+// ---------------------------------------------------------------------------
+// 一次性迁移：把已有角色数据里的整机绝对路径改写成 $char/ 可移植写法。
+//
+// 新代码读写时会自动做这件事，但已完成的角色得主动过一遍——顺便把
+// SAO_kirito 那种指向旧机器（D:\NewData\...）的死图标路径修回来。
+// 走的是工具箱自己的读写服务，所以落盘格式和平时完全一致，也会照常留备份。
+//
+//     dotnet run -- migrate-paths [工作区]
+// ---------------------------------------------------------------------------
+static int RunPortablePathMigration(string[] args)
+{
+    Console.OutputEncoding = Encoding.UTF8;
+    var settingsPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "CrossingVoidZDTool", "settings.json");
+    string? Setting(string name)
+    {
+        if (!File.Exists(settingsPath)) return null;
+        using var document = JsonDocument.Parse(File.ReadAllText(settingsPath, Encoding.UTF8));
+        return document.RootElement.TryGetProperty(name, out var value) ? value.GetString() : null;
+    }
+
+    var workspace = args.ElementAtOrDefault(0) ?? Setting("ProjectRootPath") ?? string.Empty;
+    Console.WriteLine($"工作区：{workspace}");
+    if (!Directory.Exists(workspace))
+    {
+        Console.WriteLine("工作区路径无效。");
+        return 2;
+    }
+
+    var characters = new CharacterWorkspaceService().LoadCharacters(workspace)
+        .OrderBy(item => item.IsCompleted ? 0 : 1)
+        .ThenBy(item => item.Code, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+    var dataService = new CharacterToolboxDataService();
+    var rewritten = 0;
+    var repaired = 0;
+
+    foreach (var character in characters)
+    {
+        var files = new List<string>();
+        var toolboxDataPath = Path.Combine(character.ToolFolderPath, "ZDToolboxData.json");
+        if (File.Exists(toolboxDataPath))
+        {
+            files.Add(toolboxDataPath);
+        }
+
+        var cacheFolder = UnrealSyncSessionCacheService.GetCacheFolderPath(character);
+        if (Directory.Exists(cacheFolder))
+        {
+            files.AddRange(Directory.GetFiles(cacheFolder, "sync-*.json"));
+        }
+
+        var before = files.ToDictionary(path => path, File.ReadAllText, StringComparer.OrdinalIgnoreCase);
+
+        // 角色数据：读进来（相对->绝对 + 修死路径）再原样写回去（绝对->相对）。
+        if (File.Exists(toolboxDataPath))
+        {
+            dataService.Update(character, _ => { });
+        }
+
+        // 分步缓存：同样过一遍读写。缓存本身是可再生的，读坏了就跳过。
+        var cacheService = new UnrealSyncSessionCacheService();
+        foreach (var cachePath in files.Where(path => !string.Equals(path, toolboxDataPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            try
+            {
+                var raw = File.ReadAllText(cachePath, Encoding.UTF8);
+                var folder = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetFullPath(cachePath))));
+                var portable = ToolboxPortablePathService.ToPortableJson(
+                    ToolboxPortablePathService.ToAbsoluteJson(raw, folder), folder);
+                if (!string.Equals(raw, portable, StringComparison.Ordinal))
+                {
+                    File.WriteAllText(cachePath, portable, new UTF8Encoding(false));
+                }
+            }
+            catch (Exception ex) when (ex is IOException or JsonException or UnauthorizedAccessException)
+            {
+                Console.WriteLine($"  跳过 {Path.GetFileName(cachePath)}：{ex.Message}");
+            }
+        }
+
+        var touched = new List<string>();
+        foreach (var (path, text) in before)
+        {
+            if (!File.Exists(path)) continue;
+            var after = File.ReadAllText(path);
+            if (string.Equals(text, after, StringComparison.Ordinal)) continue;
+
+            var wasAbsolute = CountAbsolutePaths(text);
+            var nowAbsolute = CountAbsolutePaths(after);
+            touched.Add($"{Path.GetFileName(path)}（绝对路径 {wasAbsolute} -> {nowAbsolute}）");
+            rewritten++;
+            repaired += Math.Max(0, wasAbsolute - nowAbsolute);
+        }
+
+        if (touched.Count > 0)
+        {
+            Console.WriteLine($"{(character.IsCompleted ? "已完成" : "草稿  ")} {character.Code}");
+            foreach (var line in touched)
+            {
+                Console.WriteLine($"  {line}");
+            }
+        }
+    }
+
+    Console.WriteLine();
+    Console.WriteLine($"共改写 {rewritten} 个文件，收编 {repaired} 条绝对路径。");
+    return 0;
+
+    static int CountAbsolutePaths(string json)
+    {
+        var count = 0;
+        for (var i = 0; i + 2 < json.Length; i++)
+        {
+            // JSON 里的 "C:\..." 转义后是 C:\\ 两个反斜杠；网络路径同理。
+            if (char.IsLetter(json[i]) && json[i + 1] == ':' && json[i + 2] == '\\')
+            {
+                count++;
+            }
+        }
+
+        return count;
+    }
+}
+
+
+
 sealed class SingleThreadTestSynchronizationContext : SynchronizationContext, IDisposable
 {
     private readonly System.Collections.Concurrent.BlockingCollection<(SendOrPostCallback Callback, object? State)> _queue = [];
@@ -9216,3 +9694,4 @@ sealed class SingleThreadTestSynchronizationContext : SynchronizationContext, ID
         _queue.Dispose();
     }
 }
+

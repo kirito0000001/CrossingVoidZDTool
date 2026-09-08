@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Specialized;
 using System.Linq;
 using Microsoft.UI.Xaml;
 
@@ -14,6 +15,52 @@ namespace CrossingVoidZDTool.ViewModels;
 internal sealed partial class UnrealProjectSyncViewModel
 {
     private string _workspaceFailure = string.Empty;
+    private UnrealSyncWorkspaceState? _lastNotifiedWorkspaceState;
+
+    /// <summary>
+    /// 让中栏自己盯着它依赖的数据，而不是指望每个改数据的地方都记得通知。
+    ///
+    /// 中栏空白反复出现就是因为这个：状态由六步的集合和几个标志一起算出来，
+    /// 只要有一条改数据的路径忘了通知，面板就停在上一刻的可见性上——
+    /// 占位和内容同时收起，中栏一片空白。挂上监听之后，
+    /// 以后再多加一步、多一条清空路径，都不用记得补通知。
+    /// </summary>
+    private void AttachWorkspaceWatchers()
+    {
+        foreach (var collection in new INotifyCollectionChanged[]
+                 {
+                     FoundationChecks,
+                     NormalizationItems,
+                     SelectionTreeRoots,
+                     LightConfigurationItems,
+                     BlueprintSetupItems,
+                 })
+        {
+            collection.CollectionChanged += (_, _) => NotifyWorkspaceStateIfChanged();
+        }
+
+        PropertyChanged += (_, e) =>
+        {
+            // 只认真正会改变中栏状态的那几个输入，免得和下面的通知互相触发。
+            if (e.PropertyName is nameof(IsEngineToToolbox)
+                or nameof(WorkflowStep)
+                or nameof(SelectedSource))
+            {
+                NotifyWorkspaceStateIfChanged();
+            }
+        };
+    }
+
+    /// <summary>状态真的变了才惊动界面，批量填充列表时不至于刷成百上千次。</summary>
+    private void NotifyWorkspaceStateIfChanged()
+    {
+        if (_lastNotifiedWorkspaceState == WorkspaceState)
+        {
+            return;
+        }
+
+        NotifyWorkspaceStateChanged();
+    }
 
     /// <summary>当前步骤的中栏状态。</summary>
     public UnrealSyncWorkspaceState WorkspaceState
@@ -156,11 +203,24 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     public void NotifyWorkspaceStateChanged()
     {
+        _lastNotifiedWorkspaceState = WorkspaceState;
         OnPropertyChanged(nameof(WorkspaceState));
         OnPropertyChanged(nameof(WorkflowStepName));
         OnPropertyChanged(nameof(WorkspaceContentVisibility));
         OnPropertyChanged(nameof(WorkspacePlaceholderVisibility));
         OnPropertyChanged(nameof(WorkspaceBusyVisibility));
+        // 各步自己的内容面板现在也由 WorkspaceState 决定显不显示，必须一起通知。
+        //
+        // 漏掉它们会漏出一个中栏全白的状态：检测结束时的顺序是
+        // 「先写入结果（此时操作还没结束 -> 忙碌态 -> 内容面板收起）」，
+        // 再「结束操作 -> 变成内容态 -> 占位面板收起」。如果这一步没有重新
+        // 通知内容面板，它就停在忙碌态那一刻的 Collapsed 上——占位和内容
+        // 双双隐藏，中栏一片空白，而右栏的计数看着一切正常。
+        OnPropertyChanged(nameof(FoundationWorkspaceVisibility));
+        OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
+        OnPropertyChanged(nameof(BlueprintSetupWorkspaceVisibility));
+        OnPropertyChanged(nameof(SelectionContentVisibility));
+        OnPropertyChanged(nameof(IsNormalizationWorkspace));
         OnPropertyChanged(nameof(WorkspacePlaceholderGlyph));
         OnPropertyChanged(nameof(WorkspacePlaceholderTitle));
         OnPropertyChanged(nameof(WorkspacePlaceholderDescription));
