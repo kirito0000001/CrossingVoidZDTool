@@ -1,0 +1,173 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using CrossingVoidZDTool.Services;
+using CrossingVoidZDTool.ViewModels;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Markup;
+using Microsoft.UI.Xaml.Input;
+using Windows.Storage.Pickers;
+using WinRT.Interop;
+
+namespace CrossingVoidZDTool
+{
+    /// <summary>
+    /// 六步流程的公共骨架：上一步、下一步、重新加载，以及唯一的进入口。
+    /// 各步自己的检测实现在对应的分部文件里。
+    /// </summary>
+    public sealed partial class MainWindow
+    {
+        private async void UnrealSyncPreviousStepButton_Click(object sender, RoutedEventArgs e)
+        {
+            LogUserOperation("同步流程：上一步");
+            var sync = _applicationViewModel.UnrealProjectSync;
+            // 回退也走同一个进入口：有缓存就直接显示，没有才检测。
+            // 之前退回去只是改了步号，落到一个空面板上，还得再手动点一次重新加载。
+            await EnterWorkflowStepAsync(
+                sync,
+                Math.Max(UnrealSyncWorkflow.MinStep, sync.WorkflowStep - 1));
+        }
+
+        private async void UnrealSyncNextStepButton_Click(object sender, RoutedEventArgs e)
+        {
+            LogUserOperation("同步流程：下一步");
+            var sync = _applicationViewModel.UnrealProjectSync;
+            var step = sync.WorkflowStep;
+            if (step >= UnrealSyncWorkflow.MaxStep)
+            {
+                ShowFloatingTip(InfoBarSeverity.Informational, "已经是最后一步", "蓝图置入完成后本次同步就结束了。");
+                return;
+            }
+
+            if (!TryLeaveWorkflowStep(sync, step))
+            {
+                return;
+            }
+
+            // 第三步确认没有待同步内容后，要把「同步结果」面板收好再走，
+            // 否则第四步会带着第三步的操作提示。这里不能再触发一次素材同步事件，
+            // 那会重复执行同步前检测和同步操作。
+            if (step == 3)
+            {
+                sync.CompletePublishOperation(0, 0);
+            }
+
+            await EnterWorkflowStepAsync(sync, step + 1);
+        }
+
+        /// <summary>
+        /// 当前步骤是否满足离开条件；不满足时给出这一步自己的提示。
+        /// 只做判断，不改任何状态。
+        /// </summary>
+        private bool TryLeaveWorkflowStep(UnrealProjectSyncViewModel sync, int step)
+        {
+            switch (step)
+            {
+                case 1 when !sync.CanAdvanceWorkflow:
+                    ShowFloatingTip(InfoBarSeverity.Informational, "第一步尚未完成", "请先选择角色，并完成底层检测。");
+                    return false;
+                case 2 when !sync.IsNormalizationStepLoaded:
+                    ShowFloatingTip(InfoBarSeverity.Informational, "规整素材尚未加载完成", "请等待当前加载完成，或点击“重新加载规整素材”。");
+                    return false;
+                case 2 when sync.NormalizationItems.Any(item => !item.IsResolved):
+                    ShowFloatingTip(
+                        InfoBarSeverity.Informational,
+                        "第二步尚未完成",
+                        $"还有 {sync.NormalizationItems.Count(item => !item.IsResolved)} 项 Unreal 素材没有选择处理方式。");
+                    return false;
+                case 3 when !sync.HasNoPublishChanges:
+                    ShowFloatingTip(
+                        InfoBarSeverity.Informational,
+                        "第三步尚未完成",
+                        "请先同步已勾选素材；确认没有待同步内容后，才能进入基础配置。");
+                    return false;
+                case 4 when !sync.CanAdvanceWorkflow:
+                    ShowFloatingTip(InfoBarSeverity.Informational, "第四步尚未完成", "请先完成基础配置。");
+                    return false;
+                case 5 when !sync.CanAdvanceWorkflow:
+                    ShowFloatingTip(
+                        InfoBarSeverity.Informational,
+                        "第五步尚未完成",
+                        "请先同步已勾选的序列；确认没有待同步内容后，才能进入蓝图置入。");
+                    return false;
+                default:
+                    return true;
+            }
+        }
+
+        /// <summary>
+        /// 进入某一步：先落步，再按需检测。
+        ///
+        /// 两件事必须分开。先落步是按钮的本职——检测失败、被别的操作占用、
+        /// 或者干脆不检测，都不该把人卡在上一步。按需是指这一步已经有数据
+        /// （内存里的，或刚从该步缓存恢复的）时就不再跑虚幻：六步来回切，
+        /// 每次都重检测纯粹是干等，离线一次就是十几秒。
+        /// </summary>
+        private async Task EnterWorkflowStepAsync(
+            UnrealProjectSyncViewModel sync,
+            int step,
+            bool forceReload = false)
+        {
+            sync.ReturnToWorkflowStep(step);
+            if (!forceReload && sync.IsWorkflowStepLoaded(step))
+            {
+                AppendLog(LogKind.Info, $"[Workflow] step={step} 复用本步缓存，未重新检测 Unreal。");
+                return;
+            }
+
+            await RunWorkflowStepDetectionAsync(sync, step);
+        }
+
+        /// <summary>跑某一步自己的检测。每一步的范围不同，但入口只有这一个。</summary>
+        private async Task RunWorkflowStepDetectionAsync(UnrealProjectSyncViewModel sync, int step)
+        {
+            var characterCode = sync.SelectedSource?.DraftCharacter?.Code;
+            if (string.IsNullOrWhiteSpace(characterCode))
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
+                return;
+            }
+
+            switch (step)
+            {
+                case 1:
+                    sync.RefreshFoundationChecks(characterCode);
+                    ShowFloatingTip(InfoBarSeverity.Informational, "底层检测已重新加载", sync.FoundationSummaryText);
+                    break;
+                case 2:
+                    await ReloadUnrealNormalizationStepAsync(sync);
+                    break;
+                case 3:
+                case 5:
+                    // 第三步和第五步走同一条差异检测，只是导出范围和默认勾选不同。
+                    _workflowStepAfterPublishDetection = step;
+                    DetectUnrealPublishChangesButton_Click(this, new RoutedEventArgs());
+                    break;
+                case 4:
+                    await ReloadUnrealLightConfigurationStepAsync(sync);
+                    break;
+                case 6:
+                    await ReloadUnrealBlueprintSetupStepAsync(sync);
+                    break;
+            }
+        }
+
+        private async void ReloadUnrealWorkflowStepButton_Click(object sender, RoutedEventArgs e)
+        {
+            var sync = _applicationViewModel.UnrealProjectSync;
+            if (string.IsNullOrWhiteSpace(sync.SelectedSource?.DraftCharacter?.Code))
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
+                return;
+            }
+
+            // 「重新加载」是用户明确要求重查，无论本步有没有缓存都要真跑一次。
+            LogUserOperation($"同步流程：重新加载第 {sync.WorkflowStep} 步");
+            await EnterWorkflowStepAsync(sync, sync.WorkflowStep, forceReload: true);
+        }
+    }
+}

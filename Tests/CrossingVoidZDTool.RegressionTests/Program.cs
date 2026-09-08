@@ -3848,7 +3848,7 @@ static void UnrealBridgeChangesDoNotSelectByDefault()
 static void UnrealSyncCharacterSelectorUsesSummaryAndFlyoutList()
 {
     var document = XDocument.Load(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
-    var codeText = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.UnrealProjectSync.cs"));
+    var codeText = ReadUnrealSyncWindowSource();
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
     var summary = document.Descendants().Single(element =>
         string.Equals(
@@ -4015,7 +4015,7 @@ static void UnrealProjectCharacterReadsChineseNameFromItemAsset()
 static void UnrealProjectCharacterRefreshUsesOfflineItemScan()
 {
     var service = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "Services", "UnrealProjectSyncService.cs"));
-    var window = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.UnrealProjectSync.cs"));
+    var window = ReadUnrealSyncWindowSource();
 
     AssertEqual(true, service.Contains("ReadCharacterItemDisplayNames", StringComparison.Ordinal));
     AssertEqual(true, window.Contains("_applicationViewModel.UnrealProjectSync.Detect();", StringComparison.Ordinal));
@@ -4573,8 +4573,7 @@ static void WorkflowStepIsNotClampedBelowLastStep()
 
     // 「进入某一步」的本职是落步，检测只是顺带；两件事不能绑死，
     // 否则检测失败或被占用就会把人卡在上一步。
-    var window = File.ReadAllText(Path.Combine(
-        Directory.GetCurrentDirectory(), "MainWindow.UnrealProjectSync.cs"), Encoding.UTF8);
+    var window = ReadUnrealSyncWindowSource();
     var navigate = window.IndexOf("sync.ReturnToWorkflowStep(step);", StringComparison.Ordinal);
     var detect = window.IndexOf("await RunWorkflowStepDetectionAsync(sync, step);", StringComparison.Ordinal);
     AssertEqual(true, navigate > 0 && detect > navigate);
@@ -4833,8 +4832,7 @@ static void BlueprintSetupWritesRowsInsteadOfRefillingTable()
 
     // 扫描和写入必须共用同一份载荷，只差一个 Mode。分成两套算法的话，
     // 界面报「无差异」而写入却改了东西这种事迟早会发生。
-    var window = File.ReadAllText(Path.Combine(
-        Directory.GetCurrentDirectory(), "MainWindow.UnrealProjectSync.cs"), Encoding.UTF8);
+    var window = ReadUnrealSyncWindowSource();
     AssertEqual(true, window.Contains("request.Mode = apply ? \"Apply\" : \"Scan\";"));
     // 扫描和写入都只经这一个执行方法，载荷自然是同一份。
     AssertEqual(1, CountOccurrences(window, "private async Task<UnrealBlueprintSetupResult> ExecuteUnrealBlueprintSetupAsync("));
@@ -7089,6 +7087,25 @@ static int CountOccurrences(string source, string value)
     return count;
 }
 
+/// <summary>
+/// 读同步台在 MainWindow 上的全部分部文件。
+///
+/// 按文件名读单个文件的写法太脆：这套代码按步骤拆过一次，
+/// 一拆所有源码断言就一起红。这里按前缀全收，之后再拆也不受影响。
+/// </summary>
+static string ReadUnrealSyncWindowSource()
+{
+    var files = Directory.GetFiles(Directory.GetCurrentDirectory(), "MainWindow.UnrealSync*.cs")
+        .OrderBy(path => path, StringComparer.Ordinal)
+        .ToArray();
+    if (files.Length == 0)
+    {
+        throw new FileNotFoundException("未找到同步台的 MainWindow 分部文件。");
+    }
+
+    return string.Join(Environment.NewLine, files.Select(path => File.ReadAllText(path, Encoding.UTF8)));
+}
+
 static void AssertEqual<T>(T expected, T actual)
 {
     if (!Equals(expected, actual))
@@ -8233,8 +8250,7 @@ static void PostSyncExportRunsInTheSameEditorSession()
         StringComparison.OrdinalIgnoreCase));
 
     // 同会话导出失败时脚本只记日志不抛异常，所以必须靠清单写入时间判断能否跳过。
-    var host = File.ReadAllText(Path.Combine(
-        Directory.GetCurrentDirectory(), "MainWindow.UnrealProjectSync.cs"), Encoding.UTF8);
+    var host = ReadUnrealSyncWindowSource();
     AssertEqual(true, host.Contains("TrySkipRescanExport"));
     AssertEqual(true, host.Contains("LastWriteTimeUtc"));
 }
@@ -8323,8 +8339,7 @@ static void BlankFrameDeletionIsExecutable()
     AssertEqual(true, syncScript2.Contains("'blueprintFormSlotIndex'"));
 
     // 中止同步时必须在日志里留下原因，否则事后完全查不出为什么没跑。
-    var host = File.ReadAllText(Path.Combine(
-        Directory.GetCurrentDirectory(), "MainWindow.UnrealProjectSync.cs"), Encoding.UTF8);
+    var host = ReadUnrealSyncWindowSource();
     foreach (var reason in new[]
              {
                  "reason=no-detection", "reason=selection-lost", "reason=unsupported",
