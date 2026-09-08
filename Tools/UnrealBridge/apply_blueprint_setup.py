@@ -128,6 +128,45 @@ def _normalize_object_path(value):
     return text
 
 
+# ---------------------------------------------------------------- 对象引用
+
+def _object_key(value):
+    """对象引用用来比较的形式：剥掉类名前缀，再统一大小写。
+
+    Unreal 解析资产路径本来就不区分大小写，
+    /Game/A/Defatk.Defatk 和 /Game/A/DefAtk.DefAtk 指的是同一个资产。
+    以前这里按字符串原样比，于是资产名大小写和规范不一致的角色
+    （老资产叫 Defatk、规范名是 DefAtk）会得到一条永远消不掉的待写入项：
+    写入其实成功了，复查时又因为大小写判成有差异。
+
+    资产改名是第二步规整素材、第五步序列同步的事；
+    第六步只负责把引用写进蓝图，引用指到同一个资产就算到位。
+    """
+    return _normalize_object_path(value).casefold()
+
+
+def _object_values_match(current_values, target_values):
+    if len(current_values) != len(target_values):
+        return False
+    return all(_object_key(a) == _object_key(b)
+               for a, b in zip(current_values, target_values))
+
+
+def _missing_object_targets(target_values):
+    """目标资产在工程里根本不存在时，挑出来。
+
+    写一个加载不到的路径，属性最终会变成 None：写入「成功」了，
+    复查却还是空——界面上就是一条按了也没反应的待写入项。
+    与其假装写得进去，不如直接报错告诉用户先去补素材。
+    """
+    missing = []
+    for value in target_values:
+        path = _normalize_object_path(value)
+        if path and _load_object(path) is None and path not in missing:
+            missing.append(path)
+    return missing
+
+
 # ---------------------------------------------------------------- 结果条目
 
 class Report(object):
@@ -135,18 +174,29 @@ class Report(object):
         self.items = []
 
     def add(self, stable_id, group_key, display_name, target_path, target_field,
-            current_values, target_values, writable=True, error=""):
+            current_values, target_values, writable=True, error="", value_kind="text"):
         """记一条字段对照。
 
         current/target 都用列表表达「按形态并列」；单值字段传单元素列表，
         界面那边按元素个数决定铺成标签还是显示一行。
+
+        value_kind 传 "object" 的字段按资产引用处理：比较不分大小写，
+        并且会先确认目标资产真的存在。
         """
         current_values = [_text(value) for value in current_values]
         target_values = [_text(value) for value in target_values]
+        if not error and writable and value_kind == "object":
+            missing = _missing_object_targets(target_values)
+            if missing:
+                error = "目标资产不存在：" + "、".join(missing) + \
+                        "。请先完成第三步同步素材，把它发布到工程里。"
         if error:
             status = STATUS_ERROR
         elif not writable:
             status = STATUS_UNCHANGED
+        elif value_kind == "object":
+            status = (STATUS_UNCHANGED if _object_values_match(current_values, target_values)
+                      else STATUS_PENDING)
         else:
             status = STATUS_UNCHANGED if current_values == target_values else STATUS_PENDING
         self.items.append({
@@ -372,7 +422,7 @@ def _scan(request, report):
             ("bp.icon2p", "Icon2P", "2P 主战头像", _text(request.get("icon2PObjectPath")))):
         current = _object_path(_safe_property(cdo, property_name))
         report.add(stable_id, "onset", display_name, blueprint_path, property_name,
-                   [current], [target])
+                   [current], [target], value_kind="object")
 
     anti = "true" if request.get("anti") else "false"
     current_anti = "true" if _safe_property(cdo, "Anti") else "false"
@@ -389,7 +439,7 @@ def _scan(request, report):
         current = (current + [""] * len(targets))[:len(targets)]
         report.add("bp.seq." + property_name, "sequence",
                    _text(binding.get("displayName")) or property_name,
-                   blueprint_path, property_name, current, targets)
+                   blueprint_path, property_name, current, targets, value_kind="object")
 
     # --- 组件默认值
     _scan_component(report, cdo, blueprint_path,
@@ -426,7 +476,8 @@ def _scan(request, report):
             ("table.supportImage.sub2p", "Sub2P", "2P 护援头像", _text(request.get("support2PObjectPath")))):
         current = _normalize_object_path(_row_field(support_row, json_key))
         report.add(stable_id, "supportImage", display_name,
-                   SUPPORT_IMAGE_TABLE, json_key, [current], [target])
+                   SUPPORT_IMAGE_TABLE, json_key, [current], [target],
+                   value_kind="object")
 
 
 def _safe_property(obj, property_name):
@@ -445,7 +496,8 @@ def _scan_component(report, cdo, blueprint_path, stable_id, component_name, prop
         return
     current = _object_path(_safe_property(component, property_name))
     report.add(stable_id, "component", display_name, blueprint_path,
-               component_name + "." + property_name, [current], [target])
+               component_name + "." + property_name, [current], [target],
+               value_kind="object")
 
 
 def _table_row_for(table_path, row_name):
@@ -459,7 +511,7 @@ def _scan_blueprint_skill(report, cdo, blueprint_path, slot_key, payload):
         current = (current + [""] * len(targets))[:len(targets)] if targets else current
         report.add("bp.skill.%s.%s" % (slot_key, property_name), slot_key,
                    display_name, blueprint_path, "%s.%s" % (slot_key, property_name),
-                   current, targets)
+                   current, targets, value_kind=value_kind)
 
 
 def _scan_table_skill(report, table_path, row, row_name, slot_key, payload, partner):
@@ -472,7 +524,7 @@ def _scan_table_skill(report, table_path, row, row_name, slot_key, payload, part
         name = display_name if not partner else "%s · %s" % (partner, display_name)
         report.add("table.%s%s.%s" % (slot_key, suffix, json_key), group_key,
                    name, table_path, "%s%s.%s" % (row_name, suffix, json_key),
-                   current, targets)
+                   current, targets, value_kind=value_kind)
 
 
 def _target_skill_values(payload, request_key, value_kind):
@@ -489,7 +541,7 @@ def _target_skill_values(payload, request_key, value_kind):
 
 # ---------------------------------------------------------------- 应用
 
-def _apply(request, selected, applied, saved):
+def _apply(request, selected, applied, saved, failures):
     """按勾选写入。只动被选中的字段，其余原样不碰。"""
     if not selected:
         return
@@ -548,8 +600,10 @@ def _apply(request, selected, applied, saved):
                                for name in report.get("writtenFields", []))
                 touched_blueprint = True
             else:
+                message = _text(report.get("error", "")) or "未知原因"
+                failures["bp.skill.%s" % slot_key] = message
                 unreal.log_error("ZDToolbox blueprint setup skill write failed: {} {}".format(
-                    slot_key, report.get("error", "")))
+                    slot_key, message))
 
     if touched_blueprint and _save_asset(blueprint_path):
         saved.append(blueprint_path)
@@ -681,6 +735,27 @@ def _remember(applied, prefix, fields):
 
 # ---------------------------------------------------------------- 入口
 
+def _reconcile_applied(report, applied, failures):
+    """拿复查结果给写入结论纠偏，顺便把失败原因贴到对应条目上。"""
+    claimed = set(applied)
+    confirmed = []
+    for item in report.items:
+        stable_id = item["stableId"]
+        reason = ""
+        for prefix, message in failures.items():
+            if stable_id == prefix or stable_id.startswith(prefix + "."):
+                reason = message
+                break
+        if item["status"] == STATUS_PENDING and (stable_id in claimed or reason):
+            item["status"] = STATUS_ERROR
+            item["errorMessage"] = (
+                "写入没有生效：" + reason if reason
+                else "写入已执行，复查时这一项仍与目标不一致。")
+        elif stable_id in claimed:
+            confirmed.append(stable_id)
+    return confirmed
+
+
 def _run():
     request_path = os.environ.get("ZD_BLUEPRINT_SETUP_REQUEST", "")
     result_path = os.environ.get("ZD_BLUEPRINT_SETUP_RESULT", "")
@@ -704,14 +779,19 @@ def _run():
     try:
         applied = []
         saved = []
+        failures = {}
         _progress("正在准备蓝图置入...", 2, _text(request.get("characterCode")), True)
         if _text(request.get("mode")).lower() == "apply":
             _apply(request, {_text(value) for value in request.get("selectedStableIds", []) or []},
-                   applied, saved)
+                   applied, saved, failures)
         # 应用之后再扫一遍，界面上直接看到写入后的状态。
         _progress("正在复查写入结果...", 92)
         report = Report()
         _scan(request, report)
+        # 以复查结果为准核对一遍：写入报告说写了、复查却还是有差异的，
+        # 不许再算进「已写入」。否则界面会同时显示「已写入 2 项」和
+        # 「待写入 2 项」，两个数字自相矛盾，用户根本没法判断到底成没成。
+        applied = _reconcile_applied(report, applied, failures)
         result["items"] = report.items
         result["appliedStableIds"] = applied
         result["savedAssets"] = saved
