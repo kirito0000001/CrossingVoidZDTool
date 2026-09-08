@@ -226,12 +226,15 @@ namespace CrossingVoidZDTool
                 band.At(state.Percent),
                 state.Detail,
                 state.IsIndeterminate));
-            return await service.ExecuteAsync(
-                launch.StartInfo,
-                resultPath,
-                GetGlobalProgressCancellationToken(),
-                progressPath,
-                progress);
+            return await RunUnrealTaskWithOfflineFallbackAsync(
+                launch,
+                offlineStartInfo,
+                startInfo => service.ExecuteAsync(
+                    startInfo,
+                    resultPath,
+                    GetGlobalProgressCancellationToken(),
+                    progressPath,
+                    progress));
         }
 
         /// <summary>

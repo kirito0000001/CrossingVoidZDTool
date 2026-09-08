@@ -99,6 +99,8 @@ var tests = new (string Name, Action Run)[]
     ("已加载的步骤不再重复触发虚幻检测", WorkflowStepSkipsDetectionWhenAlreadyLoaded),
     ("中栏任何状态都有东西显示", WorkspaceNeverShowsBlankPanel),
     ("每一步的进度都按阶段分段", WorkflowProgressIsPhasedForEveryStep),
+    ("在线执行不可用时退回离线", RemoteExecutionFallsBackToOffline),
+    ("依次检测只检测不写入", DetectAllStepsNeverWrites),
     ("蓝图置入写入按钮在检测结束后可用", BlueprintSetupApplyButtonEnablesAfterScan),
     ("蓝图置入支持一键全选和全取消", BlueprintSetupSupportsSelectAllToggle),
     ("虚幻工具箱快照只让修改项哈希变化", UnrealBridgeToolboxSnapshotHashesAreItemScoped),
@@ -4568,6 +4570,63 @@ static void BlueprintSetupSupportsSelectAllToggle()
     viewModel.ReturnToWorkflowStep(1);
     AssertEqual(false, viewModel.HasStepSelection);
     AssertEqual(Visibility.Collapsed, viewModel.StepSelectionVisibility);
+}
+
+static void RemoteExecutionFallsBackToOffline()
+{
+    // 编辑器开着时在线执行快约十倍，但它可能正忙着跑别的远程任务、
+    // 或者没开远程执行插件。以前这种情况整步直接报错，用户只能自己去
+    // 关编辑器再重来；现在自动退回离线。
+
+    // 只有「连不上编辑器」才退回。脚本自己失败退回去也是一样的错。
+    AssertEqual(true, UnrealPythonTaskExecutionService.IsRemoteUnavailable(
+        new InvalidOperationException(
+            $"{UnrealPythonTaskExecutionService.RemoteUnavailableMarker} No running Unreal Editor...")));
+    AssertEqual(false, UnrealPythonTaskExecutionService.IsRemoteUnavailable(
+        new InvalidOperationException("row struct has no property named Name")));
+    AssertEqual(false, UnrealPythonTaskExecutionService.IsRemoteUnavailable(null));
+    // 包在里层也要认出来
+    AssertEqual(true, UnrealPythonTaskExecutionService.IsRemoteUnavailable(
+        new InvalidOperationException("外层", new IOException(
+            UnrealPythonTaskExecutionService.RemoteUnavailableMarker))));
+
+    // 远程脚本必须真的带上这个标记，否则上面的判断永远不成立
+    var runner = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "run_remote_unreal_job.py"), Encoding.UTF8);
+    AssertEqual(true, runner.Contains(UnrealPythonTaskExecutionService.RemoteUnavailableMarker));
+
+    // 走过回退的步骤必须把离线的 StartInfo 一起传进去，否则没得退
+    var window = ReadUnrealSyncWindowSource();
+    AssertEqual(1, CountOccurrences(window, "private async Task<T> RunUnrealTaskWithOfflineFallbackAsync<T>("));
+    AssertEqual(2, CountOccurrences(window, "await RunUnrealTaskWithOfflineFallbackAsync("));
+}
+
+static void DetectAllStepsNeverWrites()
+{
+    var window = ReadUnrealSyncWindowSource();
+    var start = window.IndexOf("private async void UnrealSyncDetectAllStepsButton_Click(", StringComparison.Ordinal);
+    AssertEqual(true, start > 0);
+    var end = window.IndexOf("private async void ReloadUnrealWorkflowStepButton_Click(", start, StringComparison.Ordinal);
+    AssertEqual(true, end > start);
+    var body = window[start..end];
+
+    // 依次检测只跑检测。第三、五步的同步和第四、六步的写入都会改动 Unreal 工程，
+    // 那是要人确认的事，不该被一个按钮顺手做掉。
+    AssertEqual(true, body.Contains("EnterWorkflowStepAsync"));
+    foreach (var writeEntry in new[]
+             {
+                 "PublishCurrentCharacterAssetsToUnrealButton_Click",
+                 "ApplyUnrealLightConfigurationButton_Click",
+                 "ApplyUnrealBlueprintSetupButton_Click",
+                 "apply: true",
+             })
+    {
+        AssertEqual(false, body.Contains(writeEntry));
+    }
+
+    // 第三、五步的检测必须是可等待的，否则循环会在检测还没跑完时就往下走
+    AssertEqual(true, window.Contains("await DetectUnrealPublishChangesAsync();"));
+    AssertEqual(false, window.Contains("DetectUnrealPublishChangesButton_Click(this, new RoutedEventArgs());"));
 }
 
 static void WorkflowProgressIsPhasedForEveryStep()

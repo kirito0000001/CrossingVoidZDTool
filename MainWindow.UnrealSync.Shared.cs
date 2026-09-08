@@ -55,6 +55,42 @@ namespace CrossingVoidZDTool
             }
         }
 
+        /// <summary>
+        /// 在线执行失败时退回离线执行。
+        ///
+        /// 编辑器开着时走在线快约十倍，但编辑器可能正忙着跑别的远程任务、
+        /// 或者根本没开远程执行插件。以前这种情况整步直接报错，用户只能
+        /// 自己去关编辑器再重来一次；现在自动退回离线，慢十几秒但能跑完。
+        ///
+        /// 只有「连不上编辑器」才退回。脚本自己失败退回去也是一样的错，
+        /// 白等一次编辑器冷启动。
+        /// </summary>
+        private async Task<T> RunUnrealTaskWithOfflineFallbackAsync<T>(
+            UnrealPythonTaskLaunch launch,
+            ProcessStartInfo offlineStartInfo,
+            Func<ProcessStartInfo, Task<T>> run)
+        {
+            if (!launch.UsesRunningEditor)
+            {
+                return await run(launch.StartInfo);
+            }
+
+            try
+            {
+                return await run(launch.StartInfo);
+            }
+            catch (Exception ex) when (UnrealPythonTaskExecutionService.IsRemoteUnavailable(ex))
+            {
+                AppendLog(LogKind.Warning,
+                    "在线执行不可用，已自动退回离线执行（会慢十几秒）。" + FormatSyncLogValue(ex.Message));
+                ShowFloatingTip(
+                    InfoBarSeverity.Informational,
+                    "已退回离线执行",
+                    "打开的编辑器暂时不能接受远程任务，本次改用离线方式执行。");
+                return await run(offlineStartInfo);
+            }
+        }
+
         private bool TryBeginUnrealWorkflowOperation()
         {
             if (_isUnrealWorkflowOperationRunning)

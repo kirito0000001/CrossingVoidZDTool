@@ -604,7 +604,16 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private async void DetectUnrealPublishChangesButton_Click(object sender, RoutedEventArgs e)
+        private async void DetectUnrealPublishChangesButton_Click(object sender, RoutedEventArgs e) =>
+            await DetectUnrealPublishChangesAsync();
+
+        /// <summary>
+        /// 第三、五步的差异检测。
+        ///
+        /// 单独拆出可等待的版本，是因为按钮处理器是 async void：
+        /// 流程编排 await 不到它，会在检测还没跑完时就往下走。
+        /// </summary>
+        private async Task DetectUnrealPublishChangesAsync()
         {
             LogUserOperation("检测工具箱到 Unreal 的差异");
             var character = _applicationViewModel.UnrealProjectSync.SelectedSource?.DraftCharacter;

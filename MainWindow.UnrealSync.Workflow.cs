@@ -145,7 +145,7 @@ namespace CrossingVoidZDTool
                 case 5:
                     // 第三步和第五步走同一条差异检测，只是导出范围和默认勾选不同。
                     _workflowStepAfterPublishDetection = step;
-                    DetectUnrealPublishChangesButton_Click(this, new RoutedEventArgs());
+                    await DetectUnrealPublishChangesAsync();
                     break;
                 case 4:
                     await ReloadUnrealLightConfigurationStepAsync(sync);
@@ -154,6 +154,55 @@ namespace CrossingVoidZDTool
                     await ReloadUnrealBlueprintSetupStepAsync(sync);
                     break;
             }
+        }
+
+        /// <summary>
+        /// 从当前步骤往后依次检测，停在第一个需要人处理的步骤。
+        ///
+        /// 只检测，不写入。第三、五步真正的同步和第四、六步的写入都会改动
+        /// Unreal 工程，那是要人确认的事，不该被一个按钮顺手做掉；
+        /// 这里的价值是把六步的等待一次排完，而不是替人做决定。
+        /// </summary>
+        private async void UnrealSyncDetectAllStepsButton_Click(object sender, RoutedEventArgs e)
+        {
+            var sync = _applicationViewModel.UnrealProjectSync;
+            if (string.IsNullOrWhiteSpace(sync.SelectedSource?.DraftCharacter?.Code))
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
+                return;
+            }
+
+            LogUserOperation($"同步流程：从第 {sync.WorkflowStep} 步起依次检测");
+            var startStep = sync.WorkflowStep;
+            for (var step = startStep; step <= UnrealSyncWorkflow.MaxStep; step++)
+            {
+                await EnterWorkflowStepAsync(sync, step);
+                if (sync.WorkspaceState == UnrealSyncWorkspaceState.Failed)
+                {
+                    ShowFloatingTip(
+                        InfoBarSeverity.Error,
+                        $"第 {step} 步检测失败",
+                        sync.WorkspacePlaceholderDescription);
+                    return;
+                }
+
+                if (step == UnrealSyncWorkflow.MaxStep)
+                {
+                    break;
+                }
+
+                // 这一步还有事要做就停下来，让人处理完再继续。
+                // TryLeaveWorkflowStep 自己会说明卡在哪。
+                if (!TryLeaveWorkflowStep(sync, step))
+                {
+                    return;
+                }
+            }
+
+            ShowFloatingTip(
+                InfoBarSeverity.Success,
+                "六步检测已跑完",
+                $"从第 {startStep} 步检测到第 {UnrealSyncWorkflow.MaxStep} 步，没有需要先处理的内容。");
         }
 
         private async void ReloadUnrealWorkflowStepButton_Click(object sender, RoutedEventArgs e)

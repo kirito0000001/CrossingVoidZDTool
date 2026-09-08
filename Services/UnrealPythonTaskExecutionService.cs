@@ -16,6 +16,28 @@ internal sealed class UnrealPythonTaskExecutionService
 {
     private const string RemoteRunnerRelativePath = @"Tools\UnrealBridge\run_remote_unreal_job.py";
 
+    /// <summary>
+    /// 远程执行脚本连不上编辑器时会带上的标记。
+    ///
+    /// 用它把「连不上编辑器」和「脚本自己失败」区分开：前者退回离线执行还有救，
+    /// 后者退回去也是一样的错，白等一次编辑器冷启动。
+    /// </summary>
+    public const string RemoteUnavailableMarker = "ZD_REMOTE_UNAVAILABLE";
+
+    /// <summary>这次失败是不是「编辑器不可用」，可以退回离线执行。</summary>
+    public static bool IsRemoteUnavailable(Exception? exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            if (current.Message.Contains(RemoteUnavailableMarker, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     public UnrealPythonTaskLaunch BuildLaunch(
         string editorPath,
         string projectPath,
