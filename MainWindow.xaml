@@ -2264,74 +2264,30 @@
                                          <TextBlock Style="{StaticResource SectionTitleStyle}" Text="{Binding UnrealProjectSync.WorkspaceTitle, Mode=OneWay}" />
                                          <TextBlock Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkspaceDescription, Mode=OneWay}" />
                                              </StackPanel>
-                                     <StackPanel
-                                        Grid.Row="1"
-                                        HorizontalAlignment="Center"
-                                        VerticalAlignment="Center"
-                                        Spacing="6"
-                                        Visibility="{Binding UnrealProjectSync.SelectionEmptyVisibility, Mode=OneWay}">
-                                        <FontIcon
-                                            HorizontalAlignment="Center"
-                                            FontSize="28"
-                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                            Glyph="&#xE9D9;" />
-                                        <TextBlock HorizontalAlignment="Center" FontWeight="SemiBold" Text="等待检测内容" />
-                                        <TextBlock
-                                            MaxWidth="360"
-                                            Style="{StaticResource SubtleTextStyle}"
-                                            Text="先从左侧选择来源，再在右侧开始检测。检测结果会显示在这里。"
-                                            TextAlignment="Center" />
-                                    </StackPanel>
                                     <StackPanel
                                         Grid.Row="1"
                                         HorizontalAlignment="Center"
                                         VerticalAlignment="Center"
                                         MaxWidth="620"
                                         Spacing="10"
-                                        Visibility="{Binding UnrealProjectSync.DetectionResultVisibility, Mode=OneWay}">
+                                        Visibility="{Binding UnrealProjectSync.WorkspacePlaceholderVisibility, Mode=OneWay}">
                                         <FontIcon
                                             HorizontalAlignment="Center"
                                             FontSize="30"
-                                            Foreground="{ThemeResource SystemFillColorSuccessBrush}"
-                                            Glyph="&#xE73E;" />
+                                            Glyph="{Binding UnrealProjectSync.WorkspacePlaceholderGlyph, Mode=OneWay}" />
+                                        <ProgressBar
+                                            Width="220"
+                                            IsIndeterminate="True"
+                                            Visibility="{Binding UnrealProjectSync.WorkspaceBusyVisibility, Mode=OneWay}" />
                                         <TextBlock
                                             HorizontalAlignment="Center"
-                                            FontSize="20"
+                                            FontSize="18"
                                             FontWeight="SemiBold"
-                                            Text="{Binding UnrealProjectSync.DetectionResultTitle, Mode=OneWay}" />
+                                            Text="{Binding UnrealProjectSync.WorkspacePlaceholderTitle, Mode=OneWay}" />
                                         <TextBlock
                                             HorizontalAlignment="Center"
                                             Style="{StaticResource SubtleTextStyle}"
-                                            Text="{Binding UnrealProjectSync.DetectionResultSummaryText, Mode=OneWay}"
-                                            TextAlignment="Center"
-                                            TextWrapping="Wrap" />
-                                        <TextBlock
-                                            HorizontalAlignment="Center"
-                                            Style="{StaticResource SubtleTextStyle}"
-                                            Text="当前没有需要处理的素材。"
-                                            TextAlignment="Center" />
-                                    </StackPanel>
-                                    <StackPanel
-                                        Grid.Row="1"
-                                        MaxWidth="620"
-                                        HorizontalAlignment="Center"
-                                        VerticalAlignment="Center"
-                                        Spacing="10"
-                                        Visibility="{Binding UnrealProjectSync.LightConfigurationEmptyVisibility, Mode=OneWay}">
-                                        <FontIcon
-                                            HorizontalAlignment="Center"
-                                            FontSize="30"
-                                            Foreground="{ThemeResource SystemFillColorSuccessBrush}"
-                                            Glyph="&#xE73E;" />
-                                        <TextBlock
-                                            HorizontalAlignment="Center"
-                                            FontSize="20"
-                                            FontWeight="SemiBold"
-                                            Text="{Binding UnrealProjectSync.LightConfigurationEmptyTitle, Mode=OneWay}" />
-                                        <TextBlock
-                                            HorizontalAlignment="Center"
-                                            Style="{StaticResource SubtleTextStyle}"
-                                            Text="{Binding UnrealProjectSync.LightConfigurationSummaryText, Mode=OneWay}"
+                                            Text="{Binding UnrealProjectSync.WorkspacePlaceholderDescription, Mode=OneWay}"
                                             TextAlignment="Center"
                                             TextWrapping="Wrap" />
                                     </StackPanel>
@@ -2558,23 +2514,6 @@
                                             </ItemsControl.ItemTemplate>
                                         </ItemsControl>
                                     </ScrollViewer>
-                                    <StackPanel
-                                        Grid.Row="1"
-                                        VerticalAlignment="Center"
-                                        HorizontalAlignment="Center"
-                                        Spacing="6"
-                                        Visibility="{Binding UnrealProjectSync.BlueprintSetupEmptyVisibility, Mode=OneWay}">
-                                        <TextBlock
-                                            HorizontalAlignment="Center"
-                                            FontSize="18"
-                                            FontWeight="SemiBold"
-                                            Text="{Binding UnrealProjectSync.BlueprintSetupEmptyTitle, Mode=OneWay}" />
-                                        <TextBlock
-                                            HorizontalAlignment="Center"
-                                            Style="{StaticResource SubtleTextStyle}"
-                                            Text="{Binding UnrealProjectSync.BlueprintSetupSummaryText, Mode=OneWay}"
-                                            TextWrapping="Wrap" />
-                                    </StackPanel>
                                     <ScrollViewer
                                         Grid.Row="1"
                                         HorizontalScrollBarVisibility="Disabled"
@@ -2737,28 +2676,6 @@
                                      <Grid
                                          Grid.Row="1"
                                          Visibility="{Binding UnrealProjectSync.IsNormalizationWorkspace, Mode=OneWay}">
-                                         <StackPanel
-                                             HorizontalAlignment="Center"
-                                             VerticalAlignment="Center"
-                                             Spacing="8"
-                                             Visibility="{Binding UnrealProjectSync.NormalizationEmptyVisibility, Mode=OneWay}">
-                                             <FontIcon
-                                                 HorizontalAlignment="Center"
-                                                 FontSize="30"
-                                                 Foreground="{ThemeResource SystemFillColorSuccessBrush}"
-                                                 Glyph="&#xE73E;" />
-                                             <TextBlock
-                                                 HorizontalAlignment="Center"
-                                                 FontSize="20"
-                                                 FontWeight="SemiBold"
-                                                 Text="素材规整已完成" />
-                                             <TextBlock
-                                                 HorizontalAlignment="Center"
-                                                 Style="{StaticResource SubtleTextStyle}"
-                                                 Text="当前角色没有需要继续处理的素材，可以点击“同步素材”。"
-                                                 TextAlignment="Center"
-                                                 TextWrapping="Wrap" />
-                                         </StackPanel>
                                          <ListView
                                              ItemsSource="{Binding UnrealProjectSync.VisibleNormalizationItems, Mode=OneWay}"
                                             SelectionMode="None"

@@ -214,31 +214,24 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             if (SetProperty(ref _isNormalizationWorkspace, value))
             {
                 OnPropertyChanged(nameof(IsDetectionWorkspace));
-                OnPropertyChanged(nameof(NormalizationEmptyVisibility));
-                OnPropertyChanged(nameof(SelectionEmptyVisibility));
                 OnPropertyChanged(nameof(SelectionContentVisibility));
-                OnPropertyChanged(nameof(DetectionResultVisibility));
             }
         }
     }
 
     public bool IsDetectionWorkspace => !IsNormalizationWorkspace;
-    public Visibility NormalizationEmptyVisibility => IsNormalizationWorkspace &&
-        _isNormalizationStepLoaded && VisibleNormalizationItems.Count == 0
-        ? Visibility.Visible
-        : Visibility.Collapsed;
     public bool IsFoundationWorkspace => !IsEngineToToolbox && WorkflowStep == 1;
     public bool IsLightConfigurationWorkspace => !IsEngineToToolbox && WorkflowStep == 4;
     public bool IsSequenceSynchronizationWorkspace => !IsEngineToToolbox && WorkflowStep == 5;
-    public Visibility FoundationWorkspaceVisibility => IsFoundationWorkspace ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility FoundationWorkspaceVisibility =>
+        IsFoundationWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     public Visibility FoundationDetailsVisibility => IsFoundationWorkspace ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility LightConfigurationWorkspaceVisibility => IsLightConfigurationWorkspace && LightConfigurationItems.Count > 0
-        ? Visibility.Visible
-        : Visibility.Collapsed;
-    public Visibility LightConfigurationEmptyVisibility => IsLightConfigurationWorkspace &&
-        _isLightConfigurationLoaded && LightConfigurationItems.Count == 0
-        ? Visibility.Visible
-        : Visibility.Collapsed;
+    public Visibility LightConfigurationWorkspaceVisibility =>
+        IsLightConfigurationWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     public Visibility LightConfigurationDetailsVisibility => IsLightConfigurationWorkspace
         ? Visibility.Visible
         : Visibility.Collapsed;
@@ -356,6 +349,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             // 操作收尾时不重算一次，写入按钮就会一直停在灰色。
             OnPropertyChanged(nameof(CanApplyBlueprintSetup));
             OnPropertyChanged(nameof(CanToggleBlueprintSetupSelection));
+            NotifyWorkspaceStateChanged();
         }
     }
 
@@ -363,12 +357,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         ? $"上次检测：{detected.LocalDateTime:yyyy-MM-dd HH:mm:ss}（打开页面不会自动重检，同步前会强制刷新）"
         : "尚未检测内容";
 
-    public Visibility DetectionResultVisibility =>
-        !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
-        !IsBlueprintSetupWorkspace &&
-        HasContentDetection && SelectionTreeRoots.Count == 0
-            ? Visibility.Visible
-            : Visibility.Collapsed;
 
     public string DetectionResultTitle => IsEngineToToolbox
         ? "内容检测完成"
@@ -498,17 +486,14 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 OnPropertyChanged(nameof(FoundationWorkspaceVisibility));
                 OnPropertyChanged(nameof(FoundationDetailsVisibility));
                 OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
-                OnPropertyChanged(nameof(LightConfigurationEmptyVisibility));
                 OnPropertyChanged(nameof(LightConfigurationDetailsVisibility));
                 OnPropertyChanged(nameof(BlueprintSetupWorkspaceVisibility));
-                OnPropertyChanged(nameof(BlueprintSetupEmptyVisibility));
                 OnPropertyChanged(nameof(BlueprintSetupDetailsVisibility));
                 OnPropertyChanged(nameof(SequenceSynchronizationDetailsVisibility));
                 OnPropertyChanged(nameof(WorkspaceTitle));
+                NotifyWorkspaceStateChanged();
                 OnPropertyChanged(nameof(WorkspaceDescription));
-                OnPropertyChanged(nameof(SelectionEmptyVisibility));
                 OnPropertyChanged(nameof(SelectionContentVisibility));
-                OnPropertyChanged(nameof(DetectionResultVisibility));
                 OnPropertyChanged(nameof(CanAdvanceWorkflow));
                 OnPropertyChanged(nameof(CanApplyLightConfiguration));
                 OnPropertyChanged(nameof(CanApplyBlueprintSetup));
@@ -740,8 +725,8 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 OnPropertyChanged(nameof(FoundationWorkspaceVisibility));
                 OnPropertyChanged(nameof(FoundationDetailsVisibility));
                 OnPropertyChanged(nameof(WorkspaceTitle));
+                NotifyWorkspaceStateChanged();
                 OnPropertyChanged(nameof(WorkspaceDescription));
-                OnPropertyChanged(nameof(DetectionResultVisibility));
                 NotifyDetectionSummaryChanged();
                 ClearLightConfigurationState();
             ClearBlueprintSetupState();
@@ -845,15 +830,11 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         private set => SetProperty(ref _canImportSelection, value);
     }
 
-    public Visibility SelectionEmptyVisibility => !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
-        SelectionTreeRoots.Count == 0 && !HasContentDetection
-        ? Visibility.Visible
-        : Visibility.Collapsed;
-
-    public Visibility SelectionContentVisibility => !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
-        SelectionTreeRoots.Count > 0
-        ? Visibility.Visible
-        : Visibility.Collapsed;
+    public Visibility SelectionContentVisibility =>
+        !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
+        !IsBlueprintSetupWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
+            ? Visibility.Visible
+            : Visibility.Collapsed;
 
     public string SourceGroupTitle => IsEngineToToolbox ? "Unreal 角色" : "已完成角色";
 
@@ -1161,6 +1142,8 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 RefreshFoundationChecks(nextCode);
             }
         }
+        ClearWorkspaceFailure();
+        NotifyWorkspaceStateChanged();
         SaveSessionCache();
     }
 
@@ -1318,7 +1301,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
         _isNormalizationStepLoaded = value;
         OnPropertyChanged(nameof(IsNormalizationStepLoaded));
-        OnPropertyChanged(nameof(NormalizationEmptyVisibility));
+        NotifyWorkspaceStateChanged();
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
         OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
         SaveSessionCache();
@@ -1330,7 +1313,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 !item.IsAlreadyNormalized &&
                 (!HideResolvedNormalizationItems || !item.IsResolved))
             .ToArray();
-        OnPropertyChanged(nameof(NormalizationEmptyVisibility));
         OnPropertyChanged(nameof(NormalizationSummaryText));
     }
 
@@ -1550,9 +1532,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             }
         }
 
-        OnPropertyChanged(nameof(SelectionEmptyVisibility));
         OnPropertyChanged(nameof(SelectionContentVisibility));
-        OnPropertyChanged(nameof(DetectionResultVisibility));
         UpdateImportSelectionSummary();
         ApplyPublishFilter();
     }
@@ -1579,7 +1559,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         _lastImportSnapshot = snapshot;
         _lastContentDetectionAt = DateTimeOffset.Now;
         OnPropertyChanged(nameof(ContentDetectionStatusText));
-        OnPropertyChanged(nameof(DetectionResultVisibility));
         SaveSessionCache();
     }
 
@@ -1612,6 +1591,14 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     {
         _existingImportStableIds.Clear();
         _hasImportDetection = true;
+        // 默认按当前步骤认领这棵树。检测流程会在建完树、切到目标步骤之前
+        // 用 SetLoadedPublishStep 覆盖成真正的目标步骤；这里只是保证
+        // 视图模型单独使用时也是自洽的，不会出现「有树但没人认领」。
+        if (WorkflowStep is 3 or 5)
+        {
+            _loadedPublishStep = WorkflowStep;
+        }
+        ClearWorkspaceFailure();
         OnPropertyChanged(nameof(HasContentDetection));
         OnPropertyChanged(nameof(WorkflowStep5StatusText));
         OnPropertyChanged(nameof(WorkflowStep6StatusText));
@@ -1637,7 +1624,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         OnPropertyChanged(nameof(PublishActionText));
         _lastContentDetectionAt = DateTimeOffset.Now;
         OnPropertyChanged(nameof(ContentDetectionStatusText));
-        OnPropertyChanged(nameof(DetectionResultVisibility));
         SaveSessionCache();
     }
 
@@ -1852,7 +1838,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         OnPropertyChanged(nameof(HasContentDetection));
         OnPropertyChanged(nameof(WorkflowStep5StatusText));
         OnPropertyChanged(nameof(WorkflowStep6StatusText));
-        OnPropertyChanged(nameof(DetectionResultVisibility));
         OnPropertyChanged(nameof(IsPublishSelectionReady));
         OnPropertyChanged(nameof(HasPublishSelection));
         OnPropertyChanged(nameof(HasNoPublishChanges));
@@ -1922,6 +1907,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             : string.IsNullOrWhiteSpace(result.ErrorMessage)
                 ? "基础配置存在未完成项目。"
                 : result.ErrorMessage;
+        ClearWorkspaceFailure();
         NotifyLightConfigurationChanged();
         SaveSessionCache();
     }
@@ -1947,6 +1933,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     {
         _lightConfigurationResultMessage = message;
         OnPropertyChanged(nameof(LightConfigurationResultMessage));
+        SetWorkspaceFailure(message);
     }
 
     private void LightConfigurationItem_SelectionChanged(object? sender, EventArgs e)
@@ -1974,7 +1961,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(IsLightConfigurationLoaded));
         OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
-        OnPropertyChanged(nameof(LightConfigurationEmptyVisibility));
         OnPropertyChanged(nameof(LightConfigurationSummaryText));
         OnPropertyChanged(nameof(LightConfigurationEmptyTitle));
         OnPropertyChanged(nameof(LightConfigurationSelectionText));
@@ -1986,6 +1972,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         OnPropertyChanged(nameof(CanApplyLightConfiguration));
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
         OnPropertyChanged(nameof(WorkflowStep4StatusText));
+        NotifyWorkspaceStateChanged();
     }
 
     public void FailPublishOperation(string message)
@@ -2006,6 +1993,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     public void FailImportDetection(string message)
     {
+        SetWorkspaceFailure(message);
         if (IsEngineToToolbox || SelectionTreeRoots.Count == 0)
         {
             ResetImportOperation();
@@ -2654,7 +2642,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         _hasImportDetection = false;
         _loadedPublishStep = 0;
         OnPropertyChanged(nameof(HasContentDetection));
-        OnPropertyChanged(nameof(DetectionResultVisibility));
         ResetDetectionSummary();
         _existingImportStableIds.Clear();
         _importSelectedCount = 0;

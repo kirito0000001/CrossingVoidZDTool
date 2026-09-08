@@ -30,10 +30,7 @@ internal sealed partial class UnrealProjectSyncViewModel
     public bool IsBlueprintSetupWorkspace => !IsEngineToToolbox && WorkflowStep == 6;
 
     public Visibility BlueprintSetupWorkspaceVisibility =>
-        IsBlueprintSetupWorkspace && BlueprintSetupItems.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-
-    public Visibility BlueprintSetupEmptyVisibility =>
-        IsBlueprintSetupWorkspace && _isBlueprintSetupLoaded && BlueprintSetupItems.Count == 0
+        IsBlueprintSetupWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
             ? Visibility.Visible
             : Visibility.Collapsed;
 
@@ -51,9 +48,6 @@ internal sealed partial class UnrealProjectSyncViewModel
     public string BlueprintSetupSummaryText => !_isBlueprintSetupLoaded
         ? "尚未检测蓝图数据"
         : $"共检查 {_lastBlueprintSetupItems.Count} 项：无差异 {BlueprintSetupUnchangedCount}，待写入 {BlueprintSetupPendingCount}，错误 {BlueprintSetupErrorCount}";
-
-    public string BlueprintSetupEmptyTitle =>
-        BlueprintSetupErrorCount > 0 ? "蓝图数据存在错误" : "蓝图数据没有差异";
 
     public string BlueprintSetupSelectionText =>
         $"已选择 {BlueprintSetupSelectedCount} / {BlueprintSetupPendingCount} 项";
@@ -159,6 +153,7 @@ internal sealed partial class UnrealProjectSyncViewModel
 
         RebuildBlueprintSetupGroups();
         _isBlueprintSetupLoaded = true;
+        ClearWorkspaceFailure();
         _blueprintSetupResultMessage = result.Succeeded
             ? result.AppliedStableIds.Count > 0
                 ? $"已写入并复查 {result.AppliedStableIds.Count} 项蓝图数据。"
@@ -212,6 +207,7 @@ internal sealed partial class UnrealProjectSyncViewModel
     {
         _blueprintSetupResultMessage = message;
         OnPropertyChanged(nameof(BlueprintSetupResultMessage));
+        SetWorkspaceFailure(message);
     }
 
     private void BlueprintSetupItem_SelectionChanged(object? sender, EventArgs e)
@@ -247,9 +243,8 @@ internal sealed partial class UnrealProjectSyncViewModel
     {
         OnPropertyChanged(nameof(IsBlueprintSetupLoaded));
         OnPropertyChanged(nameof(BlueprintSetupWorkspaceVisibility));
-        OnPropertyChanged(nameof(BlueprintSetupEmptyVisibility));
         OnPropertyChanged(nameof(BlueprintSetupSummaryText));
-        OnPropertyChanged(nameof(BlueprintSetupEmptyTitle));
+        NotifyWorkspaceStateChanged();
         OnPropertyChanged(nameof(BlueprintSetupSelectionText));
         OnPropertyChanged(nameof(BlueprintSetupResultMessage));
         OnPropertyChanged(nameof(BlueprintSetupPendingCount));

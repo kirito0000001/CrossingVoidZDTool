@@ -97,6 +97,7 @@ var tests = new (string Name, Action Run)[]
     ("同步流程步号不会被夹回最后一步之前", WorkflowStepIsNotClampedBelowLastStep),
     ("同步进度按角色和步骤存进角色目录", WorkflowStepCacheLivesInCharacterFolder),
     ("已加载的步骤不再重复触发虚幻检测", WorkflowStepSkipsDetectionWhenAlreadyLoaded),
+    ("中栏任何状态都有东西显示", WorkspaceNeverShowsBlankPanel),
     ("蓝图置入写入按钮在检测结束后可用", BlueprintSetupApplyButtonEnablesAfterScan),
     ("蓝图置入支持一键全选和全取消", BlueprintSetupSupportsSelectAllToggle),
     ("虚幻工具箱快照只让修改项哈希变化", UnrealBridgeToolboxSnapshotHashesAreItemScoped),
@@ -4554,6 +4555,100 @@ static void BlueprintSetupSupportsSelectAllToggle()
         viewModel.GetSelectedBlueprintSetupIds().OrderBy(item => item, StringComparer.Ordinal).ToArray());
 }
 
+static void WorkspaceNeverShowsBlankPanel()
+{
+    // 中栏以前由九个各自独立的可见性绑定拼出来，「已加载」和「有内容」
+    // 两个条件之间漏掉的那块没人认领，就是一片空白——第四步和第六步都撞过：
+    // 进去一片白，点一次重新加载才显示「没有差异」。
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService())
+    {
+        IsEngineToToolbox = false,
+    };
+    viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep);
+
+    void AssertPlaceholderIsReadable(UnrealSyncWorkspaceState expected)
+    {
+        AssertEqual(expected, viewModel.WorkspaceState);
+        AssertEqual(Visibility.Visible, viewModel.WorkspacePlaceholderVisibility);
+        AssertEqual(Visibility.Collapsed, viewModel.WorkspaceContentVisibility);
+        // 占位面板必须真的有字，否则和空白没区别。
+        AssertEqual(false, string.IsNullOrWhiteSpace(viewModel.WorkspacePlaceholderTitle));
+        AssertEqual(false, string.IsNullOrWhiteSpace(viewModel.WorkspacePlaceholderDescription));
+        AssertEqual(false, string.IsNullOrWhiteSpace(viewModel.WorkspacePlaceholderGlyph));
+    }
+
+    // 没选角色
+    AssertPlaceholderIsReadable(UnrealSyncWorkspaceState.NoCharacter);
+
+    // 检测中：这一步的旧数据可能已经清掉了，必须明确显示在跑，不能空着
+    viewModel.SetWorkflowOperationRunning(true);
+    AssertPlaceholderIsReadable(UnrealSyncWorkspaceState.Busy);
+    AssertEqual(Visibility.Visible, viewModel.WorkspaceBusyVisibility);
+    viewModel.SetWorkflowOperationRunning(false);
+
+    // 检测完、没有差异 —— 就是原先那块空白
+    viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+    {
+        Succeeded = true,
+        CharacterCode = "Misaka",
+        Items =
+        [
+            new UnrealBlueprintSetupResultItem
+            {
+                StableId = "bp.icon1p", GroupKey = "onset", GroupName = "对局设置",
+                DisplayName = "1P 主战头像", Status = UnrealBlueprintSetupStatus.Unchanged
+            }
+        ]
+    });
+    AssertPlaceholderIsReadable(UnrealSyncWorkspaceState.NoChanges);
+
+    // 有差异时才显示这一步自己的列表
+    viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+    {
+        Succeeded = true,
+        CharacterCode = "Misaka",
+        Items =
+        [
+            new UnrealBlueprintSetupResultItem
+            {
+                StableId = "bp.anti", GroupKey = "onset", GroupName = "对局设置",
+                DisplayName = "异能角色", Status = UnrealBlueprintSetupStatus.Pending,
+                CurrentValues = ["false"], TargetValues = ["true"]
+            }
+        ]
+    });
+    AssertEqual(UnrealSyncWorkspaceState.HasContent, viewModel.WorkspaceState);
+    AssertEqual(Visibility.Visible, viewModel.WorkspaceContentVisibility);
+    AssertEqual(Visibility.Collapsed, viewModel.WorkspacePlaceholderVisibility);
+    AssertEqual(Visibility.Visible, viewModel.BlueprintSetupWorkspaceVisibility);
+
+    // 失败态要看得出是失败，并且带上原因
+    viewModel.FailBlueprintSetup("Unreal 没有生成结果文件。");
+    AssertPlaceholderIsReadable(UnrealSyncWorkspaceState.Failed);
+    AssertEqual(true, viewModel.IsWorkspacePlaceholderError);
+    AssertEqual(true, viewModel.WorkspacePlaceholderDescription.Contains("结果文件", StringComparison.Ordinal));
+
+    // 重新检测成功后失败态要消失
+    viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+    {
+        Succeeded = true,
+        CharacterCode = "Misaka",
+        Items = []
+    });
+    AssertEqual(false, viewModel.IsWorkspacePlaceholderError);
+
+    // 六步都要能给出一个可读的占位，不能有哪一步落进空白
+    for (var step = UnrealSyncWorkflow.MinStep; step <= UnrealSyncWorkflow.MaxStep; step++)
+    {
+        viewModel.ReturnToWorkflowStep(step);
+        AssertEqual(false, string.IsNullOrWhiteSpace(viewModel.WorkflowStepName));
+        if (viewModel.WorkspaceState != UnrealSyncWorkspaceState.HasContent)
+        {
+            AssertEqual(false, string.IsNullOrWhiteSpace(viewModel.WorkspacePlaceholderTitle));
+        }
+    }
+}
+
 static void WorkflowStepIsNotClampedBelowLastStep()
 {
     // 步号上限以前散落着写死成 5：接上第六步之后点「下一步」会被静默夹回第五步，
@@ -8494,8 +8589,10 @@ static void OrphanSequencesAreDetachedNotDeleted()
 static void SyncCompletionLeavesVisibleFeedback()
 {
     // 同步刚结束时中栏一片空白：CompletePublishOperation 把 _hasImportDetection 置假，
-    // 而 DetectionResultVisibility 要求它为真，于是整块结果面板直接折叠——
+    // 结果面板的显示条件要求它为真，于是整块直接折叠——
     // 刚跑完一次成功的同步，界面却像什么都没发生过。刷新一次才又有内容。
+    // 现在中栏由 WorkspaceState 统一决定，「没有差异」是一个明确的状态，
+    // 不再是「所有面板的条件都不满足」这种没人认领的组合。
     var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService())
     {
         IsEngineToToolbox = false,
@@ -8528,7 +8625,9 @@ static void SyncCompletionLeavesVisibleFeedback()
 
     // 结果面板必须还在，否则中栏什么都不显示。
     AssertEqual(true, viewModel.HasContentDetection);
-    AssertEqual(Visibility.Visible, viewModel.DetectionResultVisibility);
+    AssertEqual(UnrealSyncWorkspaceState.NoChanges, viewModel.WorkspaceState);
+    AssertEqual(Visibility.Visible, viewModel.WorkspacePlaceholderVisibility);
+    AssertEqual(false, viewModel.IsWorkspacePlaceholderError);
     // 复扫的统计要保留，不能归零成"共检查 0 项"。
     AssertEqual(true, viewModel.DetectionResultSummaryText.Contains("共检查 1 项", StringComparison.Ordinal));
     // 执行结果要看得见。
