@@ -115,6 +115,7 @@ var tests = new (string Name, Action Run)[]
     ("中栏任何状态都有东西显示", WorkspaceNeverShowsBlankPanel),
     ("中栏分组与条目始终一致", WorkspaceGroupsStayConsistentWithItems),
     ("直接改列表中栏也会跟着刷新", WorkspaceReactsToRawCollectionChanges),
+    ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
     ("进入某一步先落步再检测", EnteringStepNavigatesBeforeDetecting),
@@ -4836,6 +4837,63 @@ static void WorkflowProgressIsPhasedForEveryStep()
     // 界面这一侧要把进度文件转成分段推进
     var window = ReadUnrealSyncWindowSource();
     AssertEqual(2, CountOccurrences(window, "new Progress<UnrealExportProgressState>("));
+}
+
+static void BlueprintSetupSelfCheckPasses()
+{
+    // 第六步的比较逻辑住在 Python 里（要在虚幻进程内跑），C# 这边够不着，
+    // 所以带着它自己的自检脚本一起跑。脚本把 unreal 用桩顶掉，不需要引擎。
+    var script = Path.Combine("Tools", "UnrealBridge", "tests", "check_blueprint_setup.py");
+    AssertEqual(true, File.Exists(script));
+
+    var output = new StringBuilder();
+    var exitCode = -1;
+    var ran = false;
+    foreach (var exe in new[] { "python", "python3", "py" })
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = exe,
+                Arguments = "\"" + script + "\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+            });
+            if (process is null) continue;
+            output.Append(process.StandardOutput.ReadToEnd());
+            output.Append(process.StandardError.ReadToEnd());
+            process.WaitForExit(60_000);
+            exitCode = process.ExitCode;
+            ran = true;
+            break;
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            // 这个名字没装，换下一个
+        }
+    }
+
+    if (ran)
+    {
+        if (exitCode != 0)
+        {
+            throw new InvalidOperationException("蓝图置入自检未通过：\n" + output);
+        }
+
+        return;
+    }
+
+    // 机器上没有 Python 时不能就这么放过去，退而守住源码层面的不变量，
+    // 免得改回按字符串比大小写、或者又把写入失败吞掉。
+    var source = File.ReadAllText(Path.Combine("Tools", "UnrealBridge", "apply_blueprint_setup.py"), Encoding.UTF8);
+    AssertEqual(true, source.Contains("def _object_values_match", StringComparison.Ordinal));
+    AssertEqual(true, source.Contains(".casefold()", StringComparison.Ordinal));
+    AssertEqual(true, source.Contains("def _missing_object_targets", StringComparison.Ordinal));
+    AssertEqual(true, source.Contains("def _reconcile_applied", StringComparison.Ordinal));
 }
 
 static void WorkspaceReactsToRawCollectionChanges()
