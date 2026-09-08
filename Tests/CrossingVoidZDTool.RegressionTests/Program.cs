@@ -4120,7 +4120,8 @@ static void UnrealBridgeChangesRespectSyncDirection()
     AssertEqual(UnrealBridgeChangeKind.Conflict, publish.Kind);
     AssertEqual(false, publish.IsSelected);
     AssertEqual(UnrealBridgeChangeKind.Updated, import.Kind);
-    AssertEqual(true, import.IsSelected);
+    // 勾选由选择树决定，差异服务一律产出未勾选的变更（见上面 publish 那条）。
+    AssertEqual(false, import.IsSelected);
 }
 
 static void UnrealSyncWorkspaceSwitchesWholeDirection()
@@ -4144,7 +4145,9 @@ static void UnrealSyncWorkspaceSwitchesWholeDirection()
     AssertEqual("{Binding UnrealProjectSync.PublishWorkspaceVisibility, Mode=OneWay}", publishPanel.Attribute("Visibility")?.Value ?? string.Empty);
     AssertEqual(true, importPanel.Descendants().Any(element => element.Attribute("Content")?.Value == "{Binding UnrealProjectSync.ImportPrimaryActionText, Mode=OneWay}"));
     AssertEqual(false, importPanel.Descendants().Any(element => (element.Attribute("Content")?.Value ?? string.Empty).Contains("虚幻", StringComparison.Ordinal)));
-    AssertEqual(true, publishPanel.Descendants().Any(element => element.Attribute("Content")?.Value == "{Binding UnrealProjectSync.ImportPrimaryActionText, Mode=OneWay}"));
+    // 两栏的主操作文案早就分开了：导入用 ImportPrimaryActionText（「导入所选 N 项」），
+    // 发布用 PublishActionText（「同步素材到虚幻」/「同步序列到虚幻」）。
+    AssertEqual(true, publishPanel.Descendants().Any(element => element.Attribute("Content")?.Value == "{Binding UnrealProjectSync.PublishActionText, Mode=OneWay}"));
 }
 
 static void UnrealSyncSourcePickerIncludesSearchAndSharedMaterials()
@@ -4183,7 +4186,9 @@ static void UnrealSyncSelectionTreeProtectsUnsafeChanges()
     AssertEqual(false, leaves.Single(item => item.StableId == conflict.StableId).IsChecked);
     AssertEqual(true, leaves.Single(item => item.StableId == conflict.StableId).RequiresAttention);
     AssertEqual(false, leaves.Single(item => item.StableId == conflict.StableId).IsSelectable);
-    AssertEqual("暂不支持", leaves.Single(item => item.StableId == conflict.StableId).StatusText);
+    // 状态文案后来从「暂不支持」改成了「需要检查」（另有「重定向」一类），
+    // 意思一样：这条要人先看一眼，不能自动执行。上面几条断言钉的是这个语义。
+    AssertEqual("需要检查", leaves.Single(item => item.StableId == conflict.StableId).StatusText);
 }
 
 static void UnrealSyncSelectionTreeSupportsTriStateSelection()
@@ -4270,8 +4275,22 @@ static void UnrealImportOperationPanelShowsGuidanceAndPersistentResult()
     AssertEqual(true, bindings.Contains("ImportSkippedCountText", StringComparison.Ordinal));
     AssertEqual(true, bindings.Contains("ImportPrimaryActionText", StringComparison.Ordinal));
     AssertEqual(true, bindings.Contains("ImportResultMessage", StringComparison.Ordinal));
-    AssertEqual(true, bindings.Contains("DetectionResultTitle", StringComparison.Ordinal));
-    AssertEqual(true, bindings.Contains("DetectionResultSummaryText", StringComparison.Ordinal));
+    // 检测结果的标题和摘要原来挂在右栏的导入面板上，现在归中栏的统一占位面板管，
+    // 所以断言范围要放到整份 XAML，不能再限定在 UnrealImportWorkspacePanel 里。
+    var allBindings = string.Join(Environment.NewLine, xaml.Descendants().Attributes().Select(attribute => attribute.Value));
+    AssertEqual(true, allBindings.Contains("WorkspacePlaceholderTitle", StringComparison.Ordinal));
+    AssertEqual(true, allBindings.Contains("WorkspacePlaceholderDescription", StringComparison.Ordinal));
+    // 摘要文本本身还在用：占位面板的「无差异」说明就取自它。
+    AssertEqual(true, ReadUnrealSyncViewModelSource().Contains("DetectionResultSummaryText", StringComparison.Ordinal));
+}
+
+/// <summary>读同步台视图模型的全部分部文件。</summary>
+static string ReadUnrealSyncViewModelSource()
+{
+    var files = Directory.GetFiles(
+        Path.Combine(Directory.GetCurrentDirectory(), "ViewModels"),
+        "UnrealProjectSyncViewModel*.cs");
+    return string.Join(Environment.NewLine, files.Select(path => File.ReadAllText(path, Encoding.UTF8)));
 }
 
 static void UnrealBridgeStateIsScopedToCharacterAndProject()

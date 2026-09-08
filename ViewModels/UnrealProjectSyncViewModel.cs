@@ -357,12 +357,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         : "尚未检测内容";
 
 
-    public string DetectionResultTitle => IsEngineToToolbox
-        ? "内容检测完成"
-        : DetectionChangedCount == 0
-            ? "本次没有改动"
-            : $"检测到 {DetectionChangedCount} 项改动";
-
     public string DetectionResultSummaryText
     {
         get
@@ -431,7 +425,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     private void NotifyDetectionSummaryChanged()
     {
-        OnPropertyChanged(nameof(DetectionResultTitle));
         OnPropertyChanged(nameof(DetectionResultSummaryText));
     }
 

@@ -2430,11 +2430,16 @@ internal sealed class UnrealProjectSyncService
         return count;
     }
 
+    /// <param name="identitySuffix">
+    /// 稳定身份里的槽位后缀（core:0 / support / link:…），必须和
+    /// UnrealBridgeSemanticSnapshotService 用的一致，否则写回来的身份对不上快照。
+    /// </param>
     public int SyncSkillStageToToolbox(
         CharacterCard character,
         UnrealProjectSyncCharacterCandidate candidate,
         UnrealProjectSyncSkillSlotPreview slot,
-        int stageIndex)
+        int stageIndex,
+        string identitySuffix = "")
     {
         if (stageIndex < 0 || stageIndex >= slot.Stages.Count)
         {
@@ -2457,7 +2462,7 @@ internal sealed class UnrealProjectSyncService
         }
 
         entry.SyncId = UnrealBridgeSemanticSnapshotService.CreateOriginIdentity(
-            $"{candidate.Code}|skill|{slot.SlotKey}||{stageIndex}");
+            $"{candidate.Code}|skill|{identitySuffix}|{slot.SlotKey}|{stageIndex}");
         if (target.Count == stageIndex)
         {
             target.Add(entry);
@@ -2471,10 +2476,12 @@ internal sealed class UnrealProjectSyncService
         return 1;
     }
 
+    /// <param name="identitySuffix">同 <see cref="SyncSkillStageToToolbox"/>。</param>
     public int SyncLinkSkillToToolbox(
         CharacterCard character,
         UnrealProjectSyncCharacterCandidate candidate,
-        UnrealProjectSyncLinkSkillPreview linkSkill)
+        UnrealProjectSyncLinkSkillPreview linkSkill,
+        string identitySuffix = "")
     {
         using var entryNotifications = CharacterSkillEntry.SuppressEditNotifications();
         using var multiplierNotifications = SkillMultiplierLevel.SuppressEditNotifications();
