@@ -2438,6 +2438,145 @@
                                     </ScrollViewer>
                                     <ScrollViewer
                                         Grid.Row="1"
+                                        Padding="0,0,6,0"
+                                        HorizontalScrollBarVisibility="Disabled"
+                                        VerticalScrollBarVisibility="Auto"
+                                        Visibility="{Binding UnrealProjectSync.BlueprintSetupWorkspaceVisibility, Mode=OneWay}">
+                                        <ItemsControl ItemsSource="{Binding UnrealProjectSync.BlueprintSetupGroups, Mode=OneWay}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <StackPanel Margin="0,0,0,14" Spacing="8">
+                                                        <Grid ColumnSpacing="8">
+                                                            <Grid.ColumnDefinitions>
+                                                                <ColumnDefinition Width="*" />
+                                                                <ColumnDefinition Width="Auto" />
+                                                            </Grid.ColumnDefinitions>
+                                                            <TextBlock
+                                                                FontSize="15"
+                                                                FontWeight="SemiBold"
+                                                                Text="{Binding GroupName}" />
+                                                            <TextBlock
+                                                                Grid.Column="1"
+                                                                VerticalAlignment="Center"
+                                                                Style="{StaticResource SubtleTextStyle}"
+                                                                Text="{Binding SummaryText}" />
+                                                        </Grid>
+                                                        <ItemsControl ItemsSource="{Binding Items, Mode=OneWay}">
+                                                            <ItemsControl.ItemTemplate>
+                                                                <DataTemplate>
+                                                                    <Border
+                                                                        Margin="0,0,0,10"
+                                                                        Padding="10"
+                                                                        Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                                                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                                        BorderThickness="1"
+                                                                        CornerRadius="6">
+                                                                        <StackPanel Spacing="8">
+                                                                            <Grid ColumnSpacing="8">
+                                                                                <Grid.ColumnDefinitions>
+                                                                                    <ColumnDefinition Width="Auto" />
+                                                                                    <ColumnDefinition Width="*" />
+                                                                                    <ColumnDefinition Width="Auto" />
+                                                                                </Grid.ColumnDefinitions>
+                                                                                <CheckBox
+                                                                                    VerticalAlignment="Center"
+                                                                                    IsChecked="{Binding IsSelected, Mode=TwoWay}"
+                                                                                    IsEnabled="{Binding IsSelectable}" />
+                                                                                <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                                                                    <TextBlock
+                                                                                        FontSize="15"
+                                                                                        FontWeight="SemiBold"
+                                                                                        Text="{Binding DisplayName}"
+                                                                                        TextWrapping="Wrap" />
+                                                                                    <TextBlock
+                                                                                        Style="{StaticResource SubtleTextStyle}"
+                                                                                        Text="{Binding TargetField}"
+                                                                                        TextWrapping="Wrap" />
+                                                                                </StackPanel>
+                                                                                <TextBlock
+                                                                                    Grid.Column="2"
+                                                                                    VerticalAlignment="Center"
+                                                                                    MinWidth="56"
+                                                                                    Style="{StaticResource SubtleTextStyle}"
+                                                                                    Text="{Binding StatusText}"
+                                                                                    TextAlignment="Right" />
+                                                                            </Grid>
+                                                                            <Border
+                                                                                Padding="8,6"
+                                                                                HorizontalAlignment="Stretch"
+                                                                                Style="{StaticResource LogErrorBlockStyle}"
+                                                                                Visibility="{Binding IsError, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert, Mode=OneWay}">
+                                                                                <StackPanel>
+                                                                                    <TextBlock
+                                                                                        Style="{StaticResource LogErrorTextStyle}"
+                                                                                        Text="{Binding CurrentValueText}"
+                                                                                        TextWrapping="Wrap"
+                                                                                        Visibility="{Binding IsTagList, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert, Mode=OneWay}" />
+                                                                                    <ItemsControl
+                                                                                        Style="{StaticResource UnrealLightConfigurationValuesControlStyle}"
+                                                                                        ItemsSource="{Binding CurrentValueItems, Mode=OneWay}"
+                                                                                        ItemTemplate="{StaticResource UnrealLightConfigurationErrorValueTemplate}"
+                                                                                        ItemsPanel="{StaticResource UnrealLightConfigurationValuesPanelTemplate}"
+                                                                                        Visibility="{Binding IsTagList, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}" />
+                                                                                </StackPanel>
+                                                                            </Border>
+                                                                            <Border
+                                                                                Padding="8,6"
+                                                                                HorizontalAlignment="Stretch"
+                                                                                Style="{StaticResource LogDefaultBlockStyle}"
+                                                                                Visibility="{Binding IsError, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert, Mode=OneWay}">
+                                                                                <StackPanel>
+                                                                                    <TextBlock
+                                                                                        Style="{StaticResource LogDefaultTextStyle}"
+                                                                                        Text="{Binding TargetValueText}"
+                                                                                        TextWrapping="Wrap"
+                                                                                        Visibility="{Binding IsTagList, Converter={StaticResource BooleanToVisibilityConverter}, ConverterParameter=Invert, Mode=OneWay}" />
+                                                                                    <ItemsControl
+                                                                                        Style="{StaticResource UnrealLightConfigurationValuesControlStyle}"
+                                                                                        ItemsSource="{Binding TargetValueItems, Mode=OneWay}"
+                                                                                        ItemTemplate="{StaticResource UnrealLightConfigurationDefaultValueTemplate}"
+                                                                                        ItemsPanel="{StaticResource UnrealLightConfigurationValuesPanelTemplate}"
+                                                                                        Visibility="{Binding IsTagList, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}" />
+                                                                                </StackPanel>
+                                                                            </Border>
+                                                                            <Border
+                                                                                Padding="8,6"
+                                                                                Style="{StaticResource LogErrorBlockStyle}"
+                                                                                Visibility="{Binding IsError, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}">
+                                                                                <TextBlock
+                                                                                    Style="{StaticResource LogErrorTextStyle}"
+                                                                                    Text="{Binding ErrorText}"
+                                                                                    TextWrapping="Wrap" />
+                                                                            </Border>
+                                                                        </StackPanel>
+                                                                    </Border>
+                                                                </DataTemplate>
+                                                            </ItemsControl.ItemTemplate>
+                                                        </ItemsControl>
+                                                    </StackPanel>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </ScrollViewer>
+                                    <StackPanel
+                                        Grid.Row="1"
+                                        VerticalAlignment="Center"
+                                        HorizontalAlignment="Center"
+                                        Spacing="6"
+                                        Visibility="{Binding UnrealProjectSync.BlueprintSetupEmptyVisibility, Mode=OneWay}">
+                                        <TextBlock
+                                            HorizontalAlignment="Center"
+                                            FontSize="18"
+                                            FontWeight="SemiBold"
+                                            Text="{Binding UnrealProjectSync.BlueprintSetupEmptyTitle, Mode=OneWay}" />
+                                        <TextBlock
+                                            HorizontalAlignment="Center"
+                                            Style="{StaticResource SubtleTextStyle}"
+                                            Text="{Binding UnrealProjectSync.BlueprintSetupSummaryText, Mode=OneWay}"
+                                            TextWrapping="Wrap" />
+                                    </StackPanel>
+                                    <ScrollViewer
+                                        Grid.Row="1"
                                         HorizontalScrollBarVisibility="Disabled"
                                         VerticalScrollBarVisibility="Auto"
                                         Visibility="{Binding UnrealProjectSync.FoundationWorkspaceVisibility, Mode=OneWay}">
@@ -2763,6 +2902,16 @@
                                                     <TextBlock Grid.Column="1" Text="序列同步" />
                                                     <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep5StatusText, Mode=OneWay}" />
                                                 </Grid>
+                                                <Grid ColumnSpacing="8">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock FontSize="16" Text="6" />
+                                                    <TextBlock Grid.Column="1" Text="蓝图置入" />
+                                                    <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep6StatusText, Mode=OneWay}" />
+                                                </Grid>
                                                 <Grid ColumnSpacing="10">
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="*" />
@@ -2875,6 +3024,25 @@
                                                           Content="{Binding UnrealProjectSync.PublishActionText, Mode=OneWay}"
                                                           IsEnabled="{Binding UnrealProjectSync.CanStartPublish, Mode=OneWay}"
                                                          Style="{StaticResource AccentButtonStyle}" />
+                                                 </StackPanel>
+                                                 <StackPanel Spacing="8" Visibility="{Binding UnrealProjectSync.BlueprintSetupDetailsVisibility, Mode=OneWay}">
+                                                     <TextBlock FontSize="16" FontWeight="SemiBold" Text="蓝图置入" />
+                                                     <TextBlock Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.BlueprintSetupSummaryText, Mode=OneWay}" TextWrapping="Wrap" />
+                                                     <TextBlock FontSize="16" FontWeight="SemiBold" Text="{Binding UnrealProjectSync.BlueprintSetupSelectionText, Mode=OneWay}" />
+                                                     <Button
+                                                         HorizontalAlignment="Stretch"
+                                                         HorizontalContentAlignment="Center"
+                                                         Click="ToggleUnrealBlueprintSetupSelectionButton_Click"
+                                                         Content="{Binding UnrealProjectSync.BlueprintSetupSelectAllText, Mode=OneWay}"
+                                                         IsEnabled="{Binding UnrealProjectSync.CanToggleBlueprintSetupSelection, Mode=OneWay}" />
+                                                     <Button
+                                                         HorizontalAlignment="Stretch"
+                                                         HorizontalContentAlignment="Center"
+                                                         Click="ApplyUnrealBlueprintSetupButton_Click"
+                                                         Content="写入蓝图数据"
+                                                         IsEnabled="{Binding UnrealProjectSync.CanApplyBlueprintSetup, Mode=OneWay}"
+                                                         Style="{StaticResource AccentButtonStyle}" />
+                                                     <TextBlock Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.BlueprintSetupResultMessage, Mode=OneWay}" TextWrapping="Wrap" />
                                                  </StackPanel>
                                                  <StackPanel Spacing="8" Visibility="{Binding UnrealProjectSync.LightConfigurationDetailsVisibility, Mode=OneWay}">
                                                      <TextBlock FontWeight="SemiBold" Text="基础配置" />

@@ -15,6 +15,21 @@ internal sealed record UnrealSyncSessionCacheLoadResult(
     UnrealSyncSessionCache? Cache = null,
     string ErrorMessage = "");
 
+/// <summary>
+/// 虚幻同步台的流程步数。加新步骤时只改这一处。
+///
+/// 步号在好几个地方会被夹到合法区间，之前这个上限散落着写死成 5：
+/// 第六步「蓝图置入」刚接上时，点「下一步」会被静默夹回第五步，
+/// 界面停在原地却已经开始跑虚幻检测，看着就像按钮直接执行了操作。
+/// </summary>
+internal static class UnrealSyncWorkflow
+{
+    public const int MinStep = 1;
+
+    /// <summary>1 底层检测、2 规整素材、3 同步素材、4 基础配置、5 序列同步、6 蓝图置入。</summary>
+    public const int MaxStep = 6;
+}
+
 internal sealed class UnrealSyncSessionCache
 {
     public int DetectionAlgorithmVersion { get; set; }
@@ -47,6 +62,13 @@ internal sealed class UnrealSyncSessionCache
     public List<UnrealLightConfigurationResultItem> LightConfigurationItems { get; set; } = [];
     public HashSet<string> SelectedLightConfigurationIds { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public string LightConfigurationResultMessage { get; set; } = string.Empty;
+
+    // 第六步「蓝图置入」。存下来是为了重进这一步时不必再跑一次虚幻检测——
+    // 离线检测一次十几秒，来回切步骤全是白等。
+    public bool IsBlueprintSetupLoaded { get; set; }
+    public List<UnrealBlueprintSetupResultItem> BlueprintSetupItems { get; set; } = [];
+    public HashSet<string> SelectedBlueprintSetupIds { get; set; } = new(StringComparer.OrdinalIgnoreCase);
+    public string BlueprintSetupResultMessage { get; set; } = string.Empty;
 }
 
 internal sealed class UnrealSyncNormalizationCacheItem

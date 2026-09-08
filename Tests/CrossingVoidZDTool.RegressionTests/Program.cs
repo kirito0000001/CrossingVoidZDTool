@@ -89,6 +89,16 @@ var tests = new (string Name, Action Run)[]
     ("虚幻项目备份使用当前引擎 ZipProjectUp", UnrealBridgeBackupUsesEngineAutomationTool),
     ("虚幻发布快照拒绝草稿角色", UnrealBridgeToolboxSnapshotRejectsDraftCharacter),
     ("虚幻工具箱快照覆盖角色六类模块", UnrealBridgeToolboxSnapshotCoversAllModules),
+    ("蓝图置入目标值取自工具箱数据", BlueprintSetupRequestComesFromToolboxData),
+    ("蓝图置入序列绑定与代号表一致", BlueprintSetupSequenceBindingsMatchCatalog),
+    ("蓝图置入把中文选项映射成虚幻枚举名", BlueprintSetupMapsChineseOptionsToUnrealEnums),
+    ("蓝图置入按行写数据表而不是整表回灌", BlueprintSetupWritesRowsInsteadOfRefillingTable),
+    ("蓝图置入中栏按组显示且隐藏无变化项", BlueprintSetupGroupsItemsAndHidesUnchanged),
+    ("同步流程步号不会被夹回最后一步之前", WorkflowStepIsNotClampedBelowLastStep),
+    ("同步进度按角色和步骤存进角色目录", WorkflowStepCacheLivesInCharacterFolder),
+    ("已加载的步骤不再重复触发虚幻检测", WorkflowStepSkipsDetectionWhenAlreadyLoaded),
+    ("蓝图置入写入按钮在检测结束后可用", BlueprintSetupApplyButtonEnablesAfterScan),
+    ("蓝图置入支持一键全选和全取消", BlueprintSetupSupportsSelectAllToggle),
     ("虚幻工具箱快照只让修改项哈希变化", UnrealBridgeToolboxSnapshotHashesAreItemScoped),
     ("抗性类别变化会更新角色信息同步快照", CharacterAntiChangesSynchronizationSnapshot),
     ("序列帧同步身份在重排时保留且复制时新建", SequenceFrameSyncIdentitySurvivesReorderAndChangesOnCopy),
@@ -4458,6 +4468,433 @@ static void UnrealBridgeToolboxSnapshotRejectsDraftCharacter()
     {
         Directory.Delete(root, recursive: true);
     }
+}
+
+static UnrealProjectSyncViewModel CreateBlueprintSetupViewModel(int pendingCount)
+{
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    viewModel.IsEngineToToolbox = false;
+    viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep);
+    var items = new List<UnrealBlueprintSetupResultItem>
+    {
+        new()
+        {
+            StableId = "bp.icon1p", GroupKey = "onset", GroupName = "对局设置",
+            DisplayName = "1P 主战头像", Status = UnrealBlueprintSetupStatus.Unchanged
+        }
+    };
+    for (var index = 0; index < pendingCount; index++)
+    {
+        items.Add(new UnrealBlueprintSetupResultItem
+        {
+            StableId = $"bp.seq.Field{index}", GroupKey = "sequence", GroupName = "动作序列",
+            DisplayName = $"字段{index}", Status = UnrealBlueprintSetupStatus.Pending,
+            CurrentValues = [""], TargetValues = ["x"]
+        });
+    }
+
+    viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+    {
+        Succeeded = true,
+        CharacterCode = "Misaka",
+        Items = items
+    });
+    return viewModel;
+}
+
+static void BlueprintSetupApplyButtonEnablesAfterScan()
+{
+    var viewModel = CreateBlueprintSetupViewModel(3);
+
+    // 检测结果是在「流程操作进行中」的状态下写进来的，那一刻算出来的可用性必然是假。
+    // 操作收尾时必须重算一次，否则按钮会一直停在灰色——25 项全勾着也按不下去。
+    viewModel.SetWorkflowOperationRunning(true);
+    viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+    {
+        Succeeded = true,
+        CharacterCode = "Misaka",
+        Items =
+        [
+            new UnrealBlueprintSetupResultItem
+            {
+                StableId = "bp.anti", GroupKey = "onset", GroupName = "对局设置",
+                DisplayName = "异能角色", Status = UnrealBlueprintSetupStatus.Pending,
+                CurrentValues = ["false"], TargetValues = ["true"]
+            }
+        ]
+    });
+    AssertEqual(false, viewModel.CanApplyBlueprintSetup);
+
+    viewModel.SetWorkflowOperationRunning(false);
+    AssertEqual(1, viewModel.BlueprintSetupSelectedCount);
+    AssertEqual(true, viewModel.CanApplyBlueprintSetup);
+}
+
+static void BlueprintSetupSupportsSelectAllToggle()
+{
+    var viewModel = CreateBlueprintSetupViewModel(3);
+    AssertEqual(3, viewModel.BlueprintSetupSelectedCount);
+    AssertEqual(true, viewModel.AreAllBlueprintSetupItemsSelected);
+    AssertEqual("全部取消", viewModel.BlueprintSetupSelectAllText);
+
+    viewModel.ToggleAllBlueprintSetupSelection();
+    AssertEqual(0, viewModel.BlueprintSetupSelectedCount);
+    AssertEqual(false, viewModel.AreAllBlueprintSetupItemsSelected);
+    AssertEqual("全选待写入", viewModel.BlueprintSetupSelectAllText);
+    AssertEqual(false, viewModel.CanApplyBlueprintSetup);
+
+    viewModel.ToggleAllBlueprintSetupSelection();
+    AssertEqual(3, viewModel.BlueprintSetupSelectedCount);
+    AssertEqual(true, viewModel.CanApplyBlueprintSetup);
+
+    // 无差异的条目不可勾选，全选不能把它算进来。
+    AssertEqual(3, viewModel.BlueprintSetupItems.Count);
+    AssertSequence(
+        ["bp.seq.Field0", "bp.seq.Field1", "bp.seq.Field2"],
+        viewModel.GetSelectedBlueprintSetupIds().OrderBy(item => item, StringComparer.Ordinal).ToArray());
+}
+
+static void WorkflowStepIsNotClampedBelowLastStep()
+{
+    // 步号上限以前散落着写死成 5：接上第六步之后点「下一步」会被静默夹回第五步，
+    // 界面停在原地却已经跑起了虚幻检测，看着就像按钮直接执行了操作。
+    // 加新步骤时只该改 UnrealSyncWorkflow.MaxStep 一处。
+    AssertEqual(6, UnrealSyncWorkflow.MaxStep);
+
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    // 流程步骤只存在于「工具箱 -> 虚幻」方向，默认方向是反过来的。
+    viewModel.IsEngineToToolbox = false;
+    viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep);
+    AssertEqual(UnrealSyncWorkflow.MaxStep, viewModel.WorkflowStep);
+    AssertEqual(true, viewModel.IsBlueprintSetupWorkspace);
+    // 越界的步号才应该被夹住。
+    viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep + 1);
+    AssertEqual(UnrealSyncWorkflow.MaxStep, viewModel.WorkflowStep);
+
+    // 「进入某一步」的本职是落步，检测只是顺带；两件事不能绑死，
+    // 否则检测失败或被占用就会把人卡在上一步。
+    var window = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "MainWindow.UnrealProjectSync.cs"), Encoding.UTF8);
+    var navigate = window.IndexOf("sync.ReturnToWorkflowStep(step);", StringComparison.Ordinal);
+    var detect = window.IndexOf("await RunWorkflowStepDetectionAsync(sync, step);", StringComparison.Ordinal);
+    AssertEqual(true, navigate > 0 && detect > navigate);
+
+    // 六步共用同一个进入口，各步不再各写一套导航。
+    AssertEqual(1, CountOccurrences(window, "private async Task EnterWorkflowStepAsync("));
+    AssertEqual(1, CountOccurrences(window, "private async Task RunWorkflowStepDetectionAsync("));
+}
+
+static void WorkflowStepCacheLivesInCharacterFolder()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴") with { IsCompleted = true };
+        const string projectPath = @"C:\Unreal\CrossingVoid.uproject";
+        var service = new UnrealSyncSessionCacheService();
+
+        // 没写过就是 Missing，不能报成损坏——第一次进这一步是正常情况。
+        AssertEqual(
+            UnrealSyncSessionCacheLoadStatus.Missing,
+            service.LoadStep(character, projectPath, character.Code, UnrealSyncWorkflow.MaxStep).Status);
+
+        // 每一步各自一个文件，互不覆盖。
+        for (var step = UnrealSyncWorkflow.MinStep; step <= UnrealSyncWorkflow.MaxStep; step++)
+        {
+            AssertEqual(true, service.Write(character, projectPath, new UnrealSyncSessionCache
+            {
+                ProjectPath = projectPath,
+                SelectedCharacterCode = character.Code,
+                WorkflowStep = step,
+                IsPublishDetection = true
+            }));
+        }
+
+        // 缓存要落在角色自己的目录里：角色之间不会撞车，导出角色时进度一起带走。
+        var cacheFolder = UnrealSyncSessionCacheService.GetCacheFolderPath(character);
+        AssertEqual(true, cacheFolder.StartsWith(character.ToolFolderPath, StringComparison.OrdinalIgnoreCase));
+        AssertEqual(
+            UnrealSyncWorkflow.MaxStep - UnrealSyncWorkflow.MinStep + 1,
+            Directory.GetFiles(cacheFolder, "*.json").Length);
+
+        for (var step = UnrealSyncWorkflow.MinStep; step <= UnrealSyncWorkflow.MaxStep; step++)
+        {
+            var loaded = service.LoadStep(character, projectPath, character.Code, step);
+            AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, loaded.Status);
+            AssertEqual(step, loaded.Cache!.WorkflowStep);
+        }
+
+        // 恢复现场时取最近写过的那一步。
+        AssertEqual(
+            UnrealSyncWorkflow.MaxStep,
+            service.LoadLatest(character, projectPath, character.Code).Cache!.WorkflowStep);
+
+        // 同一个角色对接另一个 Unreal 项目时不能读到这一份。
+        AssertEqual(
+            UnrealSyncSessionCacheLoadStatus.Missing,
+            service.LoadStep(character, @"D:\Other\Other.uproject", character.Code, UnrealSyncWorkflow.MaxStep).Status);
+
+        // 落盘被强杀打断会留下 0 字节文件，那是「没有缓存」，不是「缓存损坏」，
+        // 不该弹错误提示。
+        var emptyPath = Path.Combine(cacheFolder, Path.GetFileName(
+            Directory.GetFiles(cacheFolder, "*.json").OrderBy(path => path).First()));
+        File.WriteAllText(emptyPath, string.Empty);
+        AssertEqual(
+            UnrealSyncSessionCacheLoadStatus.Missing,
+            service.LoadStep(character, projectPath, character.Code, UnrealSyncWorkflow.MinStep).Status);
+
+        // 某一步的文件坏了，只该让那一步失效，不该拖垮整次恢复。
+        var brokenPath = Directory.GetFiles(cacheFolder, "*.json")
+            .OrderByDescending(path => path)
+            .First();
+        File.WriteAllText(brokenPath, "{ 这不是 JSON");
+        var latest = service.LoadLatest(character, projectPath, character.Code);
+        AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, latest.Status);
+        AssertEqual(UnrealSyncWorkflow.MaxStep - 1, latest.Cache!.WorkflowStep);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void WorkflowStepSkipsDetectionWhenAlreadyLoaded()
+{
+    var viewModel = CreateBlueprintSetupViewModel(2);
+
+    // 第六步已经有数据，再进这一步就不该重跑虚幻检测。
+    AssertEqual(true, viewModel.IsWorkflowStepLoaded(6));
+    // 其余步骤各看各的状态，不能跟着第六步一起被认为已加载。
+    AssertEqual(false, viewModel.IsWorkflowStepLoaded(2));
+    AssertEqual(false, viewModel.IsWorkflowStepLoaded(4));
+
+    // 第三步和第五步共用同一棵差异树，必须靠归属区分，
+    // 否则从第五步回第三步会误以为已经检测过。
+    AssertEqual(false, viewModel.IsWorkflowStepLoaded(3));
+    AssertEqual(false, viewModel.IsWorkflowStepLoaded(5));
+}
+
+static void BlueprintSetupRequestComesFromToolboxData()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴") with { IsCompleted = true };
+        var info = new CharacterInfoData
+        {
+            Code = character.Code,
+            Name = "御坂美琴",
+            Anti = true,
+            FormLimit = 2
+        };
+        new CharacterInfoService().Save(character, info);
+
+        // 对局内头像是固定四槽：1=1P 主战、2=1P 护援、3=2P 主战、4=2P 护援。
+        // 主战两张进角色蓝图，护援两张进 SupImage 表，接错就会把头像装到别人身上。
+        var materialService = new BaseMaterialService();
+        var images = new List<string>();
+        for (var index = 1; index <= 4; index++)
+        {
+            var path = Path.Combine(root, $"avatar{index}.png");
+            WriteSolidImage(path, Color.Red, 566, 325);
+            images.Add(path);
+        }
+        materialService.ReplaceWithImages(character, BaseMaterialKind.BattleAvatar, images);
+
+        var skills = new CharacterSkillsData();
+        var first = CharacterSkillsService.CreateEntry();
+        first.PositionName = "群体攻击";
+        first.TrueName = "雷击枪";
+        first.PtCost = "3";
+        first.SkillState = "常态";
+        first.GuardState = "反击";
+        first.GuardValue = "0.5";
+        skills.FirstSkill.Add(first);
+        var combo = CharacterSkillsService.CreateEntry();
+        combo.TrueName = "电光石火";
+        combo.ComboCharacterName = "桐人[SAO]";
+        skills.ComboSkills.Add(combo);
+        new CharacterSkillsService().Save(character, skills);
+
+        var sections = materialService.LoadSections(character);
+        var request = new UnrealBlueprintSetupService().BuildRequest(
+            character, info, skills, sections);
+
+        AssertEqual("御坂美琴", request.CharacterName);
+        AssertEqual(2, request.FormCount);
+        AssertEqual(true, request.Anti);
+
+        var avatarSlots = sections
+            .Single(section => section.Spec.Kind == BaseMaterialKind.BattleAvatar)
+            .Items.ToDictionary(item => item.Index, item => item.FilePath);
+        AssertEqual(
+            UnrealBlueprintSetupService.BuildImageObjectPath("Misaka", avatarSlots[1]),
+            request.Icon1PObjectPath);
+        AssertEqual(
+            UnrealBlueprintSetupService.BuildImageObjectPath("Misaka", avatarSlots[3]),
+            request.Icon2PObjectPath);
+        AssertEqual(
+            UnrealBlueprintSetupService.BuildImageObjectPath("Misaka", avatarSlots[2]),
+            request.Support1PObjectPath);
+        AssertEqual(
+            UnrealBlueprintSetupService.BuildImageObjectPath("Misaka", avatarSlots[4]),
+            request.Support2PObjectPath);
+
+        AssertEqual(
+            "/Game/GameActor2D/Misaka/Misaka_AnimBP.Misaka_AnimBP_C",
+            request.AnimInstanceClassObjectPath);
+        // 站街 Flipbook 的规范名不带角色前缀，序列同步就是这么产的。
+        AssertEqual(
+            "/Game/GameActor2D/Misaka/Material/Idle/Idle_Flipbook.Idle_Flipbook",
+            request.IdleFlipbookObjectPath);
+
+        // 技能按形态并列，保存时工具箱会补齐到 FormLimit 条，
+        // 这里 FormLimit=2，所以第二形态是一条空白占位。
+        var slot1 = request.Skills.Single(item => item.SlotKey == "SkillSlot1");
+        AssertSequence(["群体攻击", ""], slot1.Names.ToArray());
+        AssertSequence(["雷击枪", ""], slot1.SkillNames.ToArray());
+        AssertSequence([3, 0], slot1.PointCosts.ToArray());
+        AssertSequence(["Normal", "Air"], slot1.SkillStates.ToArray());
+        AssertSequence(["Attack", "Air"], slot1.PreformTypes.ToArray());
+        AssertSequence([0.5, 0d], slot1.PreSkillValues.ToArray());
+
+        // 连携技按搭档分条，行键就是搭档的中文名。
+        var comboPayload = request.Skills.Single(item => item.SlotKey == "Combo");
+        AssertEqual("桐人[SAO]", comboPayload.PartnerName);
+        AssertEqual("电光石火", comboPayload.SkillNames[0]);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void BlueprintSetupSequenceBindingsMatchCatalog()
+{
+    var bindings = UnrealBlueprintSetupService.BuildSequenceBindings("Misaka", 2);
+
+    // 只有代号表里标了蓝图属性的动作才归第六步管，其余靠 AnimMaps 绑定。
+    var expected = SequenceActionCatalog.Definitions
+        .Where(item => !string.IsNullOrEmpty(item.BlueprintSequenceArrayProperty))
+        .Select(item => item.BlueprintSequenceArrayProperty)
+        .OrderBy(item => item, StringComparer.Ordinal)
+        .ToArray();
+    AssertSequence(
+        expected,
+        bindings.Select(item => item.PropertyName).OrderBy(item => item, StringComparer.Ordinal).ToArray());
+
+    // 形态 N 存在下标 N-1，第二形态的资产名要带 _Shape2。
+    var click = bindings.Single(item => item.PropertyName == "ClickSeq");
+    AssertSequence(
+        [
+            "/Game/GameActor2D/Misaka/AnimSequences/Click.Click",
+            "/Game/GameActor2D/Misaka/AnimSequences/Click_Shape2.Click_Shape2"
+        ],
+        click.ObjectPaths.ToArray());
+}
+
+static void BlueprintSetupMapsChineseOptionsToUnrealEnums()
+{
+    // 工具箱存的是中文选项，Unreal 的 E2DSkillType/EPreformType 是英文枚举名，
+    // 映射错了不会报错，只会静悄悄写进一个错的状态。
+    AssertEqual("Normal", UnrealBlueprintSetupService.MapSkillStateToUnreal("常态"));
+    AssertEqual("Disable", UnrealBlueprintSetupService.MapSkillStateToUnreal("禁用"));
+    AssertEqual("Abandon", UnrealBlueprintSetupService.MapSkillStateToUnreal("舍弃"));
+    AssertEqual("Air", UnrealBlueprintSetupService.MapSkillStateToUnreal("空"));
+    AssertEqual("Air", UnrealBlueprintSetupService.MapSkillStateToUnreal(string.Empty));
+
+    // 守备的「反击」对应的是 EPreformType.Attack，不是字面意义上的攻击。
+    AssertEqual("Defense", UnrealBlueprintSetupService.MapGuardStateToUnreal("防御"));
+    AssertEqual("Attack", UnrealBlueprintSetupService.MapGuardStateToUnreal("反击"));
+    AssertEqual("Dodge", UnrealBlueprintSetupService.MapGuardStateToUnreal("闪避"));
+    AssertEqual("Air", UnrealBlueprintSetupService.MapGuardStateToUnreal("空"));
+}
+
+static void BlueprintSetupWritesRowsInsteadOfRefillingTable()
+{
+    var script = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "apply_blueprint_setup.py"), Encoding.UTF8);
+
+    // FSkillData2D 自带 Name 属性，和数据表的行名字段同名。整表回灌会把每行的
+    // 行名覆盖成技能名字数组，2DSubSkill 那 27 行会一次全废，所以绝不能出现。
+    AssertEqual(false, script.Contains(".fill_from_json_string("));
+    AssertEqual(false, script.Contains(".fill_data_table_from_json_string("));
+    AssertEqual(true, script.Contains("upsert_data_table_row("));
+
+    // 读取侧同样不能走整表导出：UDataTable 的 JSON 导出器把行名字段（默认叫 "Name"）
+    // 当作 FieldToSkip 传给 WriteStruct，FSkillData2D 恰好也有个 Name 属性，
+    // 于是每行的技能名字导出来永远是空数组——比对时被永远判成待写入，
+    // 写进去了也看不出变化。必须按行读。
+    AssertEqual(false, script.Contains(".export_to_json_string()"));
+    AssertEqual(true, script.Contains("read_data_table_row("));
+
+    // 蓝图技能槽里的 FText 也走桥接插件，否则本地化键会被降级成文化无关文本。
+    AssertEqual(true, script.Contains("apply_json_to_struct_property"));
+
+    // 扫描和写入必须共用同一份载荷，只差一个 Mode。分成两套算法的话，
+    // 界面报「无差异」而写入却改了东西这种事迟早会发生。
+    var window = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "MainWindow.UnrealProjectSync.cs"), Encoding.UTF8);
+    AssertEqual(true, window.Contains("request.Mode = apply ? \"Apply\" : \"Scan\";"));
+    // 扫描和写入都只经这一个执行方法，载荷自然是同一份。
+    AssertEqual(1, CountOccurrences(window, "private async Task<UnrealBlueprintSetupResult> ExecuteUnrealBlueprintSetupAsync("));
+    AssertEqual(2, CountOccurrences(window, "await ExecuteUnrealBlueprintSetupAsync("));
+}
+
+static void BlueprintSetupGroupsItemsAndHidesUnchanged()
+{
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    viewModel.IsEngineToToolbox = false;
+    viewModel.ReturnToWorkflowStep(6);
+    viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+    {
+        Succeeded = true,
+        CharacterCode = "Misaka",
+        Items =
+        [
+            new UnrealBlueprintSetupResultItem
+            {
+                StableId = "bp.icon1p", GroupKey = "onset", GroupName = "对局设置",
+                DisplayName = "1P 主战头像", Status = UnrealBlueprintSetupStatus.Unchanged
+            },
+            new UnrealBlueprintSetupResultItem
+            {
+                StableId = "bp.anti", GroupKey = "onset", GroupName = "对局设置",
+                DisplayName = "异能角色", Status = UnrealBlueprintSetupStatus.Pending,
+                CurrentValues = ["false"], TargetValues = ["true"]
+            },
+            new UnrealBlueprintSetupResultItem
+            {
+                StableId = "bp.skill.SkillSlot1.SkillName", GroupKey = "SkillSlot1", GroupName = "一技能",
+                DisplayName = "技能真名", Status = UnrealBlueprintSetupStatus.Pending,
+                CurrentValues = ["掌心雷"], TargetValues = ["雷击枪"]
+            }
+        ]
+    });
+
+    // 统计按全部条目算，但无变化的不进中栏——一个角色六十多条，
+    // 全铺出来会把真正待处理的几条埋掉。
+    AssertEqual(1, viewModel.BlueprintSetupUnchangedCount);
+    AssertEqual(2, viewModel.BlueprintSetupPendingCount);
+    AssertEqual(2, viewModel.BlueprintSetupItems.Count);
+    AssertSequence(
+        ["对局设置", "一技能"],
+        viewModel.BlueprintSetupGroups.Select(group => group.GroupName).ToArray());
+    AssertSequence(
+        ["bp.anti", "bp.skill.SkillSlot1.SkillName"],
+        viewModel.GetSelectedBlueprintSetupIds().OrderBy(item => item, StringComparer.Ordinal).ToArray());
+
+    // 取消勾选后不能再进入写入集合。
+    viewModel.BlueprintSetupItems[0].IsSelected = false;
+    AssertSequence(
+        ["bp.skill.SkillSlot1.SkillName"],
+        viewModel.GetSelectedBlueprintSetupIds().ToArray());
+    AssertEqual(true, viewModel.CanApplyBlueprintSetup);
+
+    // 一项都没勾时写入按钮必须灰掉，否则会发一次空写入。
+    viewModel.BlueprintSetupItems[1].IsSelected = false;
+    AssertEqual(0, viewModel.GetSelectedBlueprintSetupIds().Count);
+    AssertEqual(false, viewModel.CanApplyBlueprintSetup);
 }
 
 static void UnrealBridgeToolboxSnapshotCoversAllModules()

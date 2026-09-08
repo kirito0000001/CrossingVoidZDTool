@@ -586,6 +586,12 @@ def _object_path_array(values):
 
 def _enum_text(value):
     text = _to_text(value).strip()
+    if text.startswith("<") and text.endswith(">"):
+        text = text[1:-1].strip()
+        # "E2DSkillType.NORMAL: 1" -> "E2DSkillType.NORMAL"
+        colon = text.rfind(":")
+        if colon >= 0 and text[colon + 1:].strip().lstrip("-").isdigit():
+            text = text[:colon].strip()
     if "::" in text:
         return text.rsplit("::", 1)[-1]
     if "." in text:

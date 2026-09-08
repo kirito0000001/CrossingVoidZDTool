@@ -44,3 +44,18 @@ namespace CrossingVoidZDTool.Services;
 internal sealed partial class AppJsonSerializerContext : JsonSerializerContext
 {
 }
+
+/// <summary>
+/// 第六步「蓝图置入」的请求和结果单独用一个上下文，因为它跟桥接脚本约定的是
+/// camelCase：请求由 C# 写、Python 读，结果反过来，两边字段名必须一致。
+/// 其余协议沿用 <see cref="AppJsonSerializerContext"/> 的 PascalCase，不受影响。
+/// </summary>
+[JsonSourceGenerationOptions(
+    PropertyNameCaseInsensitive = true,
+    PropertyNamingPolicy = JsonKnownNamingPolicy.CamelCase)]
+[JsonSerializable(typeof(UnrealBlueprintSetupRequest))]
+[JsonSerializable(typeof(UnrealBlueprintSetupResult))]
+[JsonSerializable(typeof(UnrealBlueprintSetupResultItem))]
+internal sealed partial class UnrealBlueprintSetupJsonContext : JsonSerializerContext
+{
+}

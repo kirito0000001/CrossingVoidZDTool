@@ -1034,6 +1034,10 @@ namespace CrossingVoidZDTool
                 CompleteGlobalProgress("差异检测完成", $"发现 {changedCount} 项变化；冲突和重定向项未默认勾选。");
                 var targetWorkflowStep = _workflowStepAfterPublishDetection;
                 _workflowStepAfterPublishDetection = 0;
+                // 记下这棵差异树属于哪一步：第三步和第五步共用同一棵树、范围不同，
+                // 不区分的话回到另一步会误以为已经检测过而直接复用。
+                _applicationViewModel.UnrealProjectSync.SetLoadedPublishStep(
+                    targetWorkflowStep is 3 or 5 ? targetWorkflowStep : 3);
                 if (targetWorkflowStep == 2)
                 {
                     _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(1);
@@ -1183,11 +1187,15 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private void UnrealSyncPreviousStepButton_Click(object sender, RoutedEventArgs e)
+        private async void UnrealSyncPreviousStepButton_Click(object sender, RoutedEventArgs e)
         {
             LogUserOperation("同步流程：上一步");
-            var step = _applicationViewModel.UnrealProjectSync.WorkflowStep;
-            _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(Math.Max(1, step - 1));
+            var sync = _applicationViewModel.UnrealProjectSync;
+            // 回退也走同一个进入口：有缓存就直接显示，没有才检测。
+            // 之前退回去只是改了步号，落到一个空面板上，还得再手动点一次重新加载。
+            await EnterWorkflowStepAsync(
+                sync,
+                Math.Max(UnrealSyncWorkflow.MinStep, sync.WorkflowStep - 1));
         }
 
         private void UnrealFoundationCheckItem_Tapped(object sender, TappedRoutedEventArgs e)
@@ -1206,110 +1214,95 @@ namespace CrossingVoidZDTool
         {
             LogUserOperation("同步流程：下一步");
             var sync = _applicationViewModel.UnrealProjectSync;
-            if (sync.WorkflowStep == 1)
+            var step = sync.WorkflowStep;
+            if (step >= UnrealSyncWorkflow.MaxStep)
             {
-                if (!sync.CanAdvanceWorkflow)
-                {
-                    ShowFloatingTip(InfoBarSeverity.Informational, "当前步骤尚未完成", "请先选择角色，并完成底层检测。");
-                    return;
-                }
-
-                sync.ReturnToWorkflowStep(2);
-                if (!sync.IsNormalizationStepLoaded)
-                {
-                    await ReloadUnrealNormalizationStepAsync(sync);
-                }
+                ShowFloatingTip(InfoBarSeverity.Informational, "已经是最后一步", "蓝图置入完成后本次同步就结束了。");
                 return;
             }
 
-            if (sync.WorkflowStep == 2)
+            if (!TryLeaveWorkflowStep(sync, step))
             {
-                if (!sync.IsNormalizationStepLoaded)
-                {
-                    ShowFloatingTip(InfoBarSeverity.Informational, "规整素材尚未加载完成", "请等待当前加载完成，或点击“重新加载规整素材”。");
-                    return;
-                }
+                return;
+            }
 
-                if (sync.NormalizationItems.Any(item => !item.IsResolved))
-                {
+            // 第三步确认没有待同步内容后，要把「同步结果」面板收好再走，
+            // 否则第四步会带着第三步的操作提示。这里不能再触发一次素材同步事件，
+            // 那会重复执行同步前检测和同步操作。
+            if (step == 3)
+            {
+                sync.CompletePublishOperation(0, 0);
+            }
+
+            await EnterWorkflowStepAsync(sync, step + 1);
+        }
+
+        /// <summary>
+        /// 当前步骤是否满足离开条件；不满足时给出这一步自己的提示。
+        /// 只做判断，不改任何状态。
+        /// </summary>
+        private bool TryLeaveWorkflowStep(UnrealProjectSyncViewModel sync, int step)
+        {
+            switch (step)
+            {
+                case 1 when !sync.CanAdvanceWorkflow:
+                    ShowFloatingTip(InfoBarSeverity.Informational, "第一步尚未完成", "请先选择角色，并完成底层检测。");
+                    return false;
+                case 2 when !sync.IsNormalizationStepLoaded:
+                    ShowFloatingTip(InfoBarSeverity.Informational, "规整素材尚未加载完成", "请等待当前加载完成，或点击“重新加载规整素材”。");
+                    return false;
+                case 2 when sync.NormalizationItems.Any(item => !item.IsResolved):
                     ShowFloatingTip(
                         InfoBarSeverity.Informational,
-                        "当前步骤尚未完成",
+                        "第二步尚未完成",
                         $"还有 {sync.NormalizationItems.Count(item => !item.IsResolved)} 项 Unreal 素材没有选择处理方式。");
-                    return;
-                }
-
-                if (sync.HasContentDetection)
-                {
-                    if (!TryBeginUnrealWorkflowOperation())
-                    {
-                        return;
-                    }
-
-                    try
-                    {
-                        ShowGlobalProgress("加载同步素材列表", sync.SelectedSource?.DraftCharacter?.Code ?? string.Empty);
-                        await Task.Yield();
-                        sync.ReturnToWorkflowStep(3);
-                        CompleteGlobalProgress("同步素材列表已加载", "已复用本次同步缓存，未重新检测 Unreal。");
-                        await HideGlobalProgressAfterDelayAsync();
-                    }
-                    finally
-                    {
-                        EndUnrealWorkflowOperation();
-                    }
-                    return;
-                }
-
-                _workflowStepAfterPublishDetection = 3;
-                DetectUnrealPublishChangesButton_Click(sender, e);
-                return;
-            }
-
-            if (sync.WorkflowStep == 3)
-            {
-                if (!sync.HasNoPublishChanges)
-                {
+                    return false;
+                case 3 when !sync.HasNoPublishChanges:
                     ShowFloatingTip(
                         InfoBarSeverity.Informational,
                         "第三步尚未完成",
                         "请先同步已勾选素材；确认没有待同步内容后，才能进入基础配置。");
-                    return;
-                }
-
-                // 第三步已经确认没有待同步内容时，只进入第四步；这里不能再次调用
-                // 素材同步事件，否则会重复执行同步前检测和同步操作。
-                sync.CompletePublishOperation(0, 0);
-                if (!sync.IsLightConfigurationLoaded)
-                {
-                    await ReloadUnrealLightConfigurationStepAsync(sync);
-                }
-                return;
-            }
-
-            if (sync.WorkflowStep == 4)
-            {
-                if (!sync.CanAdvanceWorkflow)
-                {
-                    ShowFloatingTip(InfoBarSeverity.Informational, "第四步尚未完成", "请先完成基础配置。" );
-                    return;
-                }
-
-                sync.ReturnToWorkflowStep(5);
-                _workflowStepAfterPublishDetection = 5;
-                DetectUnrealPublishChangesButton_Click(sender, e);
-                return;
-            }
-
-            if (!sync.AdvanceWorkflowStep())
-            {
-                ShowFloatingTip(InfoBarSeverity.Informational, "当前步骤尚未完成", "请先完成当前步骤。");
+                    return false;
+                case 4 when !sync.CanAdvanceWorkflow:
+                    ShowFloatingTip(InfoBarSeverity.Informational, "第四步尚未完成", "请先完成基础配置。");
+                    return false;
+                case 5 when !sync.CanAdvanceWorkflow:
+                    ShowFloatingTip(
+                        InfoBarSeverity.Informational,
+                        "第五步尚未完成",
+                        "请先同步已勾选的序列；确认没有待同步内容后，才能进入蓝图置入。");
+                    return false;
+                default:
+                    return true;
             }
         }
 
-        private async void ReloadUnrealWorkflowStepButton_Click(object sender, RoutedEventArgs e)
+        /// <summary>
+        /// 进入某一步：先落步，再按需检测。
+        ///
+        /// 两件事必须分开。先落步是按钮的本职——检测失败、被别的操作占用、
+        /// 或者干脆不检测，都不该把人卡在上一步。按需是指这一步已经有数据
+        /// （内存里的，或刚从该步缓存恢复的）时就不再跑虚幻：六步来回切，
+        /// 每次都重检测纯粹是干等，离线一次就是十几秒。
+        /// </summary>
+        private async Task EnterWorkflowStepAsync(
+            UnrealProjectSyncViewModel sync,
+            int step,
+            bool forceReload = false)
         {
-            var sync = _applicationViewModel.UnrealProjectSync;
+            sync.ReturnToWorkflowStep(step);
+            if (!forceReload && sync.IsWorkflowStepLoaded(step))
+            {
+                AppendLog(LogKind.Info, $"[Workflow] step={step} 复用本步缓存，未重新检测 Unreal。");
+                return;
+            }
+
+            await RunWorkflowStepDetectionAsync(sync, step);
+        }
+
+        /// <summary>跑某一步自己的检测。每一步的范围不同，但入口只有这一个。</summary>
+        private async Task RunWorkflowStepDetectionAsync(UnrealProjectSyncViewModel sync, int step)
+        {
             var characterCode = sync.SelectedSource?.DraftCharacter?.Code;
             if (string.IsNullOrWhiteSpace(characterCode))
             {
@@ -1317,43 +1310,42 @@ namespace CrossingVoidZDTool
                 return;
             }
 
-            if (sync.WorkflowStep == 1)
+            switch (step)
             {
-                sync.RefreshFoundationChecks(characterCode);
-                ShowFloatingTip(InfoBarSeverity.Informational, "底层检测已重新加载", sync.FoundationSummaryText);
+                case 1:
+                    sync.RefreshFoundationChecks(characterCode);
+                    ShowFloatingTip(InfoBarSeverity.Informational, "底层检测已重新加载", sync.FoundationSummaryText);
+                    break;
+                case 2:
+                    await ReloadUnrealNormalizationStepAsync(sync);
+                    break;
+                case 3:
+                case 5:
+                    // 第三步和第五步走同一条差异检测，只是导出范围和默认勾选不同。
+                    _workflowStepAfterPublishDetection = step;
+                    DetectUnrealPublishChangesButton_Click(this, new RoutedEventArgs());
+                    break;
+                case 4:
+                    await ReloadUnrealLightConfigurationStepAsync(sync);
+                    break;
+                case 6:
+                    await ReloadUnrealBlueprintSetupStepAsync(sync);
+                    break;
+            }
+        }
+
+        private async void ReloadUnrealWorkflowStepButton_Click(object sender, RoutedEventArgs e)
+        {
+            var sync = _applicationViewModel.UnrealProjectSync;
+            if (string.IsNullOrWhiteSpace(sync.SelectedSource?.DraftCharacter?.Code))
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
                 return;
             }
 
-            if (sync.WorkflowStep == 2)
-            {
-                await ReloadUnrealNormalizationStepAsync(sync);
-                return;
-            }
-
-            if (sync.WorkflowStep == 3)
-            {
-                _workflowStepAfterPublishDetection = sync.WorkflowStep;
-                DetectUnrealPublishChangesButton_Click(sender, e);
-                return;
-            }
-
-            if (sync.WorkflowStep == 4)
-            {
-                await ReloadUnrealLightConfigurationStepAsync(sync);
-                return;
-            }
-
-            if (sync.WorkflowStep == 5)
-            {
-                _workflowStepAfterPublishDetection = 5;
-                DetectUnrealPublishChangesButton_Click(sender, e);
-                return;
-            }
-
-            ShowFloatingTip(
-                sync.ReloadPublishResult() ? InfoBarSeverity.Success : InfoBarSeverity.Warning,
-                "同步结果已重新加载",
-                sync.ImportResultMessage);
+            // 「重新加载」是用户明确要求重查，无论本步有没有缓存都要真跑一次。
+            LogUserOperation($"同步流程：重新加载第 {sync.WorkflowStep} 步");
+            await EnterWorkflowStepAsync(sync, sync.WorkflowStep, forceReload: true);
         }
 
         private async Task ReloadUnrealNormalizationStepAsync(UnrealProjectSyncViewModel sync)
@@ -1555,6 +1547,171 @@ namespace CrossingVoidZDTool
             {
                 EndUnrealWorkflowOperation();
             }
+        }
+
+        private void ToggleUnrealBlueprintSetupSelectionButton_Click(object sender, RoutedEventArgs e)
+        {
+            var sync = _applicationViewModel.UnrealProjectSync;
+            sync.ToggleAllBlueprintSetupSelection();
+            LogUserOperation($"蓝图置入：{sync.BlueprintSetupSelectionText}");
+        }
+
+        private async void ApplyUnrealBlueprintSetupButton_Click(object sender, RoutedEventArgs e)
+        {
+            LogUserOperation("应用 Unreal 蓝图置入");
+            var sync = _applicationViewModel.UnrealProjectSync;
+            var character = sync.SelectedSource?.DraftCharacter;
+            var selectedIds = sync.GetSelectedBlueprintSetupIds();
+            if (character is null)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
+                return;
+            }
+            if (selectedIds.Count == 0)
+            {
+                ShowFloatingTip(InfoBarSeverity.Informational, "没有选择字段", "请至少勾选一项待写入内容。");
+                return;
+            }
+            if (!TryBeginUnrealWorkflowOperation())
+            {
+                return;
+            }
+
+            sync.SetApplyingBlueprintSetup(true);
+            ShowGlobalProgress("写入蓝图数据", character.Code);
+            try
+            {
+                // 备份开关只看整体设置，和第三、五步同一条规则。
+                if (Settings.BackupBeforeUnrealSync)
+                {
+                    await CreateUnrealProjectBackupAsync(character.Code, sync.EnginePath, sync.ProjectPath);
+                }
+
+                UpdateGlobalProgress("正在写入并复查蓝图数据...", 45, $"{selectedIds.Count} 项", true);
+                var result = await ExecuteUnrealBlueprintSetupAsync(character, apply: true, selectedIds);
+                // 写完后脚本会重扫一遍，这里直接用复查结果刷新界面，
+                // 勾选清空避免把已写入的项再算作待处理。
+                sync.SetBlueprintSetupResult(
+                    result,
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                    selectPendingByDefault: false);
+                CompleteGlobalProgress(
+                    "蓝图数据写入完成",
+                    $"已写入 {result.AppliedStableIds.Count} 项，剩余待写入 {sync.BlueprintSetupPendingCount} 项。");
+                AppendLog(LogKind.Info,
+                    $"[Blueprint Setup] applied={result.AppliedStableIds.Count} saved={result.SavedAssets.Count} pending={sync.BlueprintSetupPendingCount}");
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            catch (OperationCanceledException ex)
+            {
+                CompleteGlobalProgress("蓝图数据写入已取消", character.Code);
+                AppendLog(LogKind.Warning, "写入 Unreal 蓝图数据已取消。", ex);
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            catch (Exception ex)
+            {
+                sync.FailBlueprintSetup(ex.Message);
+                CompleteGlobalProgress("蓝图数据写入失败", ex.Message);
+                ShowFloatingTip(InfoBarSeverity.Error, "蓝图数据写入失败", ex.Message);
+                AppendLog(LogKind.Error, "写入 Unreal 蓝图数据失败。", ex);
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            finally
+            {
+                sync.SetApplyingBlueprintSetup(false);
+                EndUnrealWorkflowOperation();
+            }
+        }
+
+        private async Task ReloadUnrealBlueprintSetupStepAsync(UnrealProjectSyncViewModel sync)
+        {
+            var character = sync.SelectedSource?.DraftCharacter;
+            if (character is null)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
+                return;
+            }
+            if (!TryBeginUnrealWorkflowOperation())
+            {
+                return;
+            }
+
+            ShowGlobalProgress("检测蓝图数据", character.Code);
+            try
+            {
+                sync.ReturnToWorkflowStep(6);
+                var result = await ExecuteUnrealBlueprintSetupAsync(character, apply: false, Array.Empty<string>());
+                sync.SetBlueprintSetupResult(result);
+                CompleteGlobalProgress(
+                    "蓝图数据检测完成",
+                    $"待写入 {sync.BlueprintSetupPendingCount} 项，错误 {sync.BlueprintSetupErrorCount} 项。");
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            catch (OperationCanceledException ex)
+            {
+                CompleteGlobalProgress("蓝图数据检测已取消", character.Code);
+                AppendLog(LogKind.Warning, "检测 Unreal 蓝图数据已取消。", ex);
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            catch (Exception ex)
+            {
+                sync.FailBlueprintSetup(ex.Message);
+                CompleteGlobalProgress("蓝图数据检测失败", ex.Message);
+                ShowFloatingTip(InfoBarSeverity.Error, "蓝图数据检测失败", ex.Message);
+                AppendLog(LogKind.Error, "检测 Unreal 蓝图数据失败。", ex);
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            finally
+            {
+                EndUnrealWorkflowOperation();
+            }
+        }
+
+        /// <summary>
+        /// 目标值全部由工具箱这边推导，Unreal 只负责比对和写入，
+        /// 所以扫描和写入用的是同一份请求载荷，只差一个 Mode。
+        /// </summary>
+        private async Task<UnrealBlueprintSetupResult> ExecuteUnrealBlueprintSetupAsync(
+            CharacterCard character,
+            bool apply,
+            IReadOnlyCollection<string> selectedStableIds)
+        {
+            var sync = _applicationViewModel.UnrealProjectSync;
+            var service = new UnrealBlueprintSetupService();
+            var workFolder = Path.Combine(
+                Path.GetDirectoryName(sync.ProjectPath)!,
+                "Intermediate",
+                "ZDToolboxBridge",
+                character.Code,
+                "BlueprintSetup");
+            Directory.CreateDirectory(workFolder);
+            var requestPath = Path.Combine(workFolder, apply ? "apply.request.json" : "scan.request.json");
+            var resultPath = Path.Combine(workFolder, apply ? "apply.result.json" : "scan.result.json");
+
+            var request = service.BuildRequest(
+                character,
+                new CharacterInfoService().Load(character),
+                new CharacterSkillsService().Load(character),
+                new BaseMaterialService().LoadSections(character),
+                selectedStableIds);
+            request.Mode = apply ? "Apply" : "Scan";
+            service.SaveRequest(requestPath, request);
+
+            var offlineStartInfo = service.BuildProcessStartInfo(
+                sync.EnginePath,
+                sync.ProjectPath,
+                requestPath,
+                resultPath);
+            var launch = new UnrealPythonTaskExecutionService().BuildLaunch(
+                sync.EnginePath,
+                sync.ProjectPath,
+                service.GetScriptPath(),
+                Path.Combine(workFolder, apply ? "apply.remote-job.json" : "scan.remote-job.json"),
+                offlineStartInfo);
+            return await service.ExecuteAsync(
+                launch.StartInfo,
+                resultPath,
+                GetGlobalProgressCancellationToken());
         }
 
         private async Task<UnrealLightConfigurationResult> ExecuteUnrealLightConfigurationAsync(
