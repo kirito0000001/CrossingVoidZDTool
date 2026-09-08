@@ -488,10 +488,15 @@ internal sealed class UnrealBridgeDiffService
                                 ? UnrealBridgeChangeKind.Renamed
                                 : UnrealBridgeChangeKind.Unchanged;
         }
-        // 序列帧两侧的哈希本来就不可直接比较（工具箱是源文件，Unreal 是导出预览），
-        // 所以只要资产已经在规范位置就当作已同步，并在这一轮建立基线。
-        else if (isMigrationSafePair &&
-            (baseline is null || referenceItem.Module == UnrealBridgeModule.SequenceFrames))
+        // 走到这里说明这一项在基线里没有记录。两侧的哈希本来就不可直接比较
+        // （工具箱是源文件，Unreal 是导出的资产），所以只要资产已经在规范位置、
+        // 用的就是工具箱会给的规范名，就当作已同步，并在这一轮补记基线。
+        //
+        // 这里以前还要求「整个基线文件为空」，只覆盖得了「第一次同步」。
+        // 于是把 Unreal 工程换个盘符之后，旧基线按项目路径散列存在另一个文件里，
+        // 新路径的基线只有序列帧那几十条；素材项因为查不到记录又不满足这个条件，
+        // 全部被判成冲突——而冲突不能自动执行，第三步就此卡死，列表再也归不了零。
+        else if (isMigrationSafePair)
         {
             kind = UnrealBridgeChangeKind.Unchanged;
         }

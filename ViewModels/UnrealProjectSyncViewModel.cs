@@ -1135,8 +1135,43 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             }
         }
         ClearWorkspaceFailure();
+        if (!sameSource)
+        {
+            RestoreCharacterWorkflowStep();
+        }
+
         NotifyWorkspaceStateChanged();
         SaveSessionCache();
+    }
+
+    /// <summary>
+    /// 切到另一个角色时，回到这个角色自己上次停的步骤。
+    ///
+    /// 以前切换只换数据、不换步号，于是「在御坂的第六步切到桐人」会停在
+    /// 桐人的第六步上——而桐人可能连第一步都没做完。更糟的是紧接着那次
+    /// 保存会在桐人目录里写一份空的第六步缓存，把他真实的进度盖出一个假象。
+    /// </summary>
+    private void RestoreCharacterWorkflowStep()
+    {
+        var character = SelectedSource?.DraftCharacter;
+        if (IsEngineToToolbox || character is null || string.IsNullOrWhiteSpace(ProjectPath))
+        {
+            return;
+        }
+
+        var cached = _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache;
+        var step = cached?.WorkflowStep is int value &&
+            value >= UnrealSyncWorkflow.MinStep && value <= UnrealSyncWorkflow.MaxStep
+                ? value
+                : UnrealSyncWorkflow.MinStep;
+        if (WorkflowStep != step)
+        {
+            ReturnToWorkflowStep(step);
+            return;
+        }
+
+        // 步号没变也要把这一步的缓存读回来，否则会显示上一个角色的内容。
+        RestoreWorkflowStepCache(step);
     }
 
     public bool OpenNormalizationWorkspace(bool activateWorkspace = true)

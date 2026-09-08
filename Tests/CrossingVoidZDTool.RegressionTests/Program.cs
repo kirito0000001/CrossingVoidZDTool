@@ -15,6 +15,11 @@ using CrossingVoidZDTool.Services;
 using CrossingVoidZDTool.ViewModels;
 using Microsoft.UI.Xaml;
 
+if (args.Length > 0 && string.Equals(args[0], "smoke", StringComparison.OrdinalIgnoreCase))
+{
+    return RunUnrealSyncSmoke(args.Skip(1).ToArray());
+}
+
 var tests = new (string Name, Action Run)[]
 {
     ("BattleAvatar 固定槽位映射", BattleAvatarSlotsMapToFixedNames),
@@ -97,6 +102,7 @@ var tests = new (string Name, Action Run)[]
     ("同步流程步号不会被夹回最后一步之前", WorkflowStepIsNotClampedBelowLastStep),
     ("同步进度按角色和步骤存进角色目录", WorkflowStepCacheLivesInCharacterFolder),
     ("已加载的步骤不再重复触发虚幻检测", WorkflowStepSkipsDetectionWhenAlreadyLoaded),
+    ("切换角色后各自的步骤与结果互不串台", WorkflowStateIsIsolatedPerCharacter),
     ("中栏任何状态都有东西显示", WorkspaceNeverShowsBlankPanel),
     ("每一步的进度都按阶段分段", WorkflowProgressIsPhasedForEveryStep),
     ("在线执行不可用时退回离线", RemoteExecutionFallsBackToOffline),
@@ -129,6 +135,7 @@ var tests = new (string Name, Action Run)[]
     ("虚幻扫描使用固定版本脚本和命令进程", UnrealBridgeScanUsesVersionedScriptAndCommandProcess),
     ("虚幻扫描器通过 AssetRegistry 引用关系识别素材", UnrealBridgeScannerUsesAssetRegistryReferences),
     ("工具箱规范化改名识别为 Rename 操作", UnrealBridgeDiffRecognizesNormalizationRename),
+    ("换工程路径后已同步素材不会变成冲突", UnrealBridgeDiffKeepsSyncedItemsAfterProjectMove),
     ("双端格式哈希不同但各自未变时保持未修改", UnrealBridgeDiffUsesEndpointBaselinesForUnchangedItems),
     ("无旧基线时已有配对素材先迁移为未修改", UnrealBridgeDiffMigratesMatchedItemsWithoutBaseline),
     ("特殊字符清洗后的语音仍按规范路径配对", UnrealBridgeDiffPairsSanitizedVoiceNames),
@@ -4774,6 +4781,109 @@ static void WorkspaceNeverShowsBlankPanel()
     }
 }
 
+static void WorkflowStateIsIsolatedPerCharacter()
+{
+    // 同步台一次只服务一个角色，但用户会来回切。切换时如果状态没清干净、
+    // 或者缓存读到了别人的那一份，就会出现「切过去还显示上一个角色的差异」
+    // 这种最难发现的错——界面看着正常，同步下去写错角色。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var projectPath = Path.Combine(root, "CrossingVoid.uproject");
+        File.WriteAllText(projectPath, "{}");
+        var misaka = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴") with { IsCompleted = true };
+        var kirito = CreateCharacter(Path.Combine(root, "SAO_Kirito"), "SAO_Kirito", "桐人[SAO]") with { IsCompleted = true };
+        Directory.CreateDirectory(misaka.ToolFolderPath);
+        Directory.CreateDirectory(kirito.ToolFolderPath);
+
+        var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        viewModel.Load(Path.Combine(root, "UnrealEditor.exe"), projectPath);
+        viewModel.IsEngineToToolbox = false;
+        viewModel.RefreshDraftSources([misaka, kirito]);
+
+        UnrealSyncSourceItem SourceOf(CharacterCard character) =>
+            viewModel.CharacterSources.Single(item =>
+                string.Equals(item.DraftCharacter?.Code, character.Code, StringComparison.OrdinalIgnoreCase));
+
+        // 御坂走到第六步并留下一份检测结果
+        viewModel.SelectSource(SourceOf(misaka));
+        viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep);
+        viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+        {
+            Succeeded = true,
+            CharacterCode = misaka.Code,
+            Items =
+            [
+                new UnrealBlueprintSetupResultItem
+                {
+                    StableId = "bp.anti", GroupKey = "onset", GroupName = "对局设置",
+                    DisplayName = "异能角色", Status = UnrealBlueprintSetupStatus.Pending,
+                    CurrentValues = ["false"], TargetValues = ["true"]
+                }
+            ]
+        });
+        viewModel.FlushSessionCache();
+        AssertEqual(UnrealSyncWorkflow.MaxStep, viewModel.WorkflowStep);
+        AssertEqual(1, viewModel.BlueprintSetupItems.Count);
+
+        // 切到桐人：不能带着御坂的结果过去
+        viewModel.SelectSource(SourceOf(kirito));
+        AssertEqual(0, viewModel.BlueprintSetupItems.Count);
+        AssertEqual(false, viewModel.IsBlueprintSetupLoaded);
+        AssertEqual(false, viewModel.IsWorkflowStepLoaded(UnrealSyncWorkflow.MaxStep));
+        // 也不能带着御坂的差异树过去
+        AssertEqual(0, viewModel.SelectionTreeRoots.Count);
+
+        // 桐人自己走到第四步，留下自己的结果
+        viewModel.ReturnToWorkflowStep(4);
+        viewModel.SetLightConfigurationResult(new UnrealLightConfigurationResult
+        {
+            Succeeded = true,
+            CharacterCode = kirito.Code,
+            Items =
+            [
+                new UnrealLightConfigurationResultItem
+                {
+                    StableId = "item.icon", GroupName = "Item", DisplayName = "道具图标",
+                    Status = UnrealLightConfigurationStatus.Pending
+                }
+            ]
+        });
+        viewModel.FlushSessionCache();
+
+        // 两份缓存各自落在自己的角色目录下，互不覆盖
+        var misakaCache = UnrealSyncSessionCacheService.GetCacheFolderPath(misaka);
+        var kiritoCache = UnrealSyncSessionCacheService.GetCacheFolderPath(kirito);
+        AssertEqual(true, Directory.Exists(misakaCache));
+        AssertEqual(true, Directory.Exists(kiritoCache));
+        AssertEqual(true, Directory.GetFiles(misakaCache, "*step6*.json").Length == 1);
+        AssertEqual(true, Directory.GetFiles(kiritoCache, "*step4*.json").Length == 1);
+        // 御坂的目录里不该出现桐人那一步的文件，反之亦然
+        AssertEqual(0, Directory.GetFiles(misakaCache, "*step4*.json").Length);
+        AssertEqual(0, Directory.GetFiles(kiritoCache, "*step6*.json").Length);
+
+        // 切回御坂：第六步的结果要能从它自己的缓存恢复回来
+        viewModel.SelectSource(SourceOf(misaka));
+        var restored = new UnrealSyncSessionCacheService()
+            .LoadStep(misaka, projectPath, misaka.Code, UnrealSyncWorkflow.MaxStep);
+        AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, restored.Status);
+        AssertEqual(UnrealSyncWorkflow.MaxStep, restored.Cache!.WorkflowStep);
+        AssertEqual(true, restored.Cache.IsBlueprintSetupLoaded);
+        AssertSequence(["bp.anti"], restored.Cache.BlueprintSetupItems.Select(item => item.StableId).ToArray());
+
+        // 桐人的第四步缓存同样完好，没有被御坂的写入覆盖
+        var kiritoRestored = new UnrealSyncSessionCacheService()
+            .LoadStep(kirito, projectPath, kirito.Code, 4);
+        AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, kiritoRestored.Status);
+        AssertEqual(true, kiritoRestored.Cache!.IsLightConfigurationLoaded);
+        AssertSequence(["item.icon"], kiritoRestored.Cache.LightConfigurationItems.Select(item => item.StableId).ToArray());
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static void WorkflowStepIsNotClampedBelowLastStep()
 {
     // 步号上限以前散落着写死成 5：接上第六步之后点「下一步」会被静默夹回第五步，
@@ -4801,6 +4911,24 @@ static void WorkflowStepIsNotClampedBelowLastStep()
     // 六步共用同一个进入口，各步不再各写一套导航。
     AssertEqual(1, CountOccurrences(window, "private async Task EnterWorkflowStepAsync("));
     AssertEqual(1, CountOccurrences(window, "private async Task RunWorkflowStepDetectionAsync("));
+
+    // 「上一步」只导航，绝不触发检测。往回走是「我要看看上一步」，
+    // 不是「重新查一遍上一步」——那一步没缓存时中栏会显示未检测占位，
+    // 要不要真查由用户点「重新加载」决定。
+    var previousStart = window.IndexOf(
+        "private void UnrealSyncPreviousStepButton_Click(", StringComparison.Ordinal);
+    AssertEqual(true, previousStart > 0);
+    var previousEnd = window.IndexOf(
+        Environment.NewLine + "        private ", previousStart + 10, StringComparison.Ordinal);
+    if (previousEnd < 0)
+    {
+        previousEnd = window.IndexOf("\n        private ", previousStart + 10, StringComparison.Ordinal);
+    }
+    AssertEqual(true, previousEnd > previousStart);
+    var previousBody = window[previousStart..previousEnd];
+    AssertEqual(true, previousBody.Contains("ReturnToWorkflowStep(", StringComparison.Ordinal));
+    AssertEqual(false, previousBody.Contains("EnterWorkflowStepAsync", StringComparison.Ordinal));
+    AssertEqual(false, previousBody.Contains("RunWorkflowStepDetectionAsync", StringComparison.Ordinal));
 }
 
 static void WorkflowStepCacheLivesInCharacterFolder()
@@ -5589,6 +5717,84 @@ static void UnrealBridgeScannerUsesAssetRegistryReferences()
     AssertEqual(true, source.Contains("get_referencers", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("originIdentity", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("protocolVersion", StringComparison.Ordinal));
+}
+
+static void UnrealBridgeDiffKeepsSyncedItemsAfterProjectMove()
+{
+    // 基线按 Unreal 工程路径散列分文件存。把工程换个盘符之后，旧基线留在旧文件里，
+    // 新路径的基线可能只记了一部分模块（例如只同步过序列帧）。这时素材项查不到
+    // 记录，如果还要求「整个基线文件为空」才认作已同步，它们会全部变成冲突——
+    // 而冲突不能自动执行，第三步就此卡死，列表再也归不了零。实测一个角色
+    // 147 项素材里有 144 项被这样误判。
+    var iconPath = Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml");
+    var toolbox = new UnrealBridgeSnapshot(
+        "Misaka",
+        [
+            new UnrealBridgeSnapshotItem(
+                "material:icon-1",
+                "module:BaseMaterials",
+                UnrealBridgeModule.BaseMaterials,
+                "头像 #1",
+                "toolbox-source-hash",
+                "{}",
+                iconPath,
+                ToolboxRelativePath: "AssetMaterial/Icon/Misaka-Icon-1.png",
+                NormalizedName: "Misaka-Icon-1")
+        ]);
+    var unreal = new UnrealBridgeSnapshot(
+        "Misaka",
+        [
+            new UnrealBridgeSnapshotItem(
+                "material:icon-1",
+                "module:BaseMaterials",
+                UnrealBridgeModule.BaseMaterials,
+                "头像 #1",
+                // 两侧哈希本来就不可比：工具箱是 PNG 源文件，Unreal 是导出的资产。
+                "unreal-asset-hash",
+                "{}",
+                string.Empty,
+                SourceObjectPath: "/Game/AssetMaterial/ImageS/CharaterS/Misaka/Misaka-Icon-1.Misaka-Icon-1",
+                NormalizedName: "Misaka-Icon-1")
+        ]);
+
+    // 新路径的基线只记了序列帧，素材项在里面查不到。
+    var baselineFromOtherModule = new UnrealBridgeSyncState
+    {
+        Entries =
+        {
+            ["sequence-frame:click:0"] = new UnrealBridgeSyncStateEntry("a", "b")
+        }
+    };
+
+    var change = new UnrealBridgeDiffService()
+        .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, baselineFromOtherModule)
+        .Single();
+
+    // 资产已经在规范目录、用的就是规范名，就是「已同步、只是没记过」，不是冲突。
+    AssertEqual(UnrealBridgeChangeKind.Unchanged, change.Kind);
+
+    // 完全没有基线时同样如此（原来只覆盖得了这一种情况）。
+    AssertEqual(
+        UnrealBridgeChangeKind.Unchanged,
+        new UnrealBridgeDiffService()
+            .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, null)
+            .Single().Kind);
+
+    // 但资产不在规范位置就不能这么放过——那才是真的要人看一眼。
+    var strayUnreal = new UnrealBridgeSnapshot(
+        "Misaka",
+        [
+            unreal.Items[0] with
+            {
+                SourceObjectPath = "/Game/GameActor2D/Origin_Misaka/Material/T_Old.T_Old",
+                NormalizedName = "T_Old"
+            }
+        ]);
+    AssertEqual(
+        UnrealBridgeChangeKind.Conflict,
+        new UnrealBridgeDiffService()
+            .Compare(toolbox, strayUnreal, UnrealBridgeDirection.PublishToUnreal, baselineFromOtherModule)
+            .Single().Kind);
 }
 
 static void UnrealBridgeDiffRecognizesNormalizationRename()
@@ -8816,6 +9022,169 @@ static void SyncCompletionLeavesVisibleFeedback()
     // 但同步按钮不能因此被误启用：树已清空，没有可执行的选择。
     AssertEqual(false, viewModel.HasPublishSelection);
     AssertEqual(false, viewModel.CanStartPublish);
+}
+
+// ---------------------------------------------------------------------------
+// 同步台冒烟：用工具箱自己的服务，对真实工作区和真实 Unreal 工程跑一遍检测。
+//
+// 回归用例跑的是构造数据，验证不了「真项目里到底能不能用」。这个入口把
+// MainWindow 检测流程里的那几步原样搬过来（导出 -> 建双端快照 -> 比对），
+// 不经过界面，所以能在命令行里反复跑。
+//
+//     dotnet run -- smoke [工作区] [引擎exe] [uproject]
+// ---------------------------------------------------------------------------
+static int RunUnrealSyncSmoke(string[] args)
+{
+    var settingsPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "CrossingVoidZDTool", "settings.json");
+    string? Setting(string name)
+    {
+        if (!File.Exists(settingsPath)) return null;
+        using var document = System.Text.Json.JsonDocument.Parse(File.ReadAllText(settingsPath, Encoding.UTF8));
+        return document.RootElement.TryGetProperty(name, out var value) ? value.GetString() : null;
+    }
+
+    // 开关和位置参数分开，免得 --promote 被当成工作区路径。
+    var positional = args.Where(item => !item.StartsWith("--", StringComparison.Ordinal)).ToArray();
+    var workspace = positional.ElementAtOrDefault(0) ?? Setting("ProjectRootPath") ?? string.Empty;
+    var enginePath = positional.ElementAtOrDefault(1) ?? Setting("UnrealEnginePath") ?? string.Empty;
+    var projectPath = positional.ElementAtOrDefault(2) ?? Setting("UnrealProjectPath") ?? string.Empty;
+    Console.OutputEncoding = Encoding.UTF8;
+    Console.WriteLine($"工作区 : {workspace}");
+    Console.WriteLine($"引擎   : {enginePath}");
+    Console.WriteLine($"工程   : {projectPath}");
+    if (!Directory.Exists(workspace) || !File.Exists(projectPath))
+    {
+        Console.WriteLine("路径无效，无法冒烟。");
+        return 2;
+    }
+
+    var workspaceService = new CharacterWorkspaceService();
+
+    // 需要至少两个已完成角色才能验证「切换角色后同步台还能不能用」。
+    // 只有一个时，把一个草稿转正——这是界面上本来就有的操作，不是测试专用后门。
+    if (args.Contains("--promote", StringComparer.OrdinalIgnoreCase))
+    {
+        var draft = workspaceService.LoadCharacters(workspace)
+            .FirstOrDefault(item => !item.IsCompleted);
+        if (draft is not null)
+        {
+            var promoted = workspaceService.SetCompleted(draft, true);
+            Console.WriteLine($"已把草稿 {promoted.Code} 转为已完成：{promoted.FolderPath}");
+        }
+    }
+
+    var characters = workspaceService.LoadCharacters(workspace)
+        .Where(character => character.IsCompleted)
+        .OrderBy(character => character.Code, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+    Console.WriteLine($"已完成角色：{characters.Length} 个 —— {string.Join("、", characters.Select(item => $"{item.Code}/{item.Name}"))}");
+    if (characters.Length == 0)
+    {
+        Console.WriteLine("没有已完成角色，无法冒烟。");
+        return 2;
+    }
+
+    var syncService = new UnrealProjectSyncService();
+    var cacheService = new UnrealSyncSessionCacheService();
+    var failures = 0;
+
+    foreach (var character in characters)
+    {
+        Console.WriteLine();
+        Console.WriteLine($"===== {character.Code} / {character.Name}");
+        try
+        {
+            // 按真实流程走：每一步用自己的导出范围，导完立刻比对。
+            // 先把两个范围都导出再统一比对是错的——素材比对会读到序列范围的清单，
+            // 于是所有素材都被算成「Unreal 里没有」，凭空多出上百条新增。
+            var baseline = new UnrealBridgeStateService().Load(character, projectPath);
+            var toolboxSnapshot = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character);
+            foreach (var (label, scope, modules) in new (string, UnrealProjectSyncExportScope, UnrealBridgeModule[])[]
+                     {
+                         ("第三步 素材", UnrealProjectSyncExportScope.CharacterMaterials,
+                             [UnrealBridgeModule.BaseMaterials, UnrealBridgeModule.Voices]),
+                         ("第五步 序列", UnrealProjectSyncExportScope.CharacterSequences,
+                             [UnrealBridgeModule.SequenceFrames]),
+                     })
+            {
+                var run = syncService.ExportProjectCharactersAsync(
+                    enginePath, projectPath, [character.Code], null, CancellationToken.None, scope)
+                    .GetAwaiter().GetResult();
+                if (!string.IsNullOrWhiteSpace(run.Warning))
+                {
+                    Console.WriteLine($"  导出提醒：{run.Warning}");
+                }
+
+                var check = syncService.Check(enginePath, projectPath);
+                var candidates = check.CharacterCandidates;
+                // 多角色的关键风险：给这个角色导出会不会把别人从清单里挤掉。
+                foreach (var other in characters)
+                {
+                    var present = candidates.Any(item =>
+                        string.Equals(item.Code, other.Code, StringComparison.OrdinalIgnoreCase));
+                    if (!present)
+                    {
+                        Console.WriteLine($"  !! {label} 导出后，清单里找不到 {other.Code} 了");
+                        failures++;
+                    }
+                }
+
+                var candidate = candidates.FirstOrDefault(item =>
+                    string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase));
+                if (candidate is null)
+                {
+                    Console.WriteLine($"  !! {label}：Unreal 侧找不到这个角色的 Item 资产");
+                    failures++;
+                    continue;
+                }
+
+                var unrealSnapshot = new UnrealBridgeSemanticSnapshotService().Build(candidate);
+                var left = toolboxSnapshot with { Items = toolboxSnapshot.Items.Where(item => modules.Contains(item.Module)).ToArray() };
+                var right = unrealSnapshot with { Items = unrealSnapshot.Items.Where(item => modules.Contains(item.Module)).ToArray() };
+                var changes = new UnrealBridgeDiffService()
+                    .Compare(left, right, UnrealBridgeDirection.PublishToUnreal, baseline)
+                    .ToArray();
+                Console.WriteLine(
+                    $"  {label}（工具箱 {left.Items.Count} / Unreal {right.Items.Count}）：" +
+                    $"共 {changes.Length}，新增 {changes.Count(c => c.Kind == UnrealBridgeChangeKind.Added)}，" +
+                    $"更新 {changes.Count(c => c.Kind is UnrealBridgeChangeKind.Updated or UnrealBridgeChangeKind.Renamed)}，" +
+                    $"待删 {changes.Count(c => c.Kind == UnrealBridgeChangeKind.DeleteCandidate)}，" +
+                    $"冲突 {changes.Count(c => c.Kind == UnrealBridgeChangeKind.Conflict)}，" +
+                    $"无差异 {changes.Count(c => c.Kind == UnrealBridgeChangeKind.Unchanged)}");
+                foreach (var change in changes.Where(c => c.Kind != UnrealBridgeChangeKind.Unchanged).Take(8))
+                {
+                    Console.WriteLine($"      [{change.Kind}] {change.DisplayName}");
+                }
+            }
+
+            // 缓存必须落在这个角色自己的目录里
+            var cacheFolder = UnrealSyncSessionCacheService.GetCacheFolderPath(character);
+            var stepFiles = Directory.Exists(cacheFolder)
+                ? Directory.GetFiles(cacheFolder, "sync-*.json").Length
+                : 0;
+            Console.WriteLine($"  分步缓存：{cacheFolder}（{stepFiles} 个）");
+            for (var step = UnrealSyncWorkflow.MinStep; step <= UnrealSyncWorkflow.MaxStep; step++)
+            {
+                var result = cacheService.LoadStep(character, projectPath, character.Code, step);
+                if (result.Status == UnrealSyncSessionCacheLoadStatus.Invalid)
+                {
+                    Console.WriteLine($"    !! 第 {step} 步缓存损坏：{result.ErrorMessage}");
+                    failures++;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  !! 异常：{ex.Message}");
+            failures++;
+        }
+    }
+
+    Console.WriteLine();
+    Console.WriteLine(failures == 0 ? "冒烟通过。" : $"冒烟发现 {failures} 处问题。");
+    return failures == 0 ? 0 : 1;
 }
 
 sealed class SingleThreadTestSynchronizationContext : SynchronizationContext, IDisposable

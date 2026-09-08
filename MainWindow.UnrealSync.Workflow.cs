@@ -21,15 +21,14 @@ namespace CrossingVoidZDTool
     /// </summary>
     public sealed partial class MainWindow
     {
-        private async void UnrealSyncPreviousStepButton_Click(object sender, RoutedEventArgs e)
+        private void UnrealSyncPreviousStepButton_Click(object sender, RoutedEventArgs e)
         {
             LogUserOperation("同步流程：上一步");
             var sync = _applicationViewModel.UnrealProjectSync;
-            // 回退也走同一个进入口：有缓存就直接显示，没有才检测。
-            // 之前退回去只是改了步号，落到一个空面板上，还得再手动点一次重新加载。
-            await EnterWorkflowStepAsync(
-                sync,
-                Math.Max(UnrealSyncWorkflow.MinStep, sync.WorkflowStep - 1));
+            // 回退只导航，绝不触发检测。往回走是「我要看看上一步」，
+            // 不是「重新查一遍上一步」——那一步没缓存时中栏会显示未检测占位，
+            // 要不要真查由用户点「重新加载」决定。
+            sync.ReturnToWorkflowStep(Math.Max(UnrealSyncWorkflow.MinStep, sync.WorkflowStep - 1));
         }
 
         private async void UnrealSyncNextStepButton_Click(object sender, RoutedEventArgs e)
