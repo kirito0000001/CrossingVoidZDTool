@@ -322,69 +322,46 @@ internal sealed class UnrealBlueprintSetupService
         string progressPath = "",
         IProgress<UnrealExportProgressState>? progress = null)
     {
-        TryDelete(resultPath);
-        TryDelete(progressPath);
-        using var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("无法启动 Unreal 蓝图置入进程。");
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        var startedAt = DateTime.UtcNow;
-        var lastProgressAt = DateTime.MinValue;
-        while (!process.HasExited)
-        {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                KillProcessTree(process);
-                cancellationToken.ThrowIfCancellationRequested();
-            }
-            if (DateTime.UtcNow - startedAt > TimeSpan.FromMinutes(20))
-            {
-                KillProcessTree(process);
-                throw new TimeoutException("Unreal 蓝图置入超过 20 分钟，已终止命令进程。");
-            }
+        // 清场删除可能失败（编辑器/杀软占着），所以记下删没删掉，
+        // 好在结果不新鲜时把「残留删不掉」这条线索写进报错。
+        var staleResultRemoved = UnrealProcessRunner.TryClearStaleFile(resultPath);
+        UnrealProcessRunner.TryClearStaleFile(progressPath);
+        // 虚幻那一侧有十几秒的静默期：脚本会把阶段写进进度文件，
+        // Runner 轮询转发出去，进度条才不会整段一动不动。
+        var run = await UnrealProcessRunner.RunAsync(
+            startInfo,
+            progressPath,
+            progress,
+            AppJsonSerializerContext.Default.UnrealExportProgressState,
+            TimeSpan.FromMinutes(20),
+            "无法启动 Unreal 蓝图置入进程。",
+            "Unreal 蓝图置入超过 20 分钟，已终止命令进程。",
+            verdict: completed => DescribeUnusableResult(resultPath, completed, staleResultRemoved),
+            cancellationToken: cancellationToken);
 
-            // 虚幻那一侧十几秒的静默期：脚本会把阶段写进进度文件，
-            // 这里轮询转发出去，进度条才不会整段一动不动。
-            ReportProgress(progressPath, progress, ref lastProgressAt);
-            await Task.Delay(500, cancellationToken);
-        }
-
-        var output = await outputTask + await errorTask;
-        return ReadResult(resultPath, output, process.ExitCode);
+        return ReadResult(resultPath, run.Output, run.ExitCode);
     }
 
-    /// <summary>进度文件没变就不重复转发，免得每 500 毫秒刷一次同样的文案。</summary>
-    private static void ReportProgress(
-        string progressPath,
-        IProgress<UnrealExportProgressState>? progress,
-        ref DateTime lastWriteUtc)
+    /// <summary>
+    /// 结果文件必须是这一轮写出来的，只判 <c>File.Exists</c> 会踩坑：
+    /// 结果路径是固定的，而开跑前的清场删除会被 IO 异常吞掉；删不掉时留在那儿的
+    /// 一定是上一次运行的结果，于是这一轮什么都没写出来，却把上一轮的条目清单
+    /// 当成本次结果展示出来。
+    /// </summary>
+    private static string? DescribeUnusableResult(
+        string resultPath,
+        UnrealProcessResult run,
+        bool staleResultRemoved)
     {
-        if (progress is null || string.IsNullOrWhiteSpace(progressPath))
+        if (UnrealProcessRunner.IsFreshOutput(resultPath, run.StartedAtUtc))
         {
-            return;
+            return null;
         }
 
-        try
-        {
-            var info = new FileInfo(progressPath);
-            if (!info.Exists || info.LastWriteTimeUtc <= lastWriteUtc)
-            {
-                return;
-            }
-
-            lastWriteUtc = info.LastWriteTimeUtc;
-            var state = JsonSerializer.Deserialize(
-                File.ReadAllText(progressPath, Encoding.UTF8),
-                AppJsonSerializerContext.Default.UnrealExportProgressState);
-            if (state is not null)
-            {
-                progress.Report(state);
-            }
-        }
-        catch (Exception ex) when (ex is IOException or JsonException)
-        {
-            // 正在被写的进度文件读不全是常态，下一轮再读。
-        }
+        return File.Exists(resultPath) && !staleResultRemoved
+            ? $"Unreal 蓝图置入没有写出本轮结果文件，只留下删不掉的上一轮残留：{resultPath}。" +
+              $"退出码：{run.ExitCode}。{Environment.NewLine}{run.Output}"
+            : $"Unreal 蓝图置入没有生成结果文件。退出码：{run.ExitCode}。{Environment.NewLine}{run.Output}";
     }
 
     public static UnrealBlueprintSetupResult ReadResult(string resultPath, string processOutput, int exitCode)
@@ -422,23 +399,6 @@ internal sealed class UnrealBlueprintSetupService
         }
     }
 
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
-        }
-    }
-
     private static string ResolveEditorCommandPath(string editorPath)
     {
         if (string.IsNullOrWhiteSpace(editorPath))
@@ -455,22 +415,5 @@ internal sealed class UnrealBlueprintSetupService
 
         var commandPath = Path.Combine(directory, fileName + "-Cmd" + Path.GetExtension(editorPath));
         return File.Exists(commandPath) ? commandPath : editorPath;
-    }
-
-    private static void KillProcessTree(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch (InvalidOperationException)
-        {
-        }
-        catch (NotSupportedException)
-        {
-        }
     }
 }

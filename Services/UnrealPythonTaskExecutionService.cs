@@ -94,7 +94,12 @@ internal sealed class UnrealPythonTaskExecutionService
             CreateNoWindow = true,
             WorkingDirectory = Path.GetDirectoryName(pythonPath) ?? string.Empty,
             RedirectStandardOutput = true,
-            RedirectStandardError = true
+            RedirectStandardError = true,
+            // 下面那行把子进程锁死在 UTF-8 上，这里就必须跟着按 UTF-8 解码；
+            // 不指定的话父进程按 OEM 代码页解（中文 Windows 是 936），
+            // 远程执行的报错信息必然乱码——而这条路径的错就只能从这段输出里看。
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
         };
         startInfo.Environment["PYTHONUTF8"] = "1";
         return new UnrealPythonTaskLaunch(startInfo, UsesRunningEditor: true);

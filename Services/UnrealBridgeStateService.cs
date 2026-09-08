@@ -50,12 +50,9 @@ internal sealed class UnrealBridgeStateService
 
         var path = GetStatePath(character, unrealProjectPath);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var temporaryPath = path + ".tmp";
-        File.WriteAllText(
-            temporaryPath,
-            JsonSerializer.Serialize(state, AppJsonSerializerContext.Default.UnrealBridgeSyncState),
-            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        File.Move(temporaryPath, path, overwrite: true);
+        AtomicFileWriter.WriteAllText(
+            path,
+            JsonSerializer.Serialize(state, AppJsonSerializerContext.Default.UnrealBridgeSyncState));
     }
 
     public string GetStatePath(CharacterCard character, string unrealProjectPath)

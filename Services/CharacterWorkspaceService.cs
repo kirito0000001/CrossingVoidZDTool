@@ -13,20 +13,20 @@ namespace CrossingVoidZDTool.Services;
 
 internal sealed class CharacterWorkspaceService
 {
-    private const string ToolFolderName = "tool";
-    private const string AssetMaterialFolderName = "AssetMaterial";
-    private const string ZDMaterialFolderName = "ZDMaterial";
-    private const string SoundFolderName = "Sound";
-    private const string ExAssetFolderName = "ExAsset";
-    private const string BuffFolderName = "BUFF";
-    private const string ReferenceFolderName = "ReferenceImages";
+    private const string ToolFolderName = CharacterFolderLayout.Tool;
+    private const string AssetMaterialFolderName = CharacterFolderLayout.AssetMaterial;
+    private const string ZDMaterialFolderName = CharacterFolderLayout.ZdMaterial;
+    private const string SoundFolderName = CharacterFolderLayout.Sound;
+    private const string ExAssetFolderName = CharacterFolderLayout.ExAsset;
+    private const string BuffFolderName = CharacterFolderLayout.Buff;
+    private const string ReferenceFolderName = CharacterFolderLayout.ReferenceImages;
     private const string MetadataFileName = "character.json";
     private const string ToolboxDataFileName = "ZDToolboxData.json";
     private const string LegacyDraftFileName = "St1-设计理念.txt";
     private const string CharacterBackupsFolderName = "CharacterBackups";
-    private const string DraftFolderName = "Draft";
-    private const string CompletedFolderName = "Completed";
-    private const string ExportFolderName = "Export";
+    private const string DraftFolderName = CharacterFolderLayout.Draft;
+    private const string CompletedFolderName = CharacterFolderLayout.Completed;
+    private const string ExportFolderName = CharacterFolderLayout.Export;
     private const int MaxManualCharacterBackupCount = 3;
     private const int MaxAutomaticCharacterBackupCount = 3;
 
@@ -838,31 +838,8 @@ internal sealed class CharacterWorkspaceService
     /// 而且临时名是固定的 .tmp，两处并发保存会互相踩。
     /// 同仓其他八处走的都是 File.Move(overwrite: true)，唯独这里没跟上。
     /// </summary>
-    private static void WriteAllTextAtomic(string path, string text)
-    {
-        var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
-        try
-        {
-            File.WriteAllText(tempPath, text, Encoding.UTF8);
-            File.Move(tempPath, path, overwrite: true);
-        }
-        catch
-        {
-            // 移动失败时别把半截临时文件留在角色目录里
-            try
-            {
-                if (File.Exists(tempPath))
-                {
-                    File.Delete(tempPath);
-                }
-            }
-            catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
-            {
-            }
-
-            throw;
-        }
-    }
+    private static void WriteAllTextAtomic(string path, string text) =>
+        AtomicFileWriter.WriteAllText(path, text, Encoding.UTF8);
 
     private static IEnumerable<CharacterSkillEntry> EnumerateSkillEntries(CharacterSkillsData skills)
     {

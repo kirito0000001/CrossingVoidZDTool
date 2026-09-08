@@ -9,7 +9,7 @@ namespace CrossingVoidZDTool.Services;
 
 internal sealed class VoiceMaterialService
 {
-    private const string SoundFolderName = "Sound";
+    private const string SoundFolderName = CharacterFolderLayout.Sound;
     private static readonly string PlaybackCacheFolderPath = Path.Combine(
         Path.GetTempPath(),
         "CrossingVoidZDTool",

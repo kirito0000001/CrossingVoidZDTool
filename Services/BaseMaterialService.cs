@@ -11,7 +11,7 @@ namespace CrossingVoidZDTool.Services;
 
 internal sealed class BaseMaterialService
 {
-    private const string AssetMaterialFolderName = "AssetMaterial";
+    private const string AssetMaterialFolderName = CharacterFolderLayout.AssetMaterial;
     private static readonly string[] SupportedImageExtensions =
     [
         ".png",

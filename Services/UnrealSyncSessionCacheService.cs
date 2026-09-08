@@ -124,14 +124,11 @@ internal sealed class UnrealSyncSessionCacheService
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            var temporaryPath = path + ".tmp";
-            File.WriteAllText(
-                temporaryPath,
+            AtomicFileWriter.WriteAllText(
+                path,
                 ToolboxPortablePathService.ToPortableJson(
                     JsonSerializer.Serialize(cache, AppJsonSerializerContext.Default.UnrealSyncSessionCache),
-                    ResolveCharacterFolder(path)),
-                new UTF8Encoding(false));
-            File.Move(temporaryPath, path, true);
+                    ResolveCharacterFolder(path)));
             return true;
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or NotSupportedException)

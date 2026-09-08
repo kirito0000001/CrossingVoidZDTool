@@ -184,9 +184,7 @@ internal sealed class ProjectSharedMaterialService
         var root = GetSharedRoot(projectRootPath);
         var indexPath = Path.Combine(root, IndexRelativePath.Replace('/', Path.DirectorySeparatorChar));
         Directory.CreateDirectory(Path.GetDirectoryName(indexPath)!);
-        var temporaryPath = indexPath + ".tmp";
-        File.WriteAllText(temporaryPath, JsonSerializer.Serialize(index, JsonOptions));
-        File.Move(temporaryPath, indexPath, overwrite: true);
+        AtomicFileWriter.WriteAllText(indexPath, JsonSerializer.Serialize(index, JsonOptions));
     }
 
     private static string GetSharedRoot(string projectRootPath)

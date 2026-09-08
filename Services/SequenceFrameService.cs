@@ -20,8 +20,8 @@ internal sealed class SequenceFrameService
     public const int DefaultFps = 12;
     public const int MaxFrameDuration = 600;
 
-    private const string ZdMaterialFolderName = "ZDMaterial";
-    private const string FramesFolderName = "Frames";
+    private const string ZdMaterialFolderName = CharacterFolderLayout.ZdMaterial;
+    private const string FramesFolderName = CharacterFolderLayout.Frames;
     private const string ManifestFileName = "sequence.json";
     private const string SnapshotManifestFileName = "sequence.snapshot.json";
     private static readonly JsonSerializerOptions JsonOptions = new()
@@ -1064,9 +1064,7 @@ internal sealed class SequenceFrameService
             return;
         }
 
-        var tempPath = $"{manifestPath}.tmp";
-        File.WriteAllText(tempPath, text, Encoding.UTF8);
-        File.Move(tempPath, manifestPath, overwrite: true);
+        AtomicFileWriter.WriteAllText(manifestPath, text, Encoding.UTF8);
     }
 
     internal static void RemapVoiceReferences(
@@ -1137,12 +1135,10 @@ internal sealed class SequenceFrameService
                 continue;
             }
 
-            var tempPath = $"{manifestPath}.tmp";
-            File.WriteAllText(
-                tempPath,
+            AtomicFileWriter.WriteAllText(
+                manifestPath,
                 JsonSerializer.Serialize(manifest, ManifestJsonTypeInfo),
                 Encoding.UTF8);
-            File.Move(tempPath, manifestPath, overwrite: true);
         }
     }
 
@@ -1251,8 +1247,17 @@ internal sealed class SequenceFrameService
     private void PruneUnreferencedFrameFiles(CharacterCard character, SequenceFrameAction action, SequenceFrameManifest manifest)
     {
         _ = manifest;
-        var referenced = EnumerateReferencedFramePaths(character)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        // 引用集必须是完整的。以前某个动作的 sequence.json 读不出来时（杀软刚扫完、
+        // 文件被占用、上游非原子写留下的坏文件）会被当作「这个动作零引用」，
+        // 于是它名下的帧图全都不在引用集里，紧接着被这里删光——用户的原始帧
+        // 就这么没了，界面上还没有任何提示。宁可这一轮不清理，也不能删错。
+        if (!TryEnumerateReferencedFramePaths(character, out var referenced))
+        {
+            ToolboxLog.Warn(
+                $"有动作的序列清单读不出来，本次跳过 {action.Code} 的冗余帧清理，避免误删。");
+            return;
+        }
+
         var framesFolderPath = GetFramesFolderPath(character, action);
         if (!Directory.Exists(framesFolderPath))
         {
@@ -1266,6 +1271,36 @@ internal sealed class SequenceFrameService
                 File.Delete(file);
             }
         }
+    }
+
+    /// <summary>
+    /// 收集这个角色所有动作里被清单引用到的帧文件。
+    /// 只要有一份清单读不出来就返回 false——调用方据此放弃本轮清理。
+    /// </summary>
+    private bool TryEnumerateReferencedFramePaths(CharacterCard character, out HashSet<string> referenced)
+    {
+        referenced = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (var path in EnumerateReferencedFramePaths(character))
+            {
+                referenced.Add(path);
+            }
+
+            return true;
+        }
+        catch (SequenceManifestUnreadableException error)
+        {
+            ToolboxLog.Warn($"序列清单读取失败：{error.ManifestPath}", error.InnerException);
+            return false;
+        }
+    }
+
+    /// <summary>清单读不出来时抛这个，让上层能区分「真的没有引用」和「没读到」。</summary>
+    private sealed class SequenceManifestUnreadableException(string manifestPath, Exception inner)
+        : Exception($"序列清单读取失败：{manifestPath}", inner)
+    {
+        public string ManifestPath { get; } = manifestPath;
     }
 
     private IEnumerable<string> EnumerateReferencedFramePaths(CharacterCard character)
@@ -1285,9 +1320,11 @@ internal sealed class SequenceFrameService
                     File.ReadAllText(manifestPath, Encoding.UTF8),
                     AppJsonSerializerContext.Default.SequenceFrameManifest);
             }
-            catch
+            catch (Exception error) when (error is JsonException or IOException or UnauthorizedAccessException)
             {
-                continue;
+                // 不能 continue：那等于说「这个动作没有引用任何帧」，
+                // 而调用方会照着这个结论去删文件。
+                throw new SequenceManifestUnreadableException(manifestPath, error);
             }
 
             if (manifest?.Frames is null)

@@ -663,6 +663,11 @@ internal sealed class UnrealProjectSyncService
             scope: scope);
         offlineStartInfo.RedirectStandardOutput = true;
         offlineStartInfo.RedirectStandardError = true;
+        // 子进程写的是 UTF-8（在线执行那条路径还显式设了 PYTHONUTF8=1）；不指定编码时
+        // 父进程按 OEM 代码页解码，中文 Windows 是 936，这段日志必然乱码——
+        // 而它恰恰只在导出失败时才会被人翻出来看。
+        offlineStartInfo.StandardOutputEncoding = Encoding.UTF8;
+        offlineStartInfo.StandardErrorEncoding = Encoding.UTF8;
         var launch = taskExecutionService.BuildLaunch(
             NormalizePath(enginePath),
             normalizedProjectPath,
@@ -671,7 +676,7 @@ internal sealed class UnrealProjectSyncService
             offlineStartInfo,
             useRunningEditor);
         var startInfo = launch.StartInfo;
-        TryDeleteFile(progressPath);
+        UnrealProcessRunner.TryClearStaleFile(progressPath);
         progress?.Report(new ProgressUpdate("正在准备导出目录...", 18, manifestPath));
         Directory.CreateDirectory(Path.GetDirectoryName(manifestPath)!);
 
@@ -679,10 +684,6 @@ internal sealed class UnrealProjectSyncService
             launch.UsesRunningEditor ? "正在连接已打开的 Unreal Editor..." : "正在启动 Unreal Editor 命令进程...",
             35,
             startInfo.FileName));
-        var runStartedAtUtc = DateTime.UtcNow;
-        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("无法启动 Unreal Python 任务进程。");
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
         progress?.Report(new ProgressUpdate(
             launch.UsesRunningEditor
                 ? "已连接 Unreal Editor，正在执行导出脚本..."
@@ -692,25 +693,23 @@ internal sealed class UnrealProjectSyncService
                 ? "首次加载项目可能需要较长时间。"
                 : $"本次只获取 {selectedCodes.Count} 个选中角色：{string.Join("、", selectedCodes)}。"));
 
-        var waitStartedAt = DateTime.UtcNow;
+        // 这里的进度转发不能用 Runner 那个「文件没变就不推」的通用转发器：
+        // 详情里带着「已等待 mm:ss」，脚本静默不写进度时也得每两秒刷一次，
+        // 不然界面看起来就是卡死了。所以只借 Runner 的轮询节拍，策略留在本地。
         var lastProgressReportAt = DateTime.MinValue;
-        while (!process.HasExited)
-        {
-            if (cancellationToken.IsCancellationRequested)
+        UnrealProjectExportManifest? manifest = null;
+        var run = await UnrealProcessRunner.RunAsync(
+            startInfo,
+            TimeSpan.FromMinutes(10),
+            "无法启动 Unreal Python 任务进程。",
+            "Unreal Editor 扫描超过 10 分钟，已终止进程，避免工具箱长时间无响应。",
+            onPoll: elapsed =>
             {
-                KillProcessTree(process);
-                cancellationToken.ThrowIfCancellationRequested();
-            }
+                if ((DateTime.UtcNow - lastProgressReportAt).TotalSeconds < 2)
+                {
+                    return;
+                }
 
-            var elapsed = DateTime.UtcNow - waitStartedAt;
-            if (elapsed >= TimeSpan.FromMinutes(10))
-            {
-                KillProcessTree(process);
-                throw new TimeoutException("Unreal Editor 扫描超过 10 分钟，已终止进程，避免工具箱长时间无响应。");
-            }
-
-            if ((DateTime.UtcNow - lastProgressReportAt).TotalSeconds >= 2)
-            {
                 lastProgressReportAt = DateTime.UtcNow;
                 var percent = Math.Min(90, 45 + elapsed.TotalSeconds / 180d * 40d);
                 var scriptProgress = TryReadExportProgress(progressPath);
@@ -724,38 +723,36 @@ internal sealed class UnrealProjectSyncService
                         Math.Clamp(scriptProgress.Percent, 45, 93),
                         $"{scriptProgress.Detail}  |  已等待 {FormatElapsed(elapsed)}",
                         scriptProgress.IsIndeterminate));
-            }
+            },
+            // 导出成没成功，以清单为准，不以退出码为准。
+            // commandlet 只要编辑器在别处报过错就返回非 0——实测工程里有个蓝图编译不过，
+            // 于是每次检测都被判成「导出失败」，而日志里明写着 Python script executed successfully、
+            // 清单也照常写出来了。清单缺失或不是这一轮写的，才是真失败。
+            //
+            // 这条规则只对导出成立，所以它是传进去的回调、不是 Runner 里的通用逻辑：
+            // 别的链路（同步执行、蓝图置入、基础配置）判的是各自的结果文件，规则并不一样。
+            verdict: completed =>
+            {
+                // 校验就在这个回调里做，读盘前先把进度推到 94%，免得界面停在 90 干等。
+                progress?.Report(new ProgressUpdate("正在读取 Unreal 导出结果...", 94, manifestPath));
+                manifest = LoadExportManifest(manifestPath);
+                var runStartedAtUtc = completed.StartedAtUtc;
+                var manifestIsFresh = manifest is not null && UnrealProcessRunner.TryGetLastWriteUtc(manifestPath) > runStartedAtUtc;
+                if (manifest is null || !manifestIsFresh)
+                {
+                    return completed.ExitCode != 0
+                        ? $"Unreal 角色数据导出失败，退出码 {completed.ExitCode}。\n{DescribeProcessOutput(completed.Output)}"
+                        : $"Unreal 导出进程已结束，但没有生成有效清单：{manifestPath}";
+                }
 
-            await Task.Delay(1000, cancellationToken);
-        }
+                return null;
+            },
+            cancellationToken: cancellationToken);
 
-        cancellationToken.ThrowIfCancellationRequested();
-        progress?.Report(new ProgressUpdate("正在读取 Unreal 导出结果...", 94, manifestPath));
-        var output = await outputTask + await errorTask;
-        var detail = string.IsNullOrWhiteSpace(output)
-            ? "Unreal 未返回标准输出；请查看项目 Saved/Logs 下的最新日志。"
-            : output.Trim();
-        if (detail.Length > 4000)
-        {
-            detail = detail[^4000..];
-        }
-
-        var manifest = LoadExportManifest(manifestPath);
-        // 导出成没成功，以清单为准，不以退出码为准。
-        // commandlet 只要编辑器在别处报过错就返回非 0——实测工程里有个蓝图编译不过，
-        // 于是每次检测都被判成「导出失败」，而日志里明写着 Python script executed successfully、
-        // 清单也照常写出来了。清单缺失或不是这一轮写的，才是真失败。
-        var manifestIsFresh = manifest is not null && TryGetLastWriteUtc(manifestPath) > runStartedAtUtc;
-        if (manifest is null || !manifestIsFresh)
-        {
-            throw new InvalidOperationException(process.ExitCode != 0
-                ? $"Unreal 角色数据导出失败，退出码 {process.ExitCode}。\n{detail}"
-                : $"Unreal 导出进程已结束，但没有生成有效清单：{manifestPath}");
-        }
-
-        var exportWarning = process.ExitCode == 0
+        var output = run.Output;
+        var exportWarning = run.ExitCode == 0
             ? string.Empty
-            : $"Unreal 退出码为 {process.ExitCode}，但导出清单已正常写出；退出码多半来自与导出无关的编辑器报错。\n{detail}";
+            : $"Unreal 退出码为 {run.ExitCode}，但导出清单已正常写出；退出码多半来自与导出无关的编辑器报错。\n{DescribeProcessOutput(output)}";
 
         var assetCount = manifest?.Assets.Count ?? 0;
         var characterItemCount = manifest?.CharacterItems.Count ?? 0;
@@ -765,7 +762,19 @@ internal sealed class UnrealProjectSyncService
             "项目角色导出完成。",
             100,
             $"导出资产 {assetCount} 个，角色物品 {characterItemCount} 个，序列预览 {characterSequenceCount} 个，BUFF {(manifest?.CharacterBuffs.Count ?? 0)} 组。"));
-        return new UnrealProjectSyncExportRunResult(process.ExitCode, manifestPath, totalCount, output, exportWarning);
+        return new UnrealProjectSyncExportRunResult(run.ExitCode, manifestPath, totalCount, output, exportWarning);
+    }
+
+    /// <summary>
+    /// 报错里带的进程输出：截尾保留最后 4000 字。Unreal 的日志前面全是启动噪声，
+    /// 真正的失败原因总在末尾。
+    /// </summary>
+    private static string DescribeProcessOutput(string output)
+    {
+        var detail = string.IsNullOrWhiteSpace(output)
+            ? "Unreal 未返回标准输出；请查看项目 Saved/Logs 下的最新日志。"
+            : output.Trim();
+        return detail.Length > 4000 ? detail[^4000..] : detail;
     }
 
     public string GetExportDirectoryPath(string projectPath)
@@ -776,19 +785,6 @@ internal sealed class UnrealProjectSyncService
     private static string GetExportProgressPath(string manifestPath)
     {
         return Path.Combine(Path.GetDirectoryName(manifestPath)!, "characters.progress.json");
-    }
-
-    private static DateTime TryGetLastWriteUtc(string path)
-    {
-        try
-        {
-            var info = new FileInfo(path);
-            return info.Exists ? info.LastWriteTimeUtc : DateTime.MinValue;
-        }
-        catch (IOException)
-        {
-            return DateTime.MinValue;
-        }
     }
 
     private static UnrealExportProgressState? TryReadExportProgress(string path)
@@ -807,20 +803,6 @@ internal sealed class UnrealProjectSyncService
         catch
         {
             return null;
-        }
-    }
-
-    private static void TryDeleteFile(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-        catch
-        {
         }
     }
 
@@ -3065,21 +3047,6 @@ internal sealed class UnrealProjectSyncService
 
         var commandPath = Path.Combine(folderPath, "UnrealEditor-Cmd.exe");
         return File.Exists(commandPath) ? commandPath : enginePath;
-    }
-
-    private static void KillProcessTree(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch
-        {
-            // Cancellation cleanup should not hide the original cancellation signal.
-        }
     }
 
     private static string FormatElapsed(TimeSpan elapsed)

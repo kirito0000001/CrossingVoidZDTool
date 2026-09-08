@@ -71,7 +71,7 @@ internal sealed class CharacterToolboxDataService
             }
 
             CreateBackupIfNeeded(path, currentText);
-            WriteAllTextAtomic(path, nextText);
+            AtomicFileWriter.WriteAllText(path, nextText);
             PruneBackups(character.ToolFolderPath);
         }
     }
@@ -131,12 +131,5 @@ internal sealed class CharacterToolboxDataService
         {
             backup.Delete();
         }
-    }
-
-    private static void WriteAllTextAtomic(string path, string text)
-    {
-        var tempPath = $"{path}.tmp";
-        File.WriteAllText(tempPath, text, Encoding.UTF8);
-        File.Move(tempPath, path, overwrite: true);
     }
 }

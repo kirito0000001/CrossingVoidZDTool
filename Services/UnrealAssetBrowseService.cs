@@ -54,7 +54,9 @@ internal sealed class UnrealAssetBrowseService
 
         Directory.CreateDirectory(workingDirectory);
         var resultPath = Path.Combine(workingDirectory, "browse.result.json");
-        TryDelete(resultPath);
+        // 结果路径是固定的，删不掉就意味着待会儿读到的是上一轮的定位结果。
+        // 所以记下删没删掉，后面用写入时间再确认一次。
+        var clearedStaleResult = AtomicFileWriter.TryDelete(resultPath);
 
         // 离线的 StartInfo 只是个载体：BuildLaunch 会把 ZD_ 开头的环境变量
         // 转发给在线作业，真正执行的是远程那一侧。
@@ -72,17 +74,23 @@ internal sealed class UnrealAssetBrowseService
             offlineStartInfo,
             useRunningEditor: true);
 
-        using var process = Process.Start(launch.StartInfo)
-            ?? throw new InvalidOperationException("无法启动 Unreal 在线执行进程。");
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        await process.WaitForExitAsync(cancellationToken).ConfigureAwait(false);
-        var output = await outputTask + await errorTask;
+        var run = await UnrealProcessRunner.RunAsync(
+            launch.StartInfo,
+            TimeSpan.FromMinutes(5),
+            "无法启动 Unreal 在线执行进程。",
+            "Unreal 在线定位超时。",
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+        var output = run.Output;
 
-        if (!File.Exists(resultPath))
+        // 结果必须是这一轮写出来的。以前只判存在，于是上一轮删不掉的残留
+        // 会被当成本次结果直接用掉，而且完全看不出来。
+        if (!UnrealProcessRunner.IsFreshOutput(resultPath, run.StartedAtUtc))
         {
+            var reason = File.Exists(resultPath) && !clearedStaleResult
+                ? $"只留下删不掉的上一轮定位结果：{resultPath}"
+                : "编辑器没有返回定位结果。";
             return new UnrealAssetBrowseResult(
-                false, 0, [], $"编辑器没有返回定位结果。{Environment.NewLine}{output.Trim()}");
+                false, 0, [], $"{reason}{Environment.NewLine}{output.Trim()}");
         }
 
         try
@@ -104,23 +112,6 @@ internal sealed class UnrealAssetBrowseService
         catch (JsonException ex)
         {
             return new UnrealAssetBrowseResult(false, 0, [], $"定位结果无法解析：{ex.Message}");
-        }
-    }
-
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
         }
     }
 }

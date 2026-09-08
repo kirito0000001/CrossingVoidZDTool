@@ -124,6 +124,12 @@ var tests = new (string Name, Action Run)[]
     ("语音分类表与桥接脚本标签一致", VoiceSpecsMatchBridgeScriptLabels),
     ("查看模式能看序列但改不了", ReadOnlySequenceCanBeViewedButNotEdited),
     ("语音规范路径按分类落到对应目录", VoicePathPolicyBuildsCanonicalFolder),
+    ("清单读不出来时不清理帧文件", UnreadableManifestSkipsFramePruning),
+    ("设置文件损坏时留档并说出来", CorruptSettingsAreQuarantinedAndReported),
+    ("原子写不残留临时文件", AtomicWriteLeavesNoTemporaryFile),
+    ("取消时真的杀掉 Unreal 进程", CancellingUnrealRunKillsTheProcess),
+    ("子进程输出一律固定 UTF-8", RedirectedProcessOutputAlwaysFixesEncoding),
+    ("进程编排不再各写一份", ProcessOrchestrationIsNotDuplicated),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
@@ -4035,18 +4041,83 @@ static void UnrealProjectCharacterRefreshUsesOfflineItemScan()
 
 static void UnrealProjectDetailExportRejectsFailedProcess()
 {
-    var service = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "Services", "UnrealProjectSyncService.cs"));
+    // 导出成没成功以产物为准，不以退出码为准：commandlet 只要编辑器在别处报过错
+    // （实测是 Misaka_AnimBP 有个 Play Sequence 指向已不存在的序列）就返回非 0，
+    // 而日志里明写着 Python script executed successfully、清单也照常写出来了。
+    // 按退出码判，每次检测都会被判成导出失败。
+    //
+    // 这条用例以前是断言 UnrealProjectSyncService.cs 里存在某个字面量——查的是变量名，
+    // 改个命名就假报警，也拦不住逻辑写错。进程编排抽成 UnrealProcessRunner 之后，
+    // 同一份行为可以直接跑起来验。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var outputPath = Path.Combine(root, "manifest.json");
 
-    // 导出失败仍然要抛，但判据换成了产物而不是退出码：
-    // commandlet 只要编辑器在别处报过错（实测是 Misaka_AnimBP 有个 Play Sequence
-    // 指向已不存在的序列）就返回非 0，而日志里明写着 Python script executed successfully、
-    // 清单也照常写出来了。按退出码判，每次检测都会被判成导出失败。
-    AssertEqual(true, service.Contains("Unreal 角色数据导出失败", StringComparison.Ordinal));
-    AssertEqual(true, service.Contains("manifest is null || !manifestIsFresh", StringComparison.Ordinal));
-    // 清单必须是这一轮新写的，不能拿上一次的残留冒充成功。
-    AssertEqual(true, service.Contains("TryGetLastWriteUtc(manifestPath) > runStartedAtUtc", StringComparison.Ordinal));
-    // 退出码非 0 但清单有效时，只留告警。
-    AssertEqual(true, service.Contains("exportWarning", StringComparison.Ordinal));
+        // 上一轮留下的残留：写在本次开跑之前
+        File.WriteAllText(outputPath, "{}");
+        var staleStart = DateTime.UtcNow.AddSeconds(1);
+        AssertEqual(false, UnrealProcessRunner.IsFreshOutput(outputPath, staleStart));
+
+        // 本轮新写的产物
+        AssertEqual(true, UnrealProcessRunner.IsFreshOutput(outputPath, DateTime.UtcNow.AddSeconds(-5)));
+
+        // 文件根本不存在时不能算新鲜
+        AssertEqual(false, UnrealProcessRunner.IsFreshOutput(
+            Path.Combine(root, "missing.json"), DateTime.UtcNow.AddSeconds(-5)));
+
+        // 退出码非 0，但 verdict 说产物有效 —— 不许判失败
+        var okRun = UnrealProcessRunner.RunAsync(
+            NonZeroExitProcess(),
+            TimeSpan.FromMinutes(1),
+            "起不来",
+            "超时",
+            verdict: _ => null).GetAwaiter().GetResult();
+        AssertEqual(true, okRun.ExitCode != 0);
+
+        // 退出码为 0，但 verdict 说产物无效 —— 必须判失败，且用 verdict 给的理由
+        var threw = false;
+        try
+        {
+            UnrealProcessRunner.RunAsync(
+                ZeroExitProcess(),
+                TimeSpan.FromMinutes(1),
+                "起不来",
+                "超时",
+                verdict: _ => "没有生成有效清单").GetAwaiter().GetResult();
+        }
+        catch (InvalidOperationException error)
+        {
+            threw = true;
+            AssertEqual(true, error.Message.Contains("没有生成有效清单", StringComparison.Ordinal));
+        }
+
+        AssertEqual(true, threw);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+
+    static System.Diagnostics.ProcessStartInfo NonZeroExitProcess() => new()
+    {
+        FileName = "cmd.exe",
+        Arguments = "/c exit 3",
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+    };
+
+    static System.Diagnostics.ProcessStartInfo ZeroExitProcess() => new()
+    {
+        FileName = "cmd.exe",
+        Arguments = "/c exit 0",
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+    };
 }
 
 static void UnrealProjectDetailExportRejectsMismatchedModuleBuildIds()
@@ -4945,6 +5016,275 @@ static void ReadOnlySequenceCanBeViewedButNotEdited()
             Path.Combine(character.FolderPath, "ZDMaterial", action.Code, "Frames"), "*.png");
         AssertEqual(before, frameFiles.Length);
     });
+}
+
+static void UnreadableManifestSkipsFramePruning()
+{
+    // 清理冗余帧时会先收集「所有动作里被清单引用到的帧」。以前某个动作的
+    // sequence.json 读不出来（杀软刚扫完、文件被占用、上游非原子写留下的坏文件）
+    // 会被当作「这个动作零引用」，于是它名下的帧图全都不在引用集里，
+    // 紧接着被删光——用户的原始帧就这么没了，界面上没有任何提示。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var service = new SequenceFrameService();
+        var actions = SequenceFrameService.BuildActions(new CharacterSkillsData());
+        var first = actions[0];
+        var second = actions[1];
+
+        var sourceA = Path.Combine(root, "a.png");
+        var sourceB = Path.Combine(root, "b.png");
+        var sourceC = Path.Combine(root, "c.png");
+        foreach (var path in new[] { sourceA, sourceB, sourceC })
+        {
+            WriteSolidImage(path, Color.Red, SequenceFrameService.RequiredWidth, SequenceFrameService.RequiredHeight);
+        }
+
+        service.ImportFrames(character, first, [sourceA, sourceB]);
+        service.ImportFrames(character, second, [sourceC]);
+
+        var secondFramesFolder = Path.Combine(
+            character.FolderPath, "ZDMaterial", second.Code, "Frames");
+        AssertEqual(1, Directory.GetFiles(secondFramesFolder, "*.png").Length);
+
+        // 先把第一个动作读出来（LoadSections 会读全部清单，坏在这一步就命中不了要验的路径）
+        var firstSection = LoadSequenceSection(service, character, first);
+
+        // 在第一个动作的帧目录里放一张「清单没引用」的孤儿图。
+        // 正常情况下它就是清理的目标，会被删掉——下面用它来观察清理到底跑没跑。
+        var firstFramesFolder = Path.Combine(character.FolderPath, "ZDMaterial", first.Code, "Frames");
+        var orphanPath = Path.Combine(firstFramesFolder, "orphan.png");
+        WriteSolidImage(orphanPath, Color.Blue, SequenceFrameService.RequiredWidth, SequenceFrameService.RequiredHeight);
+
+        // 把另一个动作的清单写坏，模拟「读的时候好好的，清理时读不到了」
+        var brokenManifest = Path.Combine(character.FolderPath, "ZDMaterial", second.Code, "sequence.json");
+        AssertEqual(true, File.Exists(brokenManifest));
+        File.WriteAllText(brokenManifest, "{\"Frames\":[");
+
+        // 触发一次会带清理的操作
+        service.DeleteFrame(character, first, firstSection.Frames[0]);
+
+        // 引用集不完整时必须整个放弃清理：孤儿图还在，说明没有照着残缺的引用集去删。
+        // 修复前这里会把孤儿图删掉——而真实场景里被删的是用户的原始帧。
+        AssertEqual(true, File.Exists(orphanPath));
+        // 另一个动作的帧当然也一张不少
+        AssertEqual(1, Directory.GetFiles(secondFramesFolder, "*.png").Length);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void CorruptSettingsAreQuarantinedAndReported()
+{
+    // settings.json 损坏以前是个闭环：静默返回默认设置 -> 工作区路径回落到默认值
+    // -> 界面显示「目录已就绪」，用户的真实工程连同全部角色看起来空了
+    // -> 下一次改任何设置调用 Save()，损坏文件被默认值覆盖，丢失变成永久。
+    var messages = new List<string>();
+    ToolboxLog.SetSink(new CollectingLogSink(messages));
+    try
+    {
+        var service = new AppSettingsService();
+        var settingsPath = service.SettingsFilePath;
+        var backupPath = settingsPath + ".regression-backup";
+        var hadOriginal = File.Exists(settingsPath);
+        if (hadOriginal)
+        {
+            File.Copy(settingsPath, backupPath, overwrite: true);
+        }
+
+        try
+        {
+            Directory.CreateDirectory(service.SettingsDirectoryPath);
+            File.WriteAllText(settingsPath, "{ this is not json");
+
+            var loaded = service.Load();
+            // 读不出来时用默认设置是可以的，但必须留下痕迹
+            AssertEqual(true, loaded is not null);
+            AssertEqual(true, messages.Any(text => text.Contains("设置文件读取失败", StringComparison.Ordinal)));
+            // 坏文件要被改名留档，否则下一次保存就把证据盖掉了
+            AssertEqual(false, File.Exists(settingsPath));
+            var quarantined = Directory.GetFiles(service.SettingsDirectoryPath, "settings.json.corrupt-*");
+            AssertEqual(true, quarantined.Length >= 1);
+            foreach (var path in quarantined)
+            {
+                File.Delete(path);
+            }
+        }
+        finally
+        {
+            if (hadOriginal)
+            {
+                File.Copy(backupPath, settingsPath, overwrite: true);
+                File.Delete(backupPath);
+            }
+            else if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+    finally
+    {
+        ToolboxLog.SetSink(null);
+    }
+}
+
+static void CancellingUnrealRunKillsTheProcess()
+{
+    // 这是整次进程编排重构的核心行为。以前四处都把
+    //     if (ct.IsCancellationRequested) KillProcessTree(...)
+    // 写在轮询循环顶部，可取消几乎总是落在 await Task.Delay(..., ct) 里直接抛出，
+    // 那一句永远轮不到；而 using var process 的 Dispose 并不会结束进程。
+    // 结果就是 UnrealEditor-Cmd.exe 变成孤儿，继续占着工程锁，下一次同步起不来。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        // 子进程先等几秒再写这个文件。取消之后它要是还活着，文件迟早会出现——
+        // 用「文件有没有出现」判，比观察某个文件还在不在长要干脆得多。
+        var survivedPath = Path.Combine(root, "survived.txt");
+        var startInfo = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            Arguments = $"/c ping -n 5 127.0.0.1 > nul & echo survived > \"{survivedPath}\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+
+        using var cancellation = new CancellationTokenSource();
+        var run = UnrealProcessRunner.RunAsync(
+            startInfo,
+            TimeSpan.FromMinutes(2),
+            "起不来",
+            "超时",
+            cancellationToken: cancellation.Token);
+
+        Thread.Sleep(600);
+        // 还没到写文件的时候，此刻取消
+        AssertEqual(false, File.Exists(survivedPath));
+        cancellation.Cancel();
+
+        var cancelled = false;
+        try
+        {
+            run.GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
+
+        AssertEqual(true, cancelled);
+
+        // 关键断言：等过子进程本来会写文件的时刻，它必须已经被杀掉了。
+        // 没杀掉的话这个文件会出现——那就是「孤儿进程还在跑」。
+        Thread.Sleep(6000);
+        AssertEqual(false, File.Exists(survivedPath));
+    }
+    finally
+    {
+        try
+        {
+            Directory.Delete(root, recursive: true);
+        }
+        catch (IOException)
+        {
+            // 子进程真没杀掉的话这里会删不动——上面的断言已经报出来了
+        }
+    }
+}
+
+static void RedirectedProcessOutputAlwaysFixesEncoding()
+{
+    // 中文 Windows 的控制台代码页是 936，而这些子进程写的是 UTF-8
+    // （UnrealPythonTaskExecutionService 还显式设了 PYTHONUTF8=1），
+    // 不固定 StandardOutputEncoding 就必然乱码——偏偏这些输出只在出故障时才会被人翻出来看。
+    foreach (var path in Directory.EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories))
+    {
+        var source = File.ReadAllText(path, Encoding.UTF8);
+        if (!source.Contains("RedirectStandardOutput", StringComparison.Ordinal))
+        {
+            continue;
+        }
+
+        if (!source.Contains("StandardOutputEncoding", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{path} 重定向了子进程输出但没有固定编码，中文诊断信息会乱码。");
+        }
+    }
+}
+
+static void ProcessOrchestrationIsNotDuplicated()
+{
+    // 起进程、轮询、杀进程树这套编排原本在四个服务里各抄了一份，
+    // 除了轮询间隔各不相同之外还共享同样的两个坑（取消杀不掉、读到上一轮结果）。
+    // 收敛到 UnrealProcessRunner 之后，这条守卫挡住「下次又各自抄一份」。
+    string[] shouldNotOrchestrate =
+    [
+        Path.Combine("Services", "UnrealProjectSyncService.cs"),
+        Path.Combine("Services", "UnrealBlueprintSetupService.cs"),
+        Path.Combine("Services", "UnrealBridgeExecutorService.cs"),
+        Path.Combine("Services", "UnrealLightConfigurationService.cs"),
+        Path.Combine("Services", "UnrealAssetBrowseService.cs"),
+    ];
+
+    foreach (var path in shouldNotOrchestrate)
+    {
+        var source = File.ReadAllText(path, Encoding.UTF8);
+        foreach (var forbidden in new[] { "KillProcessTree", "entireProcessTree", "Process.Start" })
+        {
+            if (source.Contains(forbidden, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"{path} 又自己编排进程了（出现 {forbidden}），应该走 UnrealProcessRunner。");
+            }
+        }
+    }
+}
+
+static void AtomicWriteLeavesNoTemporaryFile()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var path = Path.Combine(root, "data.json");
+        AtomicFileWriter.WriteAllText(path, "{\"a\":1}");
+        AssertEqual("{\"a\":1}", File.ReadAllText(path));
+
+        // 覆盖写：目标始终存在，且不留临时文件
+        AtomicFileWriter.WriteAllText(path, "{\"a\":2}");
+        AssertEqual("{\"a\":2}", File.ReadAllText(path));
+        AssertEqual(0, Directory.GetFiles(root, "*.tmp").Length);
+
+        // 临时名带 GUID，两次写入不会撞同一个临时文件
+        AssertEqual(1, Directory.GetFiles(root).Length);
+
+        // 写不进去时要如实抛出，并且不留半截临时文件
+        var directoryAsTarget = Path.Combine(root, "occupied");
+        Directory.CreateDirectory(directoryAsTarget);
+        var threw = false;
+        try
+        {
+            AtomicFileWriter.WriteAllText(directoryAsTarget, "x");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            threw = true;
+        }
+
+        AssertEqual(true, threw);
+        AssertEqual(0, Directory.GetFiles(root, "*.tmp").Length);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
 }
 
 static void VoicePathPolicyBuildsCanonicalFolder()
@@ -10299,6 +10639,11 @@ sealed class FakeWorkflowHost : IUnrealSyncWorkflowHost
     public void Notify(UnrealSyncNotice notice) => Notices.Add(notice);
 
     public void Log(string message) => Logs.Add(message);
+}
+
+sealed class CollectingLogSink(List<string> messages) : IToolboxLogSink
+{
+    public void Write(ToolboxLogLevel level, string message, Exception? error) => messages.Add(message);
 }
 
 sealed class SingleThreadTestSynchronizationContext : SynchronizationContext, IDisposable

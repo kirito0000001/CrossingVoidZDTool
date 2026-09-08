@@ -110,6 +110,9 @@ namespace CrossingVoidZDTool
                 _voiceMaterialService);
             InitializeComponent();
             RootGrid.DataContext = _applicationViewModel;
+            // Services 层从这里开始能写日志。在此之前它整层没有任何日志出口，
+            // 约九十处 catch 全是静默的，出问题只能靠猜。
+            ToolboxLog.SetSink(new ToolboxLogBridge(this));
             _dialogService = new WinUiDialogService(() => RootGrid.XamlRoot);
             InitializeVoicePlayback();
             RegisterSettingsShortcuts();
