@@ -621,10 +621,9 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         }
     }
 
-    public void RefreshCollection()
-    {
-        RefreshCollectionAsync().GetAwaiter().GetResult();
-    }
+    // 这里曾经有一个 RefreshCollection()，内部 RefreshCollectionAsync().GetAwaiter().GetResult()。
+    // 它全仓没有调用点，但只要有人调就会和 UI 线程互锁（和关窗那条死锁同一形状）。
+    // 需要同步刷新时请直接 await RefreshCollectionAsync()，别再包一层阻塞等待。
 
     private IReadOnlyList<SequenceFrameCollectionItem> BuildCollectionItems(
         IReadOnlyList<SequenceFrameSection> sections,

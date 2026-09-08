@@ -2148,6 +2148,20 @@ namespace CrossingVoidZDTool
             AppendLog(LogKind.User, $"打开草稿参考图文件夹：{CharacterDesk.CurrentCharacter.ReferenceFolderPath}");
         }
 
+        /// <summary>关窗收尾用：把还在防抖窗口里的草稿立刻落盘。</summary>
+        private void FlushPendingDraftSave()
+        {
+            try
+            {
+                _draftSaveTimer.Stop();
+                CharacterDesk.SaveDraftNow();
+            }
+            catch (Exception ex)
+            {
+                AppendLog(LogKind.Error, "关闭前保存草稿失败。", ex);
+            }
+        }
+
         private void ScheduleDraftSave()
         {
             RunOnUiThread(() =>

@@ -118,6 +118,8 @@ var tests = new (string Name, Action Run)[]
     ("逐项勾选会刷新右栏的已选择计数", SingleItemSelectionRefreshesStepSelectionText),
     ("重置导入操作会刷新中栏与流程状态", ResetImportOperationRefreshesWorkspaceAndWorkflow),
     ("改过分类的语音不会被基线当成已同步", ReclassifiedVoiceSurvivesBaselineFilter),
+    ("元数据损坏时角色不会从角色台消失", CorruptMetadataKeepsCharacterVisible),
+    ("角色数据写到一半崩溃不会丢原文件", CharacterDataWriteIsAtomic),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
@@ -4897,6 +4899,78 @@ static void BlueprintSetupSelfCheckPasses()
     AssertEqual(true, source.Contains(".casefold()", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("def _missing_object_targets", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("def _reconcile_applied", StringComparison.Ordinal));
+}
+
+static void CorruptMetadataKeepsCharacterVisible()
+{
+    // character.json 坏掉时（写一半崩溃、被外部工具改坏），以前扫描直接跳过，
+    // 这个角色就从角色台上凭空消失——用户会以为素材全丢了，
+    // 而磁盘上的图片语音其实一个没少。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var service = new CharacterWorkspaceService();
+        CreateWorkspaceCharacterFolder(Path.Combine(root, "Draft"), "Misaka", "御坂美琴", isCompleted: false);
+        CreateWorkspaceCharacterFolder(Path.Combine(root, "Draft"), "ALO_Yuki", "结衣", isCompleted: false);
+        AssertEqual(2, service.LoadCharacters(root).Count);
+
+        // 把其中一个的元数据写成半截 JSON
+        var broken = Path.Combine(root, "Draft", "Misaka", "tool", "character.json");
+        File.WriteAllText(broken, "{\"Code\":\"Misa");
+
+        var cards = service.LoadCharacters(root);
+        // 角色必须还在，不能凭空消失
+        AssertEqual(2, cards.Count);
+        var recovered = cards.Single(card =>
+            string.Equals(card.Code, "Misaka", StringComparison.OrdinalIgnoreCase));
+        // 兜底卡片用目录名当代号，完成状态取自它所在的目录
+        AssertEqual(false, recovered.IsCompleted);
+        AssertEqual(true, Directory.Exists(recovered.FolderPath));
+
+        // 完全没有元数据文件的目录仍然不算角色
+        Directory.CreateDirectory(Path.Combine(root, "Draft", "随手建的空目录"));
+        AssertEqual(2, service.LoadCharacters(root).Count);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void CharacterDataWriteIsAtomic()
+{
+    // 这个函数名叫 WriteAllTextAtomic，但以前是「写临时文件 -> 删掉目标 -> 移过去」，
+    // 删和移之间崩溃就等于角色的技能、BUFF、信息整份消失。
+    // 没法真的在中途杀进程，退而验证两件可观察的事：
+    // 目标文件在整个过程中从不消失，且不会留下固定名的临时文件让并发写互相踩。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var service = new CharacterToolboxDataService();
+
+        service.Update(character, data => data.Skills = new CharacterSkillsData());
+        var dataPath = Path.Combine(character.ToolFolderPath, "ZDToolboxData.json");
+        AssertEqual(true, File.Exists(dataPath));
+
+        var workspace = new CharacterWorkspaceService();
+        for (var round = 0; round < 5; round++)
+        {
+            workspace.SaveDraft(character, "草稿第 " + round + " 轮");
+            // 每一轮之后目标文件都必须在，且内容完整可读
+            AssertEqual(true, File.Exists(dataPath));
+            AssertEqual("草稿第 " + round + " 轮", workspace.LoadDraft(character));
+        }
+
+        // 不许残留临时文件
+        var leftovers = Directory.GetFiles(character.ToolFolderPath, "*.tmp");
+        AssertEqual(0, leftovers.Length);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
 }
 
 static void ReclassifiedVoiceSurvivesBaselineFilter()

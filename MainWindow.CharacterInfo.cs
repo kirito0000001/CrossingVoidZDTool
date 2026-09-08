@@ -93,9 +93,11 @@ namespace CrossingVoidZDTool
                     if (CharacterDesk.CurrentCharacter is not null &&
                         !string.IsNullOrWhiteSpace(_applicationViewModel.UnrealSync.CharacterName))
                     {
-                        CharacterDesk.SynchronizeCurrentCharacterDisplayNameAsync(_applicationViewModel.UnrealSync.CharacterName)
-                            .GetAwaiter()
-                            .GetResult();
+                        // 这条路径会在关窗时被调用（MainWindow_Closed -> 本方法）。
+                        // 走 async 版会死锁：GetResult 占着 UI 线程，而它内部
+                        // await Task.Run 的续体要 post 回同一个 DispatcherQueue。
+                        CharacterDesk.SynchronizeCurrentCharacterDisplayName(
+                            _applicationViewModel.UnrealSync.CharacterName);
                     }
 
                 }

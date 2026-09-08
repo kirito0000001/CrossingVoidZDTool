@@ -175,6 +175,8 @@ namespace CrossingVoidZDTool
             FlushPendingCharacterInfoSave();
             FlushPendingSkillsSave();
             FlushPendingBuffsSave();
+            // 草稿也是防抖保存的，以前唯独漏了它，关窗会丢掉最后 900 毫秒的输入
+            FlushPendingDraftSave();
             _applicationViewModel.UnrealProjectSync.FlushSessionCache();
             DisposeVoicePlayback();
         }

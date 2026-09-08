@@ -61,7 +61,8 @@ internal sealed class CharacterWorkspaceService
                          .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var card = TryLoadCharacterCard(directoryPath);
+                var card = TryLoadCharacterCard(directoryPath)
+                    ?? TryBuildFallbackCharacterCard(directoryPath, stateFolder.IsCompleted);
                 if (card is null)
                 {
                     continue;
@@ -513,6 +514,40 @@ internal sealed class CharacterWorkspaceService
             .ToList();
     }
 
+    /// <summary>
+    /// 元数据读不出来时的兜底卡片。
+    ///
+    /// 以前这里是直接 continue：character.json 只要坏了（写一半崩溃、
+    /// 被外部工具改坏），这个角色就从角色台上凭空消失，用户会以为素材全丢了，
+    /// 而磁盘上的图片语音其实都还在。改成用目录名兜一张卡出来，
+    /// 角色仍然看得见、能进去，坏掉的那份元数据留在原地等修。
+    ///
+    /// 元数据文件本来就不存在的目录（比如用户随手建的空文件夹）仍然返回 null，
+    /// 那才是「这不是一个角色」。
+    /// </summary>
+    private static CharacterCard? TryBuildFallbackCharacterCard(string characterFolderPath, bool isCompleted)
+    {
+        var metadataFilePath = Path.Combine(characterFolderPath, ToolFolderName, MetadataFileName);
+        if (!File.Exists(metadataFilePath))
+        {
+            return null;
+        }
+
+        var code = Path.GetFileName(characterFolderPath.TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            return null;
+        }
+
+        return BuildCharacterCard(characterFolderPath, new CharacterMetadata
+        {
+            Code = code,
+            Name = code,
+            IsCompleted = isCompleted,
+        });
+    }
+
     private static CharacterCard? TryLoadCharacterCard(string characterFolderPath)
     {
         var metadataFilePath = Path.Combine(characterFolderPath, ToolFolderName, MetadataFileName);
@@ -641,10 +676,11 @@ internal sealed class CharacterWorkspaceService
     {
         metadata.LastEditedAt = DateTime.Now;
         var metadataFilePath = Path.Combine(characterFolderPath, ToolFolderName, MetadataFileName);
-        File.WriteAllText(
+        // character.json 决定角色卡能不能被认出来，写一半崩溃这个角色就从角色台上消失了，
+        // 所以和其他角色数据一样走原子替换。
+        WriteAllTextAtomic(
             metadataFilePath,
-            JsonSerializer.Serialize(metadata, CharacterMetadataJsonTypeInfo),
-            Encoding.UTF8);
+            JsonSerializer.Serialize(metadata, CharacterMetadataJsonTypeInfo));
     }
 
     private static CharacterMetadata? ReadMetadata(string characterFolderPath)
@@ -661,9 +697,29 @@ internal sealed class CharacterWorkspaceService
                 File.ReadAllText(metadataFilePath, Encoding.UTF8),
                 AppJsonSerializerContext.Default.CharacterMetadata);
         }
-        catch
+        catch (Exception error) when (error is JsonException or IOException or UnauthorizedAccessException)
         {
+            // 读不出来不能当作「没有这个角色」——那样角色会从角色台上凭空消失，
+            // 用户还以为数据丢了。把坏文件挪到一边留证据，让调用方按「缺元数据」
+            // 走既有的兜底路径（用目录名当代号），角色卡仍然看得见。
+            TryQuarantineCorruptFile(metadataFilePath);
             return null;
+        }
+    }
+
+    /// <summary>把读不出来的文件改名留档，避免下一次保存直接覆盖掉证据。</summary>
+    private static void TryQuarantineCorruptFile(string path)
+    {
+        try
+        {
+            var quarantinePath = $"{path}.corrupt-{DateTime.Now:yyyyMMdd-HHmmss}";
+            if (!File.Exists(quarantinePath))
+            {
+                File.Move(path, quarantinePath);
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
         }
     }
 
@@ -776,16 +832,36 @@ internal sealed class CharacterWorkspaceService
             JsonSerializer.Serialize(data, JsonContext.CharacterToolboxData));
     }
 
+    /// <summary>
+    /// 原子替换。以前这里是「写临时文件 -> 删掉目标 -> 移过去」，
+    /// 删和移之间崩溃就等于角色的技能、BUFF、信息整份消失；
+    /// 而且临时名是固定的 .tmp，两处并发保存会互相踩。
+    /// 同仓其他八处走的都是 File.Move(overwrite: true)，唯独这里没跟上。
+    /// </summary>
     private static void WriteAllTextAtomic(string path, string text)
     {
-        var tempPath = $"{path}.tmp";
-        File.WriteAllText(tempPath, text, Encoding.UTF8);
-        if (File.Exists(path))
+        var tempPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
         {
-            File.Delete(path);
+            File.WriteAllText(tempPath, text, Encoding.UTF8);
+            File.Move(tempPath, path, overwrite: true);
         }
+        catch
+        {
+            // 移动失败时别把半截临时文件留在角色目录里
+            try
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
+            catch (Exception cleanup) when (cleanup is IOException or UnauthorizedAccessException)
+            {
+            }
 
-        File.Move(tempPath, path);
+            throw;
+        }
     }
 
     private static IEnumerable<CharacterSkillEntry> EnumerateSkillEntries(CharacterSkillsData skills)

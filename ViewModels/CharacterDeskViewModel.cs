@@ -303,6 +303,25 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         ReplaceCharacter(refreshedCharacter, previousCode);
     }
 
+    /// <summary>
+    /// 同步版，只给关窗这类「已经在阻塞等待」的收尾路径用。
+    ///
+    /// 上面那个 async 版在关窗时会死锁：调用方 .GetAwaiter().GetResult() 占着 UI 线程，
+    /// 而 await Task.Run(...) 的续体要 post 回同一个 DispatcherQueue，
+    /// 于是续体永远排不上、程序卡死。底层本来就是同步方法，直接调即可。
+    /// </summary>
+    public void SynchronizeCurrentCharacterDisplayName(string displayName)
+    {
+        if (CurrentCharacter is null || IsViewOnly)
+        {
+            return;
+        }
+
+        var previousCode = CurrentCharacter.Code;
+        var refreshedCharacter = _characterWorkspaceService.SynchronizeCharacterDisplayName(CurrentCharacter, displayName);
+        ReplaceCharacter(refreshedCharacter, previousCode);
+    }
+
     public async Task OpenCurrentCharacterDraftAsync(CancellationToken cancellationToken = default)
     {
         if (CurrentCharacter is null || IsViewOnly)
@@ -371,6 +390,23 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         var character = CurrentCharacter;
         var text = DraftText;
         await Task.Run(() => _characterWorkspaceService.SaveDraft(character, text), cancellationToken);
+        DraftSaveStatusText = $"已保存：{DateTime.Now:HH:mm:ss}";
+        StatusText = CurrentCharacterStatusText;
+    }
+
+    /// <summary>
+    /// 同步版，给关窗收尾用。草稿是 900 毫秒防抖保存的，
+    /// 关窗时不 flush 就会丢掉最后这段输入；而在关窗路径上等 async
+    /// 会和 UI 线程互锁，所以直接同步写。
+    /// </summary>
+    public void SaveDraftNow()
+    {
+        if (CurrentCharacter is null || IsViewOnly)
+        {
+            return;
+        }
+
+        _characterWorkspaceService.SaveDraft(CurrentCharacter, DraftText);
         DraftSaveStatusText = $"已保存：{DateTime.Now:HH:mm:ss}";
         StatusText = CurrentCharacterStatusText;
     }
