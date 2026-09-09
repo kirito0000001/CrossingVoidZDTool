@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.IO;
 using System.Text.Json.Serialization;
 
@@ -398,6 +399,39 @@ internal sealed class UnrealBridgeExecutionItemResult
     public string OriginIdentity { get; set; } = string.Empty;
 
     public string OutputFilePath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 条目种类。"action" 是真正执行过的动作，"diagnostic" 只是诊断信息
+    /// （比如序列同步里那条孤儿序列解绑），它不对应任何动作。
+    ///
+    /// 加这个字段是因为诊断条目以前会被算进「已成功的动作」：于是所有真实动作
+    /// 都失败时，「一个都没成功就抛」的判断失效，界面还报「已成功 1 个动作并写入基线」，
+    /// 而那个假 ID 也会被拿去生成基线条目。
+    ///
+    /// 默认必须是 "action"：别的脚本写出的结果不带这个字段，缺省当诊断会把它们整批滤掉。
+    /// </summary>
+    public string ItemKind { get; set; } = "action";
+
+    /// <summary>这条是不是诊断信息（不计入已成功动作、不进基线）。</summary>
+    public bool IsDiagnostic =>
+        string.Equals(ItemKind, "diagnostic", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 从执行结果里挑出「真正成功了的动作」。
+    ///
+    /// 单独提成函数是为了能测：以前这段挑选逻辑埋在一个 583 行的 async void
+    /// 按钮处理器里，而它挑错的后果很重——序列同步的诊断条目
+    /// （orphan-sequences 那条）会被算成一个成功的动作，于是
+    /// 「一个动作都没成功就抛」的判断失效，界面报「已成功 1 个动作并写入基线」，
+    /// 那个假 ID 还会被拿去生成基线条目。
+    /// </summary>
+    public static string[] SelectSucceededActionStableIds(
+        IEnumerable<UnrealBridgeExecutionItemResult>? items) =>
+        items?
+            .Where(item => item is { Succeeded: true, IsDiagnostic: false }
+                && !string.IsNullOrWhiteSpace(item.StableId))
+            .Select(item => item.StableId)
+            .ToArray() ?? [];
 }
 
 internal sealed record UnrealBridgeDraftImportResult(

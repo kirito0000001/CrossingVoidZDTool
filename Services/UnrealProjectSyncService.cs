@@ -3,6 +3,7 @@ using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
@@ -623,16 +624,13 @@ internal sealed class UnrealProjectSyncService
                 : [];
             return new UnrealModuleManifest(buildId, modules);
         }
-        catch (JsonException)
+        catch (Exception error) when (error is JsonException or IOException or UnauthorizedAccessException)
         {
-            return null;
-        }
-        catch (IOException)
-        {
-            return null;
-        }
-        catch (UnauthorizedAccessException)
-        {
+            // 读不出来只能当「没有这份清单」——.modules 缺失在纯蓝图项目里本来就正常，
+            // 不该因此挡住导入。但要留一行：返回 null 会让 ValidateProjectModuleBuildIds
+            // 那条「引擎与项目二进制版本不一致」的守卫整个失效，用户拿着旧二进制一路走下去，
+            // 最后在 Unreal 里撞上一堆看不懂的报错。
+            ToolboxLog.Warn($"读不了 Unreal 模块清单，已跳过引擎版本一致性检查：{path}", error);
             return null;
         }
     }
@@ -802,6 +800,9 @@ internal sealed class UnrealProjectSyncService
         }
         catch
         {
+            // 这里**故意不写日志**：进度文件每两秒读一次，撞上 Python 侧写到一半是常态
+            // 而不是故障（UnrealProgressFileWatcher.Poll 是同一个判断），记下来只会刷满
+            // 日志面板、盖掉真正的失败。后果也只是这一轮退回通用文案，下一轮就好了。
             return null;
         }
     }
@@ -817,8 +818,13 @@ internal sealed class UnrealProjectSyncService
         {
             return Path.GetFullPath(path.Trim().Trim('"'));
         }
-        catch
+        catch (Exception error)
         {
+            // 路径写得不成样子（非法字符、盘符不存在……）时原样退回用户填的文本，
+            // 让后面的 File.Exists 去报「找不到」——那句报错比这里抛出来更好懂。
+            // 但要留一行：此后所有以这个路径拼出来的判断都建立在一个没规范化的字符串上，
+            // 出问题时得知道源头在这儿。
+            ToolboxLog.Warn($"路径无法规范化，按原样使用：{path}", error);
             return path.Trim().Trim('"');
         }
     }
@@ -921,8 +927,13 @@ internal sealed class UnrealProjectSyncService
                 File.ReadAllText(path, Encoding.UTF8),
                 AppJsonSerializerContext.Default.UnrealProjectExportManifest);
         }
-        catch
+        catch (Exception error)
         {
+            // 返回 null 是有意的：ResolveExportManifest 要能缺一段就接着合并剩下的段。
+            // 但「坏掉的清单」和「这段本来就没写」在返回值上是同一个 null，于是这段资产
+            // 整段消失——Unreal 侧看起来是空的，差异里只剩工具箱侧的新增、删除永远是 0，
+            // 正是 ResolveExportManifest 顶上那段注释警告过的样子。区分两者只靠这行日志。
+            ToolboxLog.Error($"Unreal 导出清单读不了，这一段资产会被当成不存在：{path}", error);
             return null;
         }
     }
@@ -1112,11 +1123,11 @@ internal sealed class UnrealProjectSyncService
                     names[assetName["Item_".Length..]] = displayName;
                 }
             }
-            catch (IOException)
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {
-            }
-            catch (UnauthorizedAccessException)
-            {
+                // 单个 Item 读不了不该让整批角色名都读不出来，所以只跳过这一个。后果是
+                // 这个角色退回显示代号，看起来像「名字没配」——真正的原因得靠这行日志。
+                ToolboxLog.Warn($"读不了角色 Item 资产，该角色只能显示代号：{filePath}", error);
             }
         }
 
@@ -1153,6 +1164,8 @@ internal sealed class UnrealProjectSyncService
             }
             catch (DecoderFallbackException)
             {
+                // 这里**故意不写日志**：逐字节偏移试探 FText，绝大多数偏移本就解不出
+                // 合法的 UTF-16，解码失败是预期内的中间状态。一个资产能抛几千次。
             }
         }
 
@@ -1774,9 +1787,11 @@ internal sealed class UnrealProjectSyncService
             GetTextAt(slot.Names, index),
             GetTextAt(slot.SkillNames, index),
             GetTextAt(slot.Descriptions, index),
-            GetAt(slot.PointCosts, index).ToString(),
-            GetAt(slot.AttackCapacities, index).ToString(),
-            GetAt(slot.AutoPriorities, index).ToString(),
+            // 这三个整数和 FormatDouble 走的是同一条往返路径（回填文本框 -> 第六步按
+            // 不变区域解析回来），所以格式化侧同样要钉死区域，不能跟着系统区域走。
+            GetAt(slot.PointCosts, index).ToString(CultureInfo.InvariantCulture),
+            GetAt(slot.AttackCapacities, index).ToString(CultureInfo.InvariantCulture),
+            GetAt(slot.AutoPriorities, index).ToString(CultureInfo.InvariantCulture),
             MapSkillState(GetAt(slot.SkillStates, index)),
             MapGuardState(GetAt(slot.PreformTypes, index)),
             FormatDouble(GetAt(slot.PreSkillValues, index)),
@@ -2001,7 +2016,10 @@ internal sealed class UnrealProjectSyncService
         if (Regex.IsMatch(name, @"(?:^|[_-])Shape0*([2-9]\d*)", RegexOptions.IgnoreCase) is true)
         {
             var match = Regex.Match(name, @"(?:^|[_-])Shape0*([2-9]\d*)", RegexOptions.IgnoreCase);
-            return int.TryParse(match.Groups[1].Value, out var shapeIndex) ? shapeIndex : 1;
+            // 形态号是从资产名里抠出来的机器标识，解析区域必须固定，不能跟着系统设置飘。
+            return int.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var shapeIndex)
+                ? shapeIndex
+                : 1;
         }
 
         var normalizedCode = Regex.Replace(actionCode ?? string.Empty, "[^a-z0-9]", string.Empty).ToLowerInvariant();
@@ -2120,12 +2138,28 @@ internal sealed class UnrealProjectSyncService
 
     private static double GetRate(Dictionary<string, double> values, int level)
     {
-        return values.TryGetValue(level.ToString(), out var value) ? value : 0;
+        // 键是写入侧按不变区域生成的（见 UnrealBlueprintSetupService.BuildSkillRate），
+        // 取键也必须同区域：两头区域不一致时数字文本对不上，整档倍率查不到，
+        // 又会悄悄退回 0。
+        return values.TryGetValue(level.ToString(CultureInfo.InvariantCulture), out var value) ? value : 0;
     }
 
-    private static string FormatDouble(double value)
+    /// <summary>
+    /// 这些文本会回填进技能编辑器，第六步再按不变区域解析回 double，所以格式化侧
+    /// 必须是同一个区域。以前跟着当前区域走：de/fr/ru 写出来的是「1,5」，第六步解析不回来，
+    /// 而它当时是静默归 0 的——技能倍率、守备数值被无声清零，界面却一路显示成功。
+    /// </summary>
+    /// <summary>
+    /// 数值回填文本框时的格式化。必须用不变区域：这个字符串会存进角色 JSON，
+    /// 再由第六步按不变区域解析回来。以前这里用当前区域，于是在小数点是逗号的
+    /// 区域（de/fr/ru）写出 "1,5"，解析读不了，旧代码把它静默当成 0。
+    ///
+    /// 开成 internal 只为了能测这条往返——回归里那条「逗号小数点区域仍能往返」
+    /// 直接切区域跑一遍，比逐个断言源码里有没有写 InvariantCulture 靠谱得多。
+    /// </summary>
+    internal static string FormatDouble(double value)
     {
-        return Math.Abs(value) < 0.000001 ? string.Empty : value.ToString("0.###");
+        return Math.Abs(value) < 0.000001 ? string.Empty : value.ToString("0.###", CultureInfo.InvariantCulture);
     }
 
     private static string FormatDouble(double? value)
@@ -2202,8 +2236,9 @@ internal sealed class UnrealProjectSyncService
 
     private static int ExtractTrailingNumber(string value)
     {
+        // 同上：资产名尾巴上的序号是机器标识，解析区域必须固定。
         var match = Regex.Match(value ?? string.Empty, @"(\d+)(?!.*\d)");
-        return match.Success && int.TryParse(match.Groups[1].Value, out var number)
+        return match.Success && int.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var number)
             ? number
             : int.MaxValue;
     }
@@ -2733,7 +2768,8 @@ internal sealed class UnrealProjectSyncService
 
         if (formIndex > 1 && !Regex.IsMatch(code, @"\d{2}$", RegexOptions.CultureInvariant))
         {
-            code += formIndex.ToString("00");
+            // 这里拼的是 Unreal 侧的资产名，绝不能跟着系统区域变。
+            code += formIndex.ToString("00", CultureInfo.InvariantCulture);
         }
 
         return code;
@@ -3030,9 +3066,15 @@ internal sealed class UnrealProjectSyncService
         return kind.Key is not null;
     }
 
+    /// <summary>
+    /// 时间戳是 Python 侧 <c>datetime.isoformat()</c> 写的 ISO-8601 文本，属于机器数据。
+    /// 按当前区域解析等于让「这份清单是什么时候写的」跟着用户的区域设置走；实测 .NET 8
+    /// 对 ISO-8601 够宽容、常见区域都解析得出来，但那是运行时实现细节，不该当依据。
+    /// </summary>
     private static DateTime? ParseGeneratedAt(string? generatedAt)
     {
-        return DateTime.TryParse(generatedAt, out var value)
+        return DateTime.TryParse(
+            generatedAt, CultureInfo.InvariantCulture, DateTimeStyles.None, out var value)
             ? value
             : null;
     }

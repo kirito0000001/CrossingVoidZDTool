@@ -1,5 +1,7 @@
 # CrossingVoidZDTool Architecture Migration Map
 
+> ⚠️ 这份文件写于项目早期。它描述的是**目标架构**，而代码已经偏离了它（详见 `Plan/01-现状诊断.md`）。当前约定以 `README.md` 为准。
+
 This file records the baseline framework for the Zero Crossing ZD toolbox. Keep it current before adding feature pages.
 
 ## Current Frame
@@ -54,7 +56,6 @@ This file records the baseline framework for the Zero Crossing ZD toolbox. Keep 
 - Delayed-save modules must flush before window close or navigation decisions that depend on their data.
 - Keep image decoding, file scans, numbering, naming, CSV/JSON, import/export, and Unreal rules in Services.
 - Add pages through the central page-switching path so every page gets the same entrance animation.
-- Build and start the app after each meaningful step, keep the final launched app instance open for debugging, then send the step-completion QQ email.
 
 ## Next Migration Targets
 

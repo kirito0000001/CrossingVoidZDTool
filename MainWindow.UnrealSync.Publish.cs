@@ -65,7 +65,7 @@ namespace CrossingVoidZDTool
                     else
                         _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code);
                     // 第三步执行前累计校验第一至第三步；不会检查尚未进入的后续阶段。
-                    await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
+                    var preflightExportRun = await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
                         [character.Code],
                         // 这一段以前完全没有进度回调，十几秒里进度条一动不动。
                         new Progress<ProgressUpdate>(update => UpdateGlobalProgress(
@@ -75,6 +75,10 @@ namespace CrossingVoidZDTool
                             update.IsIndeterminate)),
                         GetGlobalProgressCancellationToken(),
                         isSequenceSynchronization ? UnrealProjectSyncExportScope.CharacterSequences : UnrealProjectSyncExportScope.CharacterMaterials);
+                    // 导出结果以前在这里被整个丢掉。Warning 记的是「退出码非 0 但清单照常写出来了」，
+                    // 也就是编辑器在别处报过错——多半无关，但同步出问题时它是唯一的线索。
+                    // 检测那条链路（DetectUnrealPublishChangesAsync）一直有这一行，只有同步这条漏了。
+                    LogExportWarning(preflightExportRun);
                     _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code, requireAssetTypes: !isSequenceSynchronization);
                     latestCandidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.FirstOrDefault(item =>
                         string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase))
@@ -188,6 +192,7 @@ namespace CrossingVoidZDTool
                             UpdateGlobalProgress("正在检测基础配置...", 90, character.Code, true);
                             var configurationResult = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
                             _applicationViewModel.UnrealProjectSync.SetLightConfigurationResult(configurationResult);
+                            LogLightConfigurationPreflight(character.Code, configurationResult);
                         }
                         CompleteGlobalProgress("序列无需同步", isSequenceSynchronization ? "全部序列无差异。" : "全部素材无差异，已进入基础配置。");
                         await HideGlobalProgressAfterDelayAsync();
@@ -254,6 +259,7 @@ namespace CrossingVoidZDTool
                         UpdateGlobalProgress("正在检测基础配置...", 90, character.Code, true);
                         var configurationResult = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
                         _applicationViewModel.UnrealProjectSync.SetLightConfigurationResult(configurationResult);
+                        LogLightConfigurationPreflight(character.Code, configurationResult);
                     }
                     CompleteGlobalProgress("没有可自动同步的素材改动", deferredCount == 0
                         ? "两端已有素材一致，已进入基础配置。"
@@ -348,10 +354,13 @@ namespace CrossingVoidZDTool
                     // Python 是逐动作串行执行的：失败之前的动作已经改了 Unreal。
                     // 以前这里直接抛异常，复扫、写基线、刷新树全被跳过，
                     // 已经写进去的动作既不落基线也不从列表里消失。
-                    var succeededActionCodes = sequenceResult.Items
-                        .Where(item => item.Succeeded && !string.IsNullOrWhiteSpace(item.StableId))
-                        .Select(item => item.StableId)
-                        .ToArray();
+                    // 挑选逻辑提到了模型里，因为它挑错的后果很重：结果里混着一条
+                    // orphan-sequences 的诊断条目（孤儿序列解绑），它不对应任何动作。
+                    // 以前它被算进「已成功的动作」，于是所有真实动作都失败时，
+                    // 下面那句「一个都没成功就抛」失效，界面反而报「已成功 1 个动作并写入基线」，
+                    // 那个假 ID 还会被拿去生成基线条目。
+                    var succeededActionCodes =
+                        UnrealBridgeExecutionItemResult.SelectSucceededActionStableIds(sequenceResult.Items);
                     if (!sequenceResult.Succeeded && succeededActionCodes.Length == 0)
                     {
                         throw new InvalidOperationException($"第五步序列同步失败：{sequenceResult.ErrorMessage}");
@@ -375,7 +384,7 @@ namespace CrossingVoidZDTool
                     }
                     else
                     {
-                        await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
+                        var sequenceRescanExportRun = await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
                             [character.Code],
                             // 复扫也是一次完整的 Unreal 导出，不该静默十几秒。
                             new Progress<ProgressUpdate>(update => UpdateGlobalProgress(
@@ -385,6 +394,8 @@ namespace CrossingVoidZDTool
                                 update.IsIndeterminate)),
                             GetGlobalProgressCancellationToken(),
                             UnrealProjectSyncExportScope.CharacterSequences);
+                        // 复扫的结果直接决定「还剩多少差异」，导出侧的告警更不能丢。
+                        LogExportWarning(sequenceRescanExportRun);
                     }
 
                     // 序列同步后必须用最新 Unreal 快照重新计算差异，不能直接清空选择树；
@@ -517,12 +528,53 @@ namespace CrossingVoidZDTool
                             58 + value.CompletedCount * 24d / Math.Max(1, value.TotalCount),
                             $"动作进度：{value.CompletedCount}/{value.TotalCount} · {value.StableId}")),
                     GetGlobalProgressCancellationToken());
+                // 第五步早就逐条记执行结果，第三步这里以前拿到 result 之后一个字段都没读过：
+                // 失败时用户只看到「以下同步项没有成功结果：xxx」这句由后面验证阶段拼出来的话，
+                // 而 Python 侧真正的异常文本（result.Items[].Message）从头到尾没人展示，
+                // 排查只能靠猜——又是一例「显示成功但实际没做成」。
+                //
+                // 明细分两路走，沿用 LogSequenceChanges 定下的规矩：第三步的条目数是按
+                // 素材张数算的（整角色首同步上百条很正常），全塞进日志面板会被 300 条上限
+                // 当场挤掉，还要为每条建一次 XAML 元素。所以成功项只落 runtime.log，
+                // 失败项——本来就没几条，而且正是这次要救的那批——才进面板。
+                AppendLog(
+                    result.Succeeded ? LogKind.Info : LogKind.Error,
+                    $"[Sync Execution] character={character.Code} succeeded={result.Succeeded} " +
+                    $"items={result.Items.Count} failed={result.Items.Count(item => !item.Succeeded)} " +
+                    $"error={FormatSyncLogValue(result.ErrorMessage)}");
+                if (!string.IsNullOrWhiteSpace(result.ProcessExitWarning))
+                {
+                    // 退出码非 0 但结果文件判成功时的诊断信息。丢了它，
+                    // 「同步成功但编辑器其实报过错」就再也查不出来。
+                    AppendLog(LogKind.Warning, $"[Sync Execution] {result.ProcessExitWarning}");
+                }
+                foreach (var item in result.Items)
+                {
+                    var line =
+                        $"[Sync Execution Item] stableId={item.StableId} succeeded={item.Succeeded} " +
+                        $"objectPath={FormatSyncLogValue(item.ObjectPath)} message={FormatSyncLogValue(item.Message)}";
+                    if (item.Succeeded)
+                    {
+                        AppendDiagnosticLog(LogKind.Info, line);
+                    }
+                    else
+                    {
+                        AppendLog(LogKind.Error, line);
+                    }
+                }
+
+                if (result.Items.Count > 0)
+                {
+                    AppendLog(LogKind.Info, $"[Sync Execution] 共 {result.Items.Count} 条明细，已写入 runtime.log。");
+                }
 
                 UpdateGlobalProgress("阶段 4/5 · 正在复扫验证 Unreal 资产", 86, $"角色：{character.Code} · 等待 Unreal 导出结果", true);
-                await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
+                var rescanExportRun = await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
                     [character.Code],
                     cancellationToken: GetGlobalProgressCancellationToken(),
                     scope: isSequenceSynchronization ? UnrealProjectSyncExportScope.CharacterSequences : UnrealProjectSyncExportScope.CharacterMaterials);
+                // 同上：这次复扫的结果要拿去写基线、判「同步到底成没成」，告警必须留痕。
+                LogExportWarning(rescanExportRun);
                 var refreshedCandidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.First(item =>
                     string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase));
                 var rescanned = new UnrealBridgeSemanticSnapshotService().Build(refreshedCandidate);
@@ -574,6 +626,7 @@ namespace CrossingVoidZDTool
                     UpdateGlobalProgress("阶段 5/5 · 正在检测基础配置", 94, $"角色：{character.Code} · 准备进入基础配置", true);
                     var configurationResult = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
                     _applicationViewModel.UnrealProjectSync.SetLightConfigurationResult(configurationResult);
+                    LogLightConfigurationPreflight(character.Code, configurationResult);
                 }
                 CompleteGlobalProgress(isSequenceSynchronization ? "序列同步到虚幻完成" : "同步到虚幻完成", $"已验证 {executableCount} 项；另有 {deferredCount} 项未执行。");
                 ShowFloatingTip(InfoBarSeverity.Success, isSequenceSynchronization ? "序列同步完成" : "同步到虚幻完成", $"已验证 {executableCount} 项。");
@@ -754,6 +807,27 @@ namespace CrossingVoidZDTool
             {
                 EndUnrealWorkflowOperation();
             }
+        }
+
+        /// <summary>
+        /// 第三步收尾时顺手做的第四步预检。
+        ///
+        /// 扫描失败不该把已经做完的同步一起判失败，所以这里不抛；但也不能像以前那样
+        /// 连 <see cref="UnrealLightConfigurationResult.Succeeded"/> 都不看就扔进视图层——
+        /// 失败时界面上只会摆出一条「无法读取基础配置」，Unreal 那边真正的报错
+        /// 一个字都留不下来，排查只能靠猜。
+        /// </summary>
+        private void LogLightConfigurationPreflight(string characterCode, UnrealLightConfigurationResult result)
+        {
+            if (result.Succeeded)
+            {
+                return;
+            }
+
+            AppendLog(
+                LogKind.Warning,
+                $"[Light Config Preflight] character={characterCode} succeeded=false " +
+                $"items={result.Items.Count} error={FormatSyncLogValue(result.ErrorMessage)}");
         }
     }
 }

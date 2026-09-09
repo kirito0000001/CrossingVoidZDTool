@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
+using CommunityToolkit.Mvvm.ComponentModel;
 using System;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -15,7 +16,7 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace CrossingVoidZDTool.ViewModels;
 
-internal sealed class SequenceFramesViewModel : ObservableObject
+internal sealed partial class SequenceFramesViewModel : ObservableObject
 {
     private static readonly (string ActionCode, VoiceMaterialKind Kind)[] VoiceKindMappings =
     [
@@ -57,6 +58,15 @@ internal sealed class SequenceFramesViewModel : ObservableObject
     private bool _pauseEditorPreviewWhenVoiceEnds;
     private SequenceEditorPlaybackMode _editorPlaybackMode = SequenceEditorPlaybackMode.Loop;
     private bool _isReadOnly;
+    /// <summary>
+    /// 右侧预览器当前装着哪个动作。
+    ///
+    /// 这里以前是普通字段 + 只读表达式属性，四个赋值点没有任何一处通知，
+    /// 全文件 OnPropertyChanged(nameof(PreviewSection)) 出现 0 次。
+    /// 目前只被 code-behind 直读所以没暴露出来，谁在 XAML 里绑它就是个死值。
+    /// 改成源生成属性之后，赋值即通知，不再依赖谁记得补。
+    /// </summary>
+    [ObservableProperty]
     private SequenceFrameSection? _previewSection;
     private SequenceFrameSection? _selectedSection;
     private SequenceFrameItem? _selectedEditorFrame;
@@ -242,7 +252,6 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     public bool HasSelectedSection => SelectedSection is not null;
 
-    public SequenceFrameSection? PreviewSection => _previewSection;
 
     public SequenceFrameItem? SelectedEditorFrame
     {
@@ -1138,6 +1147,10 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         IsPreviewing = false;
         _previewIndex = 0;
         OnPropertyChanged(nameof(EditorPlaybackPositionText));
+        // CurrentPreviewFrame 是从 PreviewFrames 和 _previewIndex 算出来的，
+        // 它唯一的通知点在 UpdateCurrentFrame 里，而清空不走那条路。
+        // 它绑在界面上（空白帧提示的可见性），漏通知会让提示停在上一帧的状态。
+        OnPropertyChanged(nameof(CurrentPreviewFrame));
     }
 
     private void ClearSelectedSection()

@@ -7,6 +7,15 @@ import unreal
 
 PROTOCOL_VERSION = 1
 
+# 结果条目分两类，C# 侧必须能区分开。
+# 'action' 才是真正执行过的动作，它的 stableId 会被拿去写基线；
+# 'diagnostic' 只是流程里的一条诊断信息（比如孤儿序列解绑），
+# 它不对应任何动作，既不该计入"已成功 N 个动作"，也不该进基线。
+# 之前两类混在同一个 items 数组里，于是所有动作都失败时，那条伪条目
+# 仍让 C# 认为"有动作成功过"，"一个都没成的话就抛"这条兜底彻底失效。
+ITEM_KIND_ACTION = 'action'
+ITEM_KIND_DIAGNOSTIC = 'diagnostic'
+
 def _write(path, value):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     temp = path + '.tmp'
@@ -701,6 +710,21 @@ def _run_post_sync_export():
         return False
 
 
+def _summarize_items(results):
+    """把逐条结果聚合成一句顶层结论。
+
+    顶层 succeeded 以前是写死的 True。孤儿序列解绑失败时（ZDBridge 少这个 API，
+    或者调用抛了异常）条目里明明写着 succeeded=False，C# 侧却按"整体成功"继续
+    走复扫、写基线——失败被彻底盖掉，用户看到的是一次完美的同步。
+    """
+    failed = [item for item in results if not item.get('succeeded')]
+    if not failed:
+        return True, ''
+    return False, ' | '.join(
+        '%s: %s' % (item.get('stableId', ''), item.get('message', ''))
+        for item in failed)
+
+
 def main():
     plan_path = os.environ.get('ZD_SEQUENCE_SYNC_PLAN_PATH', '')
     result_path = os.environ.get('ZD_SEQUENCE_SYNC_RESULT_PATH', '')
@@ -718,6 +742,9 @@ def main():
             detached, failed = _detach_orphan_sequences(detach_paths)
             results.append({
                 'stableId': 'orphan-sequences',
+                # 这条不是动作，只是解绑结果的汇报；打上标记好让 C# 把它从
+                # succeededActionCodes 里剔掉，否则它会被当成"成功的一个动作"。
+                'itemKind': ITEM_KIND_DIAGNOSTIC,
                 'succeeded': not failed,
                 'message': '非规范序列已从动画源解绑（资产保留）| detached=%d | failed=%d%s' % (
                     len(detached), len(failed),
@@ -735,6 +762,7 @@ def main():
             # 结果协议与素材同步保持一致：C# 侧只解析 items，写成 actions 会被静默丢弃。
             results.append({
                 'stableId': code,
+                'itemKind': ITEM_KIND_ACTION,
                 'succeeded': True,
                 'message': _result_message(action_result),
                 'objectPath': action_result.get('sequencePath', ''),
@@ -742,18 +770,31 @@ def main():
                 'outputFilePath': '',
             })
             _write_progress(progress_path, index + 1, total, code, action.get('displayName', '') or code)
+        succeeded, failure_message = _summarize_items(results)
         _write(result_path, {
             'protocolVersion': PROTOCOL_VERSION,
-            'succeeded': True,
-            'errorMessage': '',
+            'succeeded': succeeded,
+            # 两种失败要分开，别塞进同一个字段：
+            # 'items' 表示流程整趟跑完了，只是某些条目没成——没列进失败清单的
+            # 条目结果可信，C# 可以照常给它们写基线；
+            # 'exception' 表示中途炸了，后面的动作根本没执行过，剩下什么没做要另说。
+            'failureKind': '' if succeeded else 'items',
+            'errorMessage': failure_message,
             'completedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
             'items': results,
         })
     except Exception as error:
+        _, failure_message = _summarize_items(results)
+        message = str(error)
+        if failure_message:
+            # 抛异常之前可能已经有条目失败过。只报最后那个异常的话，
+            # 前面"孤儿序列没解绑成功"这类线索就没了。
+            message = '%s | 另有未成功条目：%s' % (message, failure_message)
         _write(result_path, {
             'protocolVersion': PROTOCOL_VERSION,
             'succeeded': False,
-            'errorMessage': str(error),
+            'failureKind': 'exception',
+            'errorMessage': message,
             'completedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
             'items': results,
         })

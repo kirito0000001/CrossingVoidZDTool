@@ -1,6 +1,6 @@
 # Codex 开发速查规约
 
-项目：`D:\UnrealMap\CrossingVoidZDTool`
+> ⚠️ 这份文件写于项目早期，部分内容已经过期。当前的构建、测试与约定以仓库根目录的 `README.md` 为准。
 
 这份文件给之后的 Codex / 维护者快速对齐用。进项目先读它，按这里的规则写。
 
@@ -341,15 +341,7 @@ dotnet build CrossingVoidZDTool.csproj `
   -o .\bin\verify\<step-name>
 ```
 
-每个有意义的阶段完成后发送 QQ 邮箱通告；构建完成并启动验证程序后，也要发送一次通告，说明构建结果和当前保留的验证程序状态：
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass `
-  -File C:\Users\liuyu\Documents\CodexTools\notify-step.ps1 `
-  -Project "CrossingVoidZDTool" `
-  -Title "<阶段标题>" `
-  -Summary "<阶段摘要>"
-```
+这份规约不要求任何对外发送消息的动作。代表用户对外发消息需要用户当面授权，不能由仓库里的某份文件授权。
 
 只改 Markdown 时不用 build。
 

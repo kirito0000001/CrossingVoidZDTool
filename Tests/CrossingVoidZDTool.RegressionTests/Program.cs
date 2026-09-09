@@ -130,6 +130,11 @@ var tests = new (string Name, Action Run)[]
     ("取消时真的杀掉 Unreal 进程", CancellingUnrealRunKillsTheProcess),
     ("子进程输出一律固定 UTF-8", RedirectedProcessOutputAlwaysFixesEncoding),
     ("进程编排不再各写一份", ProcessOrchestrationIsNotDuplicated),
+    ("技术债只许降不许升", TechnicalDebtRatchetOnlyGoesDown),
+    ("整份设置换掉后派生属性会刷新", ReplacingSettingsNotifiesDerivedProperties),
+    ("诊断条目不算成功的动作", DiagnosticItemsDoNotCountAsSucceededActions),
+    ("技能数值解析不了要报错不要归零", UnparsableSkillNumbersAreReportedNotZeroed),
+    ("技能数值在逗号小数点区域仍能往返", SkillNumbersSurviveCommaDecimalCulture),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
@@ -973,7 +978,7 @@ static void DialogsFollowCurrentWindowTheme()
 
 static void PendingVoiceManagerSupportsAssignment()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.VoiceMaterials.cs"));
 
     AssertEqual(true, xaml.Contains("x:Name=\"VoiceMaterialAssignmentBar\"", StringComparison.Ordinal));
@@ -1238,7 +1243,7 @@ static void LegacyKeywordTagsMigrateToAliasesAndRemoveLegacyUi()
         AssertSequence(loaded.KeywordTagGroups.Aliases.ToArray(), persisted.KeywordTagGroups!.Aliases.ToArray());
         AssertEqual(0, persisted.KeywordTagGroups.LegacyKeywordTags.Count);
 
-        var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+        var xaml = ReadAllProjectXaml();
         var viewModel = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "ViewModels", "UnrealSyncViewModel.cs"));
         AssertEqual(false, xaml.Contains("旧版未分类 Tag", StringComparison.Ordinal));
         AssertEqual(false, xaml.Contains("HasLegacyKeywordTags", StringComparison.Ordinal));
@@ -1284,7 +1289,7 @@ static void CharacterAntiSwitchDefaultsAndPersists()
         AssertEqual(true, viewModel.SaveNow(character));
         AssertEqual(true, service.Load(character).Anti);
 
-        var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+        var xaml = ReadAllProjectXaml();
         var formLimitIndex = xaml.IndexOf("UnrealSync.FormLimitStat", StringComparison.Ordinal);
         var antiIndex = xaml.IndexOf("Text=\"抗性类别\"", StringComparison.Ordinal);
         AssertEqual(true, formLimitIndex >= 0 && antiIndex > formLimitIndex);
@@ -1552,7 +1557,7 @@ static void St1ListsAllDraftCharacters()
         CreateWorkspaceCharacterFolder(Path.Combine(root, "Completed"), "Asuna", "亚丝娜", isCompleted: true);
         var viewModel = new CharacterDeskViewModel(new CharacterWorkspaceService());
         viewModel.LoadCharactersAsync(root, null, null).GetAwaiter().GetResult();
-        var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+        var xaml = ReadAllProjectXaml();
 
         AssertSequence(["Kuroko", "Misaka"], viewModel.DraftCharacters.Select(character => character.Code).OrderBy(code => code).ToArray());
         AssertEqual(false, viewModel.DraftCharacters.Any(character => character.IsCompleted));
@@ -1703,7 +1708,7 @@ static void ExportCharacterCopiesWholeFolderAndRequiresOverwrite()
 
 static void CharacterDetailUsesFolderExportFlow()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.CharacterDesk.cs"));
 
     AssertEqual(true, xaml.Contains("x:Name=\"CharacterDetailExportButton\"", StringComparison.Ordinal));
@@ -2412,7 +2417,7 @@ static void SequenceFrameVoiceSelectionRefreshesAfterOptions()
         AssertEqual(true, matchingOptionAddedOrder > 0);
         AssertEqual(true, selectedPathNotifiedOrder > matchingOptionAddedOrder);
 
-        var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+        var xaml = ReadAllProjectXaml();
         AssertEqual(true, xaml.Contains("Text=\"当前帧语音\"", StringComparison.Ordinal));
         AssertEqual(
             true,
@@ -2753,7 +2758,7 @@ static void SequenceEditorHeaderUsesStableFramePositionSummary()
         viewModel.StepPreviewFrame(1);
         AssertEqual($"2 / {sourcePaths.Count}", Convert.ToString(property.GetValue(viewModel)) ?? string.Empty);
 
-        var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+        var xaml = ReadAllProjectXaml();
         AssertEqual(
             true,
             xaml.Contains(
@@ -2764,7 +2769,7 @@ static void SequenceEditorHeaderUsesStableFramePositionSummary()
 
 static void SequenceEditorCreatesFirstFrameAndCollectionSupportsModifierMultiSelect()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     var sequenceSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
     var shortcutSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.Logging.cs"));
 
@@ -2902,7 +2907,7 @@ static void SequenceCollectionResolvesAllDuplicatesKeepingMostUsedResource()
         AssertEqual(1, duplicatePaths.Count(File.Exists));
     });
 
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
     AssertEqual(true, xaml.Contains("Content=\"一键处理\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("Click=\"ResolveAllSequenceFrameDuplicatesButton_Click\"", StringComparison.Ordinal));
@@ -2911,7 +2916,7 @@ static void SequenceCollectionResolvesAllDuplicatesKeepingMostUsedResource()
 
 static void OuterSequencePreviewProvidesFrameCollectionEntry()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     AssertEqual(true, xaml.Contains("Content=\"帧素材合集\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains(
         "Click=\"OpenSequenceCollectionButton_Click\" Content=\"帧素材合集\"",
@@ -2945,7 +2950,7 @@ static void SequenceCollectionOrdersByActionThenFrameIndex()
 
 static void SequenceCollectionUsesCompactUsageFirstCards()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
 
     AssertEqual(true, xaml.Contains("x:Name=\"DetectSequenceFrameDuplicatesButton\"", StringComparison.Ordinal));
@@ -2987,7 +2992,7 @@ static void SequenceFrameImportPreservesOuterScrollPosition()
 
 static void SequencePreviewsShareDoubleBufferedPresenter()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
     var presenterXamlPath = Path.Combine(Directory.GetCurrentDirectory(), "Controls", "BufferedImagePresenter.xaml");
     var presenterSourcePath = Path.Combine(Directory.GetCurrentDirectory(), "Controls", "BufferedImagePresenter.xaml.cs");
@@ -3303,7 +3308,7 @@ static void SequenceCollectionMultiSelectionTracksClickOrder()
         [0, 2, 1, 3],
         items.Select(item => Convert.ToInt32(selectionOrderProperty?.GetValue(item))).ToArray());
 
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     AssertEqual(true, xaml.Contains("Text=\"{Binding SelectionOrderText, Mode=OneWay}\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("Visibility=\"{Binding SelectionOrderVisibility, Mode=OneWay}\"", StringComparison.Ordinal));
 }
@@ -5216,6 +5221,250 @@ static void RedirectedProcessOutputAlwaysFixesEncoding()
         {
             throw new InvalidOperationException(
                 $"{path} 重定向了子进程输出但没有固定编码，中文诊断信息会乱码。");
+        }
+    }
+}
+
+static void TechnicalDebtRatchetOnlyGoesDown()
+{
+    // 棘轮护栏。这几个数字是「当前有多糟」的快照，用例只保证它们不再变糟。
+    //
+    // 为什么不是「一刀切禁止」：裸 catch 有 22 处、MainWindow 最大分部 2335 行，
+    // 要求一次清零只会让人把用例删掉。棘轮能真正落地——每次顺手改好一处，
+    // 就把上限往下调一格，退步则立刻红。
+    //
+    // 改好之后请把这里的数字调低，别只是让它继续过。
+    var violations = new List<string>();
+
+    void Ratchet(string what, int actual, int ceiling)
+    {
+        if (actual > ceiling)
+        {
+            violations.Add($"{what}：{actual} 超过上限 {ceiling}");
+        }
+    }
+
+    // 1) Services 层的裸 catch（没有异常类型、也没有 when 过滤）。
+    //    每一处都是「悄悄吞掉，出问题只能靠猜」的候选。
+    var bareCatches = 0;
+    foreach (var path in Directory.EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories))
+    {
+        bareCatches += File.ReadAllLines(path, Encoding.UTF8)
+            .Count(line => line.Trim() == "catch");
+    }
+
+    Ratchet("Services 层裸 catch", bareCatches, 20);
+
+    // 2) MainWindow 分部的体量。规约明写着「别把项目养成一个超大的 MainWindow」，
+    //    但没有任何机制拦住它长大。
+    var largestPartial = Directory.EnumerateFiles(".", "MainWindow*.cs")
+        .Select(path => File.ReadAllLines(path, Encoding.UTF8).Length)
+        .DefaultIfEmpty(0)
+        .Max();
+    Ratchet("MainWindow 最大分部行数", largestPartial, 2335);
+
+    // 3) 单文件 XAML。九个页面加十二个自建遮罩层全挤在这一个文件里。
+    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5522);
+
+    // 4) Services 最大单文件。
+    var largestService = Directory.EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories)
+        .Select(path => File.ReadAllLines(path, Encoding.UTF8).Length)
+        .DefaultIfEmpty(0)
+        .Max();
+    // UnrealProjectSyncService 一个类干十件事，这个数字贴着上限。
+    // 下一步是把它里面 1130 行零 IO 的纯函数抽出去（预览投影 + 素材分类），
+    // 那两段没有任何外部调用方，抽出即降到约 2050——方案见 Plan/02-重构方案.md 的 P2。
+    Ratchet("Services 最大单文件行数", largestService, 3126);
+
+    // 5) 断言源码文本的用例数。这类断言查的是变量名和换行位置，
+    //    改个命名就假报警，却拦不住逻辑写错——而且它们把反模式固化住了
+    //    （有一条直接断言 Click="XxxButton_Click"，等于规定不许改成 Command 绑定）。
+    //    只许往下走。
+    var ownSource = File.ReadAllText(
+        Path.Combine("Tests", "CrossingVoidZDTool.RegressionTests", "Program.cs"), Encoding.UTF8);
+    // 搜索串拆开拼，免得这一行把自己也算进去
+    var marker = "File.ReadAllText(Path.Combine(Directory." + "GetCurrentDirectory()";
+    var sourceTextAssertions = ownSource.Split(marker).Length - 1;
+    Ratchet("断言源码文本的用例", sourceTextAssertions, 50);
+
+    if (violations.Count > 0)
+    {
+        throw new InvalidOperationException(
+            "技术债棘轮退步了：" + Environment.NewLine + string.Join(Environment.NewLine, violations));
+    }
+}
+
+static (CharacterCard Character, CharacterInfoData Info, CharacterSkillsData Skills) BuildBlueprintSetupFixture(string root)
+{
+    var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴");
+    Directory.CreateDirectory(character.ToolFolderPath);
+    var info = new CharacterInfoData { Code = "Misaka", Name = "御坂美琴", FormLimit = 1 };
+    var skills = new CharacterSkillsData();
+    skills.FirstSkill.Add(new CharacterSkillEntry { TrueName = "超电磁炮" });
+    return (character, info, skills);
+}
+
+static void UnparsableSkillNumbersAreReportedNotZeroed()
+{
+    // 第六步以前对解析不了的数值一律 `: 0d` —— 技能倍率、护援值被静默写成 0，
+    // 扫描时看不出任何异常。又一例「显示成功但实际没做成」。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var (character, info, skills) = BuildBlueprintSetupFixture(root);
+        var service = new UnrealBlueprintSetupService();
+
+        // 空文本是常态（形态没填满），必须仍然当 0，不能报错
+        skills.FirstSkill[0].GuardValue = string.Empty;
+        service.BuildRequest(character, info, skills, []);
+
+        // 非空但解析不出来，必须抛，且要点名是哪个字段、原文是什么
+        skills.FirstSkill[0].GuardValue = "1,5";
+        var threw = false;
+        try
+        {
+            service.BuildRequest(character, info, skills, []);
+        }
+        catch (Exception error)
+        {
+            threw = true;
+            AssertEqual(true, error.Message.Contains("1,5", StringComparison.Ordinal));
+            AssertEqual(true, error.Message.Contains("Misaka", StringComparison.Ordinal));
+        }
+
+        AssertEqual(true, threw);
+
+        // 带单位的文本同理（技能编辑框不做数字校验，用户确实填得进去）
+        skills.FirstSkill[0].GuardValue = "1.5倍";
+        var threwAgain = false;
+        try
+        {
+            service.BuildRequest(character, info, skills, []);
+        }
+        catch (Exception)
+        {
+            threwAgain = true;
+        }
+
+        AssertEqual(true, threwAgain);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SkillNumbersSurviveCommaDecimalCulture()
+{
+    // 格式化用当前区域、解析用不变区域，这个不对称在小数点是逗号的区域下
+    // 必然坏掉：格式化写出 "1,5"，解析读不了，旧代码静默归 0。
+    // 这条用例一次钉死整族——不去逐个断言某处有没有写 InvariantCulture，
+    // 而是直接换个区域跑一遍往返。
+    var original = System.Globalization.CultureInfo.CurrentCulture;
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        System.Globalization.CultureInfo.CurrentCulture =
+            System.Globalization.CultureInfo.GetCultureInfo("de-DE");
+
+        var (character, info, skills) = BuildBlueprintSetupFixture(root);
+
+        // 走完整往返：Unreal 侧的数值 -> 回填成文本 -> 存进角色数据 -> 第六步再解析回去。
+        // 格式化用当前区域、解析用不变区域这个不对称，正是在这里断掉的。
+        var formatted = UnrealProjectSyncService.FormatDouble(1.5);
+        AssertEqual("1.5", formatted);
+        skills.FirstSkill[0].GuardValue = formatted;
+
+        // 在德语区域下拼请求：数值必须原样是 1.5，而不是被吞成 0
+        var request = new UnrealBlueprintSetupService().BuildRequest(character, info, skills, []);
+        var payload = JsonSerializer.Serialize(
+            request, UnrealBlueprintSetupJsonContext.Default.UnrealBlueprintSetupRequest);
+
+        // 落到载荷里的必须是英文句点写法，Python 侧才读得回来
+        AssertEqual(true, payload.Contains("1.5", StringComparison.Ordinal));
+        AssertEqual(false, payload.Contains("1,5", StringComparison.Ordinal));
+    }
+    finally
+    {
+        System.Globalization.CultureInfo.CurrentCulture = original;
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void DiagnosticItemsDoNotCountAsSucceededActions()
+{
+    // 序列同步的结果里混着一条 orphan-sequences 的诊断条目（孤儿序列解绑），
+    // 它不对应任何动作。以前它被算进「已成功的动作」，于是所有真实动作都失败时，
+    // 「一个都没成功就抛」的判断失效——界面报「已成功 1 个动作并写入基线」，
+    // 那个假 ID 还会被拿去生成基线条目。
+    var allFailed = new[]
+    {
+        new UnrealBridgeExecutionItemResult
+        {
+            StableId = "orphan-sequences", Succeeded = true, ItemKind = "diagnostic",
+        },
+        new UnrealBridgeExecutionItemResult
+        {
+            StableId = SequenceFrameIdentity.BuildActionStableId("Click"),
+            Succeeded = false, ItemKind = "action",
+        },
+    };
+    AssertEqual(0, UnrealBridgeExecutionItemResult.SelectSucceededActionStableIds(allFailed).Length);
+
+    // 真实动作成功了当然要算
+    var mixed = new[]
+    {
+        new UnrealBridgeExecutionItemResult
+        {
+            StableId = "orphan-sequences", Succeeded = true, ItemKind = "diagnostic",
+        },
+        new UnrealBridgeExecutionItemResult
+        {
+            StableId = "action:click", Succeeded = true, ItemKind = "action",
+        },
+    };
+    AssertSequence(["action:click"], UnrealBridgeExecutionItemResult.SelectSucceededActionStableIds(mixed));
+
+    // 别的脚本写出的结果不带 itemKind，缺省必须当成动作，否则会被整批滤掉
+    var legacy = new[]
+    {
+        new UnrealBridgeExecutionItemResult { StableId = "material:1", Succeeded = true },
+    };
+    AssertEqual("action", legacy[0].ItemKind);
+    AssertSequence(["material:1"], UnrealBridgeExecutionItemResult.SelectSucceededActionStableIds(legacy));
+
+    // 空 StableId 的条目也不算
+    var blank = new[]
+    {
+        new UnrealBridgeExecutionItemResult { StableId = string.Empty, Succeeded = true },
+    };
+    AssertEqual(0, UnrealBridgeExecutionItemResult.SelectSucceededActionStableIds(blank).Length);
+    AssertEqual(0, UnrealBridgeExecutionItemResult.SelectSucceededActionStableIds(null).Length);
+}
+
+static void ReplacingSettingsNotifiesDerivedProperties()
+{
+    // SettingsViewModel 里逐项修改的 setter 都记得通知，唯独「整份 _settings 被换掉」
+    // 这条路径没有——于是重新加载设置后，界面上的当前角色、上次编辑位置、
+    // 引擎与工程路径会停在旧值。
+    var viewModel = new SettingsViewModel(new AppSettingsService(), new ProjectRootMigrationService());
+    var changed = new List<string>();
+    viewModel.PropertyChanged += (_, e) => changed.Add(e.PropertyName ?? string.Empty);
+
+    viewModel.LoadAndEnsureProjectRoot();
+
+    foreach (var name in new[]
+             {
+                 nameof(SettingsViewModel.CurrentCharacterCode),
+                 nameof(SettingsViewModel.LastEditedCharacterCode),
+                 nameof(SettingsViewModel.LastEditedModuleTag),
+                 nameof(SettingsViewModel.UnrealEnginePath),
+                 nameof(SettingsViewModel.UnrealProjectPath),
+             })
+    {
+        if (!changed.Contains(name))
+        {
+            throw new InvalidOperationException($"重新加载设置后没有通知 {name}");
         }
     }
 }
@@ -7357,7 +7606,7 @@ static void UnrealLightConfigurationScriptUsesConfirmedWhitelist()
     AssertEqual(true, exportSource.Contains("UI_TeamSelect", StringComparison.Ordinal));
     AssertEqual(true, exportSource.Contains("CharVoice", StringComparison.Ordinal));
 
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     AssertEqual(true, xaml.Contains("LightConfigurationItems", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("ApplyUnrealLightConfigurationButton_Click", StringComparison.Ordinal));
 }
@@ -10619,6 +10868,29 @@ static int RunPortablePathMigration(string[] args)
 /// 假的界面侧。记下控制器要求检测了哪几步、说了什么话，
 /// 这样六步编排可以整段跑起来断言，而不用去匹配 MainWindow 的源码文本。
 /// </summary>
+static string ReadAllProjectXaml()
+{
+    // 界面结构要按「整个界面」来断言，不能只盯 MainWindow.xaml 一个文件。
+    //
+    // 这批断言以前逐字读 MainWindow.xaml，等于规定所有界面都必须写在那一个
+    // 5522 行的文件里：把十二个自建遮罩层抽成 Controls/*.xaml 会让它们集体失败，
+    // 而功能一点没坏，只是字符串搬了家。测试不该把反模式钉死。
+    //
+    // 断言「不存在」的那几条也一并受益——它们本来就该保证整个界面里都没有。
+    var files = Directory
+        .EnumerateFiles(Directory.GetCurrentDirectory(), "*.xaml", SearchOption.AllDirectories)
+        .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+            && !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+        .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+    if (files.Length == 0)
+    {
+        throw new InvalidOperationException("没有找到任何 XAML 文件，工作目录可能不对（请在仓库根目录运行）。");
+    }
+
+    return string.Join(Environment.NewLine, files.Select(path => File.ReadAllText(path, Encoding.UTF8)));
+}
+
 sealed class FakeWorkflowHost : IUnrealSyncWorkflowHost
 {
     public List<int> DetectedSteps { get; } = [];

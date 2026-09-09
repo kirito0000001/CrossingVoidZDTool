@@ -1,27 +1,27 @@
-using System.Collections.Generic;
-using System.ComponentModel;
-using System.Runtime.CompilerServices;
-
 namespace CrossingVoidZDTool.ViewModels;
 
-public abstract class ObservableObject : INotifyPropertyChanged
+/// <summary>
+/// 全项目 ViewModel 的基类。
+///
+/// 原来这是一份三十行的手写实现（<c>SetProperty</c> + <c>OnPropertyChanged</c>）。
+/// 现在改成继承 CommunityToolkit.Mvvm 的同名基类——两边的
+/// <c>SetProperty&lt;T&gt;(ref T, T, [CallerMemberName] string?)</c> 和
+/// <c>OnPropertyChanged([CallerMemberName] string?)</c> 签名一致，所以是平滑替换，
+/// 现有几百处调用一行都不用改。
+///
+/// 换过来是为了拿到 <c>[ObservableProperty]</c> 和 <c>[NotifyPropertyChangedFor]</c>
+/// 这两个源生成器。真正的价值在后者：它把「哪个派生属性依赖哪个字段」
+/// 从注释变成**编译期声明**。
+///
+/// 这个项目已经因为「某条路径忘了通知」踩过两次——中栏一片空白、
+/// 第三五步的勾选计数不刷新——而静态分析显示还有十来处同样的隐患。
+/// 手工列举通知是守不住的：<c>UnrealProjectSyncViewModel</c> 里
+/// 一个 setter 曾经要手写三十多条 <c>OnPropertyChanged</c>，
+/// 其中一条重复、两行缩进错位，正是维护疲劳的痕迹。
+///
+/// 只用源生成器这一半；<c>Ioc</c> 和 <c>Messenger</c> 一律不碰——
+/// 单人维护的工具不需要，引进来只会多一层间接。
+/// </summary>
+public abstract class ObservableObject : CommunityToolkit.Mvvm.ComponentModel.ObservableObject
 {
-    public event PropertyChangedEventHandler? PropertyChanged;
-
-    protected bool SetProperty<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
-    {
-        if (EqualityComparer<T>.Default.Equals(field, value))
-        {
-            return false;
-        }
-
-        field = value;
-        OnPropertyChanged(propertyName);
-        return true;
-    }
-
-    protected void OnPropertyChanged([CallerMemberName] string? propertyName = null)
-    {
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
-    }
 }
