@@ -17,26 +17,58 @@ internal static class UnrealBridgeVoiceClassification
         (VoiceMaterialKind.Click, ["click", "touch"]),
         (VoiceMaterialKind.Hurt, ["hurt", "damage", "ondm", "odnm"]),
         (VoiceMaterialKind.Death, ["death", "dead"]),
-        (VoiceMaterialKind.Defeat, ["defeat", "lose", "failure"]),
-        (VoiceMaterialKind.Victory, ["victory", "win"])
+        // fail / lost 是照着工程里实际出现过的命名补的：以前只有 failure，
+        // Vo_Fail1 这种识别不出来，会掉进待分配。
+        (VoiceMaterialKind.Defeat, ["defeat", "lose", "lost", "fail", "failure"]),
+        (VoiceMaterialKind.Victory, ["victory", "win"]),
+        (VoiceMaterialKind.SoundEffect, ["soundeffect", "se"])
     ];
+
+    /// <summary>
+    /// 这些 token 太短，做子串匹配会被角色代号误伤：代号里带 ko 的角色
+    /// （Kokona、Nakoruru）整批语音都会被判成终结技，而它排在失败语音前面。
+    /// 对它们要求前后是分隔符或字符串边界。
+    /// </summary>
+    private static readonly HashSet<string> BoundaryTokens =
+        new(StringComparer.Ordinal) { "ko", "sub", "se", "sk1", "sk2", "win", "team", "link" };
 
     public static VoiceMaterialKind Classify(string packagePath, string assetName)
     {
-        var searchable = $"/{packagePath}/{assetName}/"
-            .Replace('\\', '/')
+        var normalized = $"/{packagePath}/{assetName}/".Replace('\\', '/').ToLowerInvariant();
+        // 去掉分隔符的那一份用于长 token 的宽松匹配（Vo_Sound_Effect 也能命中）；
+        // 保留分隔符的那一份用于短 token 的边界匹配。
+        var collapsed = normalized
             .Replace("_", string.Empty, StringComparison.Ordinal)
-            .Replace("-", string.Empty, StringComparison.Ordinal)
-            .ToLowerInvariant();
+            .Replace("-", string.Empty, StringComparison.Ordinal);
         foreach (var rule in Rules)
         {
-            if (rule.Tokens.Any(token => searchable.Contains(token, StringComparison.Ordinal)))
+            if (rule.Tokens.Any(token => BoundaryTokens.Contains(token)
+                    ? ContainsAtBoundary(normalized, token)
+                    : collapsed.Contains(token, StringComparison.Ordinal)))
             {
                 return rule.Kind;
             }
         }
 
         return VoiceMaterialKind.Other;
+    }
+
+    /// <summary>token 前后必须是非字母数字，避免命中角色代号里的字母。</summary>
+    private static bool ContainsAtBoundary(string text, string token)
+    {
+        for (var at = text.IndexOf(token, StringComparison.Ordinal); at >= 0;
+             at = text.IndexOf(token, at + 1, StringComparison.Ordinal))
+        {
+            var beforeOk = at == 0 || !char.IsLetterOrDigit(text[at - 1]);
+            var afterAt = at + token.Length;
+            var afterOk = afterAt >= text.Length || !char.IsLetterOrDigit(text[afterAt]);
+            if (beforeOk && afterOk)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     public static VoiceMaterialKind ClassifySequenceAction(UnrealProjectSyncSequenceActionPreview action)

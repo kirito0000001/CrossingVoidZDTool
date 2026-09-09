@@ -185,7 +185,22 @@ internal sealed class SettingsViewModel : ObservableObject
         _settings = _settingsService.Load();
         ProjectRootPath = _settingsService.ResolveProjectRootPath(_settings);
         LoadBindableSettings(_settings);
+        // 整份 _settings 被换掉了，靠它取值的那几个只读属性全都变了。
+        // 同文件里逐项修改的 setter 都记得通知，唯独这条整体替换的路径没有——
+        // 于是重新加载设置后，界面上的当前角色、上次编辑位置、引擎与工程路径
+        // 会停在旧值。
+        NotifySettingsBackedPropertiesChanged();
         EnsureCurrentProjectRoot();
+    }
+
+    /// <summary>整份设置被替换后，把靠它取值的只读属性一起通知出去。</summary>
+    private void NotifySettingsBackedPropertiesChanged()
+    {
+        OnPropertyChanged(nameof(CurrentCharacterCode));
+        OnPropertyChanged(nameof(LastEditedCharacterCode));
+        OnPropertyChanged(nameof(LastEditedModuleTag));
+        OnPropertyChanged(nameof(UnrealEnginePath));
+        OnPropertyChanged(nameof(UnrealProjectPath));
     }
 
     public string BuildProjectRootPathFromParent(string parentPath)

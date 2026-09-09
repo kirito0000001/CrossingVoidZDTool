@@ -29,6 +29,10 @@ internal sealed class SkillsViewModel : ObservableObject
     {
         _skillsService = skillsService;
         _dispatcherQueue = DispatcherQueue.GetForCurrentThread();
+        // 订阅的是静态事件，而且从不退订。这在应用里是安全的：本视图模型由
+        // ApplicationViewModel 在启动时构造一次，活到进程结束。
+        // 但它意味着**每 new 一个实例就多一份永久订阅**——测试里反复构造会让
+        // 一次编辑通知到所有历史实例。真要在测试里大量构造，请复用同一个实例。
         CharacterSkillEntry.AnyEntryEdited += (_, _) => NotifyEdited();
         SkillMultiplierLevel.AnyMultiplierEdited += (_, _) => NotifyEdited();
     }

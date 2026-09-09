@@ -371,6 +371,24 @@ namespace CrossingVoidZDTool
             AppendRuntimeLog($"[{DateTime.Now:HH:mm:ss}] LogZDTool: {GetLogKindLabel(kind)}: {message}");
         }
 
+        /// <summary>
+        /// 把 Service 层的日志接到底部日志面板。
+        /// Services 是纯业务层、不认识 WinUI，所以走 IToolboxLogSink 这层薄映射。
+        /// </summary>
+        private sealed class ToolboxLogBridge(MainWindow owner) : IToolboxLogSink
+        {
+            public void Write(ToolboxLogLevel level, string message, Exception? error)
+            {
+                var kind = level switch
+                {
+                    ToolboxLogLevel.Error => LogKind.Error,
+                    ToolboxLogLevel.Warning => LogKind.Warning,
+                    _ => LogKind.Info,
+                };
+                owner.RunOnUiThread(() => owner.AppendLog(kind, message, error));
+            }
+        }
+
         private void AppendLog(LogKind kind, string message, Exception? exception = null)
         {
             if (!ShouldWriteLog(kind))

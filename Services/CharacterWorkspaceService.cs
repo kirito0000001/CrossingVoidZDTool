@@ -7,37 +7,42 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization.Metadata;
 using System.Threading;
-using System.IO.Compression;
 
 namespace CrossingVoidZDTool.Services;
 
+/// <summary>
+/// 角色工作区：扫描 Draft/Completed、加载角色卡、增删改名角色、草稿读写、元数据持久化。
+///
+/// 这个类原本还兼管备份、参考图和导出，一共六件事一千五百行。那三件事各自只认
+/// 「一个角色目录」这一个输入，跟工作区怎么组织角色没有关系，已经分别搬到
+/// <see cref="CharacterBackupService"/>、<see cref="CharacterReferenceImageService"/>、
+/// <see cref="CharacterExportService"/>。留在这里的是真正回答「什么是一个角色」的那部分。
+/// </summary>
 internal sealed class CharacterWorkspaceService
 {
-    private const string ToolFolderName = "tool";
-    private const string AssetMaterialFolderName = "AssetMaterial";
-    private const string ZDMaterialFolderName = "ZDMaterial";
-    private const string SoundFolderName = "Sound";
-    private const string ExAssetFolderName = "ExAsset";
-    private const string BuffFolderName = "BUFF";
-    private const string ReferenceFolderName = "ReferenceImages";
+    private const string ToolFolderName = CharacterFolderLayout.Tool;
+    private const string AssetMaterialFolderName = CharacterFolderLayout.AssetMaterial;
+    private const string ZDMaterialFolderName = CharacterFolderLayout.ZdMaterial;
+    private const string SoundFolderName = CharacterFolderLayout.Sound;
+    private const string ExAssetFolderName = CharacterFolderLayout.ExAsset;
+    private const string BuffFolderName = CharacterFolderLayout.Buff;
+    private const string ReferenceFolderName = CharacterFolderLayout.ReferenceImages;
     private const string MetadataFileName = "character.json";
     private const string ToolboxDataFileName = "ZDToolboxData.json";
     private const string LegacyDraftFileName = "St1-设计理念.txt";
-    private const string CharacterBackupsFolderName = "CharacterBackups";
-    private const string DraftFolderName = "Draft";
-    private const string CompletedFolderName = "Completed";
-    private const string ExportFolderName = "Export";
-    private const int MaxManualCharacterBackupCount = 3;
-    private const int MaxAutomaticCharacterBackupCount = 3;
+    private const string DraftFolderName = CharacterFolderLayout.Draft;
+    private const string CompletedFolderName = CharacterFolderLayout.Completed;
+    private const string ExportFolderName = CharacterFolderLayout.Export;
 
-    private static readonly string[] SupportedReferenceExtensions =
-    [
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".webp",
-        ".bmp"
-    ];
+    /// <summary>
+    /// 备份已经搬到 <see cref="CharacterBackupService"/>。这里留一个实例，
+    /// 只是因为 <see cref="UnrealBridgeDraftImportService"/> 的回滚路径还是拿着
+    /// 工作区服务在调备份——新的调用点请直接用 <see cref="CharacterBackupService"/>。
+    /// </summary>
+    private readonly CharacterBackupService _backupService = new();
+
+    /// <summary>导出同理：实现在 <see cref="CharacterExportService"/>，这里只剩回归用例还在用的两个转发。</summary>
+    private readonly CharacterExportService _exportService = new();
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -61,7 +66,8 @@ internal sealed class CharacterWorkspaceService
                          .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var card = TryLoadCharacterCard(directoryPath);
+                var card = TryLoadCharacterCard(directoryPath)
+                    ?? TryBuildFallbackCharacterCard(directoryPath, stateFolder.IsCompleted);
                 if (card is null)
                 {
                     continue;
@@ -166,10 +172,23 @@ internal sealed class CharacterWorkspaceService
 
     public CharacterCard EnsureCharacterStructure(CharacterCard character)
     {
-        EnsureCharacterFolders(character.FolderPath);
-        EnsureDraftStoredInJson(character.FolderPath);
+        EnsureCharacterLayout(character.FolderPath);
 
         return TryLoadCharacterCard(character.FolderPath) ?? character;
+    }
+
+    /// <summary>
+    /// 把一个角色目录补成完整形状：素材子目录齐全，草稿已经在 JSON 里。
+    ///
+    /// 「什么算一个完整的角色目录」是工作区的定义，所以留在这里；
+    /// 抽出去的备份、参考图、导出三个服务动手之前都得先调它一次——
+    /// 它们各自都会往角色目录里读写，碰上半成品目录（用户手建的、
+    /// 从旧版本升上来的）会直接抛 DirectoryNotFound。
+    /// </summary>
+    internal static void EnsureCharacterLayout(string characterFolderPath)
+    {
+        EnsureCharacterFolders(characterFolderPath);
+        EnsureDraftStoredInJson(characterFolderPath);
     }
 
     public CharacterCard RefreshCharacterCard(CharacterCard character)
@@ -217,215 +236,6 @@ internal sealed class CharacterWorkspaceService
         SaveToolboxData(character.FolderPath, data);
         TouchMetadata(character.FolderPath);
     }
-
-    public IReadOnlyList<CharacterReferenceImage> LoadReferenceImages(CharacterCard character, CancellationToken cancellationToken = default)
-    {
-        EnsureCharacterStructure(character);
-        return Directory
-            .EnumerateFiles(character.ReferenceFolderPath)
-            .Where(IsSupportedReferenceImage)
-            .Select(path =>
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var info = new FileInfo(path);
-                return new CharacterReferenceImage(info.Name, info.FullName, new Uri(info.FullName).AbsoluteUri, info.LastWriteTime);
-            })
-            .OrderByDescending(image => image.UpdatedAt)
-            .ThenBy(image => image.FileName, StringComparer.CurrentCultureIgnoreCase)
-            .ToList();
-    }
-
-    public IReadOnlyList<CharacterReferenceImage> ImportReferenceImages(CharacterCard character, IReadOnlyList<string> sourceFilePaths)
-    {
-        EnsureCharacterStructure(character);
-        foreach (var sourceFilePath in sourceFilePaths.Where(IsSupportedReferenceImage))
-        {
-            var targetPath = CreateUniqueTargetPath(character.ReferenceFolderPath, Path.GetFileName(sourceFilePath));
-            File.Copy(sourceFilePath, targetPath);
-        }
-
-        TouchMetadata(character.FolderPath);
-        return LoadReferenceImages(character);
-    }
-
-    public IReadOnlyList<CharacterReferenceImage> RenameReferenceImage(CharacterCard character, string imagePath, string newFileName)
-    {
-        EnsureCharacterStructure(character);
-        if (!File.Exists(imagePath))
-        {
-            throw new FileNotFoundException("没有找到参考图。", imagePath);
-        }
-
-        var cleanName = Path.GetFileName(newFileName.Trim());
-        if (string.IsNullOrWhiteSpace(cleanName))
-        {
-            throw new InvalidOperationException("文件名不能为空。");
-        }
-
-        var extension = Path.GetExtension(cleanName);
-        if (string.IsNullOrWhiteSpace(extension))
-        {
-            cleanName += Path.GetExtension(imagePath);
-        }
-        else if (!IsSupportedReferenceImage(cleanName))
-        {
-            throw new InvalidOperationException("只支持 png、jpg、jpeg、webp、bmp 图片。");
-        }
-
-        var targetPath = Path.Combine(character.ReferenceFolderPath, cleanName);
-        if (File.Exists(targetPath) && !string.Equals(Path.GetFullPath(targetPath), Path.GetFullPath(imagePath), StringComparison.OrdinalIgnoreCase))
-        {
-            targetPath = CreateUniqueTargetPath(character.ReferenceFolderPath, cleanName);
-        }
-
-        File.Move(imagePath, targetPath, true);
-        TouchMetadata(character.FolderPath);
-        return LoadReferenceImages(character);
-    }
-
-    public IReadOnlyList<CharacterReferenceImage> DeleteReferenceImage(CharacterCard character, string imagePath)
-    {
-        EnsureCharacterStructure(character);
-        if (File.Exists(imagePath))
-        {
-            File.Delete(imagePath);
-        }
-
-        TouchMetadata(character.FolderPath);
-        return LoadReferenceImages(character);
-    }
-
-    public CharacterBackupEntry BackupCharacter(
-        CharacterCard character,
-        string note,
-        IProgress<CharacterBackupProgress>? progress = null,
-        CancellationToken cancellationToken = default)
-    {
-        return BackupCharacter(character, note, CharacterBackupKinds.Manual, progress, cancellationToken);
-    }
-
-    public CharacterBackupEntry BackupCharacter(
-        CharacterCard character,
-        string note,
-        string kind,
-        IProgress<CharacterBackupProgress>? progress = null,
-        CancellationToken cancellationToken = default)
-    {
-        EnsureCharacterStructure(character);
-        if (!Directory.Exists(character.FolderPath))
-        {
-            throw new DirectoryNotFoundException($"角色文件夹不存在：{character.FolderPath}");
-        }
-
-        var backupsPath = GetCharacterBackupsPath(character);
-        Directory.CreateDirectory(backupsPath);
-
-        var createdAt = DateTime.Now;
-        var normalizedKind = NormalizeBackupKind(kind);
-        var safeName = SanitizeFileName($"{character.Code}-{character.Name}");
-        var safeNote = SanitizeFileName(NormalizeSingleLine(note));
-        var noteSuffix = string.IsNullOrWhiteSpace(safeNote) ? string.Empty : $"_{safeNote}";
-        var kindToken = string.Equals(normalizedKind, CharacterBackupKinds.Automatic, StringComparison.OrdinalIgnoreCase) ? "auto" : "manual";
-        var backupPath = Path.Combine(backupsPath, $"{safeName}_{kindToken}_{createdAt:yyyyMMdd_HHmmss}{noteSuffix}.zip");
-        var duplicateIndex = 1;
-        while (File.Exists(backupPath))
-        {
-            backupPath = Path.Combine(backupsPath, $"{safeName}_{kindToken}_{createdAt:yyyyMMdd_HHmmss}{noteSuffix}_{duplicateIndex}.zip");
-            duplicateIndex++;
-        }
-
-        progress?.Report(new CharacterBackupProgress("正在扫描角色文件...", 0, 0, 0, 0, 0, null));
-        cancellationToken.ThrowIfCancellationRequested();
-        var files = EnumerateCharacterBackupFiles(character.FolderPath, backupsPath).ToList();
-        var totalBytes = files.Sum(filePath => new FileInfo(filePath).Length);
-
-        using (var archive = ZipFile.Open(backupPath, ZipArchiveMode.Create))
-        {
-            long completedBytes = 0;
-            for (var index = 0; index < files.Count; index++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var filePath = files[index];
-                var fileLength = new FileInfo(filePath).Length;
-                var relativePath = Path.GetRelativePath(character.FolderPath, filePath).Replace('\\', '/');
-                var percent = files.Count == 0
-                    ? 90
-                    : Math.Min(90, Math.Max(1, completedBytes * 90d / Math.Max(1, totalBytes)));
-                progress?.Report(new CharacterBackupProgress(
-                    $"正在备份 {index + 1}/{files.Count}：{relativePath}",
-                    percent,
-                    index,
-                    files.Count,
-                    completedBytes,
-                    totalBytes,
-                    relativePath));
-                archive.CreateEntryFromFile(filePath, relativePath, CompressionLevel.Optimal);
-                completedBytes += fileLength;
-            }
-        }
-
-        progress?.Report(new CharacterBackupProgress("正在写入备份备注...", 94, files.Count, files.Count, totalBytes, totalBytes, null));
-        cancellationToken.ThrowIfCancellationRequested();
-        var meta = new CharacterBackupMeta
-        {
-            CreatedAt = createdAt,
-            Note = NormalizeSingleLine(note),
-            Kind = normalizedKind
-        };
-        File.WriteAllText(GetBackupMetaPath(backupPath), JsonSerializer.Serialize(meta, JsonContext.CharacterBackupMeta), Encoding.UTF8);
-
-        progress?.Report(new CharacterBackupProgress("正在清理旧备份，自动和手动各最多保留 3 份...", 97, files.Count, files.Count, totalBytes, totalBytes, null));
-        cancellationToken.ThrowIfCancellationRequested();
-        PruneCharacterBackups(character, normalizedKind);
-        progress?.Report(new CharacterBackupProgress("备份完成。", 100, files.Count, files.Count, totalBytes, totalBytes, null));
-        return BuildBackupEntry(backupPath);
-    }
-
-    public CharacterCard RestoreCharacterBackup(
-        CharacterCard character,
-        CharacterBackupEntry backup,
-        IProgress<CharacterBackupProgress>? progress = null,
-        CancellationToken cancellationToken = default)
-    {
-        EnsureCharacterStructure(character);
-        if (!File.Exists(backup.Path))
-        {
-            throw new FileNotFoundException("备份文件不存在。", backup.Path);
-        }
-
-        progress?.Report(new CharacterBackupProgress("还原前正在自动备份当前状态...", 0, 0, 0, 0, 0, null));
-        BackupCharacter(character, "还原前自动保护", CharacterBackupKinds.Automatic, progress, cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-
-        var backupsPath = GetCharacterBackupsPath(character);
-        progress?.Report(new CharacterBackupProgress("正在清理当前角色文件...", 35, 0, 0, 0, 0, null));
-        foreach (var filePath in Directory.EnumerateFiles(character.FolderPath, "*", SearchOption.AllDirectories)
-                     .Where(filePath => !IsPathInsideDirectory(filePath, backupsPath))
-                     .ToList())
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            File.Delete(filePath);
-        }
-
-        foreach (var directoryPath in Directory.EnumerateDirectories(character.FolderPath, "*", SearchOption.AllDirectories)
-                     .Where(directoryPath => !IsPathInsideDirectory(directoryPath, backupsPath))
-                     .OrderByDescending(path => path.Length)
-                     .ToList())
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (Directory.Exists(directoryPath) && !Directory.EnumerateFileSystemEntries(directoryPath).Any())
-            {
-                Directory.Delete(directoryPath);
-            }
-        }
-
-        progress?.Report(new CharacterBackupProgress("正在解压备份...", 65, 0, 0, 0, 0, null));
-        ZipFile.ExtractToDirectory(backup.Path, character.FolderPath, overwriteFiles: true);
-        EnsureCharacterFolders(character.FolderPath);
-        progress?.Report(new CharacterBackupProgress("还原完成。", 100, 0, 0, 0, 0, null));
-        return TryLoadCharacterCard(character.FolderPath) ?? character;
-    }
-
     public void DeleteCharacter(CharacterCard character)
     {
         if (Directory.Exists(character.FolderPath))
@@ -498,22 +308,41 @@ internal sealed class CharacterWorkspaceService
             ?? BuildCharacterCard(workingFolderPath, metadata);
     }
 
-    public IReadOnlyList<CharacterBackupEntry> LoadCharacterBackups(CharacterCard character)
+    /// <summary>
+    /// 元数据读不出来时的兜底卡片。
+    ///
+    /// 以前这里是直接 continue：character.json 只要坏了（写一半崩溃、
+    /// 被外部工具改坏），这个角色就从角色台上凭空消失，用户会以为素材全丢了，
+    /// 而磁盘上的图片语音其实都还在。改成用目录名兜一张卡出来，
+    /// 角色仍然看得见、能进去，坏掉的那份元数据留在原地等修。
+    ///
+    /// 元数据文件本来就不存在的目录（比如用户随手建的空文件夹）仍然返回 null，
+    /// 那才是「这不是一个角色」。
+    /// </summary>
+    private static CharacterCard? TryBuildFallbackCharacterCard(string characterFolderPath, bool isCompleted)
     {
-        var backupsPath = GetCharacterBackupsPath(character);
-        if (!Directory.Exists(backupsPath))
+        var metadataFilePath = Path.Combine(characterFolderPath, ToolFolderName, MetadataFileName);
+        if (!File.Exists(metadataFilePath))
         {
-            return [];
+            return null;
         }
 
-        return Directory
-            .EnumerateFiles(backupsPath, "*.zip", SearchOption.TopDirectoryOnly)
-            .Select(BuildBackupEntry)
-            .OrderByDescending(backup => backup.CreatedAt)
-            .ToList();
+        var code = Path.GetFileName(characterFolderPath.TrimEnd(
+            Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        if (string.IsNullOrWhiteSpace(code))
+        {
+            return null;
+        }
+
+        return BuildCharacterCard(characterFolderPath, new CharacterMetadata
+        {
+            Code = code,
+            Name = code,
+            IsCompleted = isCompleted,
+        });
     }
 
-    private static CharacterCard? TryLoadCharacterCard(string characterFolderPath)
+    internal static CharacterCard? TryLoadCharacterCard(string characterFolderPath)
     {
         var metadataFilePath = Path.Combine(characterFolderPath, ToolFolderName, MetadataFileName);
         if (!File.Exists(metadataFilePath))
@@ -591,7 +420,7 @@ internal sealed class CharacterWorkspaceService
 
         var filePath = Directory
             .EnumerateFiles(folderPath)
-            .Where(IsSupportedReferenceImage)
+            .Where(CharacterReferenceImageService.IsSupportedReferenceImage)
             .Select(path => new
             {
                 Path = path,
@@ -626,7 +455,7 @@ internal sealed class CharacterWorkspaceService
             : 1;
     }
 
-    private static void EnsureCharacterFolders(string characterFolderPath)
+    internal static void EnsureCharacterFolders(string characterFolderPath)
     {
         Directory.CreateDirectory(Path.Combine(characterFolderPath, ToolFolderName));
         Directory.CreateDirectory(Path.Combine(characterFolderPath, AssetMaterialFolderName));
@@ -641,10 +470,11 @@ internal sealed class CharacterWorkspaceService
     {
         metadata.LastEditedAt = DateTime.Now;
         var metadataFilePath = Path.Combine(characterFolderPath, ToolFolderName, MetadataFileName);
-        File.WriteAllText(
+        // character.json 决定角色卡能不能被认出来，写一半崩溃这个角色就从角色台上消失了，
+        // 所以和其他角色数据一样走原子替换。
+        WriteAllTextAtomic(
             metadataFilePath,
-            JsonSerializer.Serialize(metadata, CharacterMetadataJsonTypeInfo),
-            Encoding.UTF8);
+            JsonSerializer.Serialize(metadata, CharacterMetadataJsonTypeInfo));
     }
 
     private static CharacterMetadata? ReadMetadata(string characterFolderPath)
@@ -661,9 +491,29 @@ internal sealed class CharacterWorkspaceService
                 File.ReadAllText(metadataFilePath, Encoding.UTF8),
                 AppJsonSerializerContext.Default.CharacterMetadata);
         }
-        catch
+        catch (Exception error) when (error is JsonException or IOException or UnauthorizedAccessException)
         {
+            // 读不出来不能当作「没有这个角色」——那样角色会从角色台上凭空消失，
+            // 用户还以为数据丢了。把坏文件挪到一边留证据，让调用方按「缺元数据」
+            // 走既有的兜底路径（用目录名当代号），角色卡仍然看得见。
+            TryQuarantineCorruptFile(metadataFilePath);
             return null;
+        }
+    }
+
+    /// <summary>把读不出来的文件改名留档，避免下一次保存直接覆盖掉证据。</summary>
+    private static void TryQuarantineCorruptFile(string path)
+    {
+        try
+        {
+            var quarantinePath = $"{path}.corrupt-{DateTime.Now:yyyyMMdd-HHmmss}";
+            if (!File.Exists(quarantinePath))
+            {
+                File.Move(path, quarantinePath);
+            }
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
         }
     }
 
@@ -776,17 +626,14 @@ internal sealed class CharacterWorkspaceService
             JsonSerializer.Serialize(data, JsonContext.CharacterToolboxData));
     }
 
-    private static void WriteAllTextAtomic(string path, string text)
-    {
-        var tempPath = $"{path}.tmp";
-        File.WriteAllText(tempPath, text, Encoding.UTF8);
-        if (File.Exists(path))
-        {
-            File.Delete(path);
-        }
-
-        File.Move(tempPath, path);
-    }
+    /// <summary>
+    /// 原子替换。以前这里是「写临时文件 -> 删掉目标 -> 移过去」，
+    /// 删和移之间崩溃就等于角色的技能、BUFF、信息整份消失；
+    /// 而且临时名是固定的 .tmp，两处并发保存会互相踩。
+    /// 同仓其他八处走的都是 File.Move(overwrite: true)，唯独这里没跟上。
+    /// </summary>
+    private static void WriteAllTextAtomic(string path, string text) =>
+        AtomicFileWriter.WriteAllText(path, text, Encoding.UTF8);
 
     private static IEnumerable<CharacterSkillEntry> EnumerateSkillEntries(CharacterSkillsData skills)
     {
@@ -914,7 +761,7 @@ internal sealed class CharacterWorkspaceService
         }
     }
 
-    private static void TryDeleteDirectory(string path)
+    internal static void TryDeleteDirectory(string path)
     {
         try
         {
@@ -997,7 +844,7 @@ internal sealed class CharacterWorkspaceService
         Directory.Move(tempPath, targetPath);
     }
 
-    private static void TouchMetadata(string characterFolderPath)
+    internal static void TouchMetadata(string characterFolderPath)
     {
         var metadataFilePath = Path.Combine(characterFolderPath, ToolFolderName, MetadataFileName);
         if (!File.Exists(metadataFilePath))
@@ -1047,224 +894,12 @@ internal sealed class CharacterWorkspaceService
         var updated = TryLoadCharacterCard(character.FolderPath) ?? character with { IsCompleted = isCompleted };
         return MoveCharacterToStateFolder(projectRootPath, updated, isCompleted);
     }
-
-    public string GetDefaultExportRootPath(string projectRootPath)
-    {
-        return Path.Combine(Path.GetFullPath(projectRootPath), ExportFolderName);
-    }
-
-    public string ExportCharacterFolder(
-        CharacterCard character,
-        string exportRootPath,
-        bool overwrite,
-        IProgress<CharacterBackupProgress>? progress = null,
-        CancellationToken cancellationToken = default)
-    {
-        EnsureCharacterStructure(character);
-        var sourcePath = Path.GetFullPath(character.FolderPath);
-        var normalizedExportRoot = Path.GetFullPath(exportRootPath);
-        if (IsPathInsideDirectory(normalizedExportRoot, sourcePath))
-        {
-            throw new InvalidOperationException("导出位置不能放在当前角色文件夹内部。");
-        }
-
-        Directory.CreateDirectory(normalizedExportRoot);
-        var targetPath = Path.Combine(normalizedExportRoot, character.Code);
-        if (string.Equals(sourcePath, Path.GetFullPath(targetPath), StringComparison.OrdinalIgnoreCase))
-        {
-            throw new InvalidOperationException("导出目标不能与当前角色文件夹相同。");
-        }
-
-        if (Directory.Exists(targetPath) && !overwrite)
-        {
-            throw new IOException($"导出目标已存在：{targetPath}");
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        progress?.Report(new CharacterBackupProgress("正在扫描角色文件...", 0, 0, 0, 0, 0, null));
-        var files = Directory.EnumerateFiles(sourcePath, "*", SearchOption.AllDirectories).ToList();
-        var directories = Directory.EnumerateDirectories(sourcePath, "*", SearchOption.AllDirectories).ToList();
-        var totalBytes = files.Sum(filePath => new FileInfo(filePath).Length);
-        var tempPath = Path.Combine(normalizedExportRoot, $".{character.Code}.exporting-{Guid.NewGuid():N}");
-        var displacedTargetPath = Path.Combine(normalizedExportRoot, $".{character.Code}.replacing-{Guid.NewGuid():N}");
-
-        try
-        {
-            Directory.CreateDirectory(tempPath);
-            foreach (var directoryPath in directories)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                Directory.CreateDirectory(Path.Combine(tempPath, Path.GetRelativePath(sourcePath, directoryPath)));
-            }
-
-            long completedBytes = 0;
-            for (var index = 0; index < files.Count; index++)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                var filePath = files[index];
-                var relativePath = Path.GetRelativePath(sourcePath, filePath);
-                var targetFilePath = Path.Combine(tempPath, relativePath);
-                Directory.CreateDirectory(Path.GetDirectoryName(targetFilePath)!);
-                File.Copy(filePath, targetFilePath, overwrite: false);
-                completedBytes += new FileInfo(filePath).Length;
-                var percent = files.Count == 0
-                    ? 90
-                    : Math.Min(90, Math.Max(1, (index + 1) * 90d / files.Count));
-                progress?.Report(new CharacterBackupProgress(
-                    $"正在导出 {index + 1}/{files.Count}：{relativePath}",
-                    percent,
-                    index + 1,
-                    files.Count,
-                    completedBytes,
-                    totalBytes,
-                    relativePath));
-            }
-
-            cancellationToken.ThrowIfCancellationRequested();
-            progress?.Report(new CharacterBackupProgress("正在写入导出目录...", 95, files.Count, files.Count, totalBytes, totalBytes, null));
-            if (Directory.Exists(targetPath))
-            {
-                Directory.Move(targetPath, displacedTargetPath);
-            }
-
-            try
-            {
-                Directory.Move(tempPath, targetPath);
-            }
-            catch
-            {
-                if (Directory.Exists(displacedTargetPath) && !Directory.Exists(targetPath))
-                {
-                    Directory.Move(displacedTargetPath, targetPath);
-                }
-
-                throw;
-            }
-
-            TryDeleteDirectory(displacedTargetPath);
-            progress?.Report(new CharacterBackupProgress("导出完成。", 100, files.Count, files.Count, totalBytes, totalBytes, null));
-            return targetPath;
-        }
-        finally
-        {
-            TryDeleteDirectory(tempPath);
-            if (Directory.Exists(displacedTargetPath) && !Directory.Exists(targetPath))
-            {
-                Directory.Move(displacedTargetPath, targetPath);
-            }
-        }
-    }
-
-    private static string GetCharacterBackupsPath(CharacterCard character)
-    {
-        return Path.Combine(character.ToolFolderPath, CharacterBackupsFolderName);
-    }
-
-    private static string GetBackupMetaPath(string backupPath)
-    {
-        return $"{backupPath}.meta.json";
-    }
-
-    private static IEnumerable<string> EnumerateCharacterBackupFiles(string characterFolderPath, string backupsPath)
-    {
-        return Directory
-            .EnumerateFiles(characterFolderPath, "*", SearchOption.AllDirectories)
-            .Where(filePath => !IsPathInsideDirectory(filePath, backupsPath));
-    }
-
-    private void PruneCharacterBackups(CharacterCard character, string kind)
-    {
-        var maxCount = string.Equals(kind, CharacterBackupKinds.Automatic, StringComparison.OrdinalIgnoreCase)
-            ? MaxAutomaticCharacterBackupCount
-            : MaxManualCharacterBackupCount;
-        foreach (var backup in LoadCharacterBackups(character)
-                     .Where(backup => string.Equals(backup.Kind, kind, StringComparison.OrdinalIgnoreCase))
-                     .Skip(maxCount))
-        {
-            if (File.Exists(backup.Path))
-            {
-                File.Delete(backup.Path);
-            }
-
-            var metaPath = GetBackupMetaPath(backup.Path);
-            if (File.Exists(metaPath))
-            {
-                File.Delete(metaPath);
-            }
-        }
-    }
-
-    private static CharacterBackupEntry BuildBackupEntry(string backupPath)
-    {
-        var fileInfo = new FileInfo(backupPath);
-        var meta = ReadBackupMeta(GetBackupMetaPath(backupPath));
-        var createdAt = meta?.CreatedAt is { } metaCreatedAt && metaCreatedAt != default
-            ? metaCreatedAt
-            : fileInfo.LastWriteTime;
-        var note = NormalizeSingleLine(meta?.Note);
-        var noteText = string.IsNullOrWhiteSpace(note) ? "无备注" : note;
-        var kind = NormalizeBackupKind(meta?.Kind);
-        var kindText = string.Equals(kind, CharacterBackupKinds.Automatic, StringComparison.OrdinalIgnoreCase) ? "自动备份" : "手动备份";
-        var displayName = $"{createdAt:yyyy-MM-dd HH:mm:ss} · {kindText} · {noteText} · {FormatFileSize(fileInfo.Length)}";
-        return new CharacterBackupEntry(backupPath, createdAt, fileInfo.Length, note, displayName, kind);
-    }
-
-    private static CharacterBackupMeta? ReadBackupMeta(string path)
-    {
-        if (!File.Exists(path))
-        {
-            return null;
-        }
-
-        try
-        {
-            return JsonSerializer.Deserialize(File.ReadAllText(path, Encoding.UTF8), AppJsonSerializerContext.Default.CharacterBackupMeta);
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private static string NormalizeBackupKind(string? kind)
-    {
-        return string.Equals(kind, CharacterBackupKinds.Automatic, StringComparison.OrdinalIgnoreCase)
-            ? CharacterBackupKinds.Automatic
-            : CharacterBackupKinds.Manual;
-    }
-
-    private static string NormalizeSingleLine(string? text)
-    {
-        return string.Join(" ", (text ?? string.Empty).Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries)).Trim();
-    }
-
-    private static string SanitizeFileName(string value)
-    {
-        var invalidChars = Path.GetInvalidFileNameChars().ToHashSet();
-        var sanitized = new string(NormalizeSingleLine(value).Where(ch => !invalidChars.Contains(ch)).ToArray()).Trim();
-        if (string.IsNullOrWhiteSpace(sanitized))
-        {
-            return "Backup";
-        }
-
-        return sanitized.Length > 40 ? sanitized[..40] : sanitized;
-    }
-
-    private static string FormatFileSize(long byteCount)
-    {
-        string[] units = ["B", "KB", "MB", "GB"];
-        var size = (double)byteCount;
-        var unitIndex = 0;
-        while (size >= 1024 && unitIndex < units.Length - 1)
-        {
-            size /= 1024;
-            unitIndex++;
-        }
-
-        return unitIndex == 0 ? $"{byteCount} {units[unitIndex]}" : $"{size:0.##} {units[unitIndex]}";
-    }
-
-    private static bool IsPathInsideDirectory(string path, string directoryPath)
+    /// <summary>
+    /// 「某个路径是不是落在这个目录里面」。备份要靠它把 CharacterBackups 排除在打包范围外，
+    /// 导出要靠它拦住「把导出目录设在角色目录里面」。两边都要用，所以留在工作区这一份，
+    /// 别在各自的服务里再抄一遍。
+    /// </summary>
+    internal static bool IsPathInsideDirectory(string path, string directoryPath)
     {
         var fullPath = EnsureTrailingDirectorySeparator(Path.GetFullPath(path));
         var fullDirectory = EnsureTrailingDirectorySeparator(Path.GetFullPath(directoryPath));
@@ -1410,31 +1045,5 @@ internal sealed class CharacterWorkspaceService
         }
 
         return code;
-    }
-
-    private static bool IsSupportedReferenceImage(string path)
-    {
-        return SupportedReferenceExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
-    }
-
-    private static string CreateUniqueTargetPath(string folderPath, string fileName)
-    {
-        var targetPath = Path.Combine(folderPath, fileName);
-        if (!File.Exists(targetPath))
-        {
-            return targetPath;
-        }
-
-        var name = Path.GetFileNameWithoutExtension(fileName);
-        var extension = Path.GetExtension(fileName);
-        var index = 2;
-        do
-        {
-            targetPath = Path.Combine(folderPath, $"{name}_{index:00}{extension}");
-            index++;
-        }
-        while (File.Exists(targetPath));
-
-        return targetPath;
     }
 }

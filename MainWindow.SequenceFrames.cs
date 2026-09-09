@@ -91,6 +91,10 @@ namespace CrossingVoidZDTool
 
         private async Task RefreshSequenceFramesAsync()
         {
+            // 查看模式下仍然要能看序列，只是不能改。守卫在 ViewModel 里，
+            // 界面本身保持可交互——以前是整块左栏禁用命中测试，
+            // 结果把「放入右侧预览器」这个纯查看的按钮一起挡住了。
+            _applicationViewModel.SequenceFrames.IsReadOnly = !CharacterDesk.CanEditCurrentCharacter;
             await _applicationViewModel.SequenceFrames.LoadAsync(CharacterDesk.CurrentCharacter);
         }
 
@@ -174,7 +178,7 @@ namespace CrossingVoidZDTool
             var paths = items
                 .OfType<StorageFile>()
                 .Select(file => file.Path)
-                .Where(SequenceFrameService.IsSupportedImage)
+                .Where(SequenceFramePool.IsSupportedImage)
                 .ToList();
             if (paths.Count == 0)
             {

@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 
 namespace CrossingVoidZDTool.Services;
 
@@ -11,10 +12,14 @@ internal sealed class ProjectSharedMaterialService
 {
     private const string SharedFolderName = "Shared";
     private const string IndexRelativePath = "tool/shared-materials.json";
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true
-    };
+
+    // 这里以前用的是 JsonSerializer.Serialize<T>(value, options) 这个泛型反射重载——
+    // 全仓唯一一处，而且 ProjectSharedMaterialIndex 根本没注册进 AppJsonSerializerContext。
+    // csproj 里非 Debug 配置是 PublishTrimmed=True，裁剪器看不到反射用到的成员，
+    // 发布版读写这个索引的行为不受保证（Pakout.ps1 把 PublishTrimmed 覆盖成 false 挡了一下，
+    // 但那是隐式的，换个打包方式就没了）。改走源生成，读写都用同一份 JsonTypeInfo。
+    private static readonly JsonTypeInfo<ProjectSharedMaterialIndex> IndexJsonTypeInfo =
+        AppJsonSerializerContext.Indented.ProjectSharedMaterialIndex;
 
     private static readonly IReadOnlyDictionary<ProjectSharedMaterialCategory, string> CategoryFolders =
         new Dictionary<ProjectSharedMaterialCategory, string>
@@ -40,7 +45,7 @@ internal sealed class ProjectSharedMaterialService
         }
         else
         {
-            index = JsonSerializer.Deserialize<ProjectSharedMaterialIndex>(File.ReadAllText(indexPath), JsonOptions)
+            index = JsonSerializer.Deserialize(File.ReadAllText(indexPath), IndexJsonTypeInfo)
                 ?? new ProjectSharedMaterialIndex();
         }
 
@@ -184,9 +189,7 @@ internal sealed class ProjectSharedMaterialService
         var root = GetSharedRoot(projectRootPath);
         var indexPath = Path.Combine(root, IndexRelativePath.Replace('/', Path.DirectorySeparatorChar));
         Directory.CreateDirectory(Path.GetDirectoryName(indexPath)!);
-        var temporaryPath = indexPath + ".tmp";
-        File.WriteAllText(temporaryPath, JsonSerializer.Serialize(index, JsonOptions));
-        File.Move(temporaryPath, indexPath, overwrite: true);
+        AtomicFileWriter.WriteAllText(indexPath, JsonSerializer.Serialize(index, IndexJsonTypeInfo));
     }
 
     private static string GetSharedRoot(string projectRootPath)

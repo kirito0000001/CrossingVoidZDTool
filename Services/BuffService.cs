@@ -13,9 +13,9 @@ namespace CrossingVoidZDTool.Services;
 
 internal sealed class BuffService
 {
-    private const string BuffFolderName = "BUFF";
+    private const string BuffFolderName = CharacterFolderLayout.Buff;
     private const string BuffFileName = "buff.json";
-    private const string ToolFolderName = "tool";
+    private const string ToolFolderName = CharacterFolderLayout.Tool;
     private const string LegacyToolboxDataFileName = "ZDToolboxData.json";
     private const string LegacyBackupsFolderName = "legacy-backups";
     private const int IconSize = 125;
@@ -498,7 +498,7 @@ internal sealed class BuffService
         }
 
         CreateBackupIfNeeded(filePath, currentText);
-        WriteAllTextAtomic(filePath, nextText);
+        AtomicFileWriter.WriteAllText(filePath, nextText);
         PruneBackups(folderPath);
     }
 
@@ -548,13 +548,6 @@ internal sealed class BuffService
         {
             backup.Delete();
         }
-    }
-
-    private static void WriteAllTextAtomic(string path, string text)
-    {
-        var tempPath = $"{path}.tmp";
-        File.WriteAllText(tempPath, text, Encoding.UTF8);
-        File.Move(tempPath, path, overwrite: true);
     }
 
     private static bool IsPathUnderDirectory(string filePath, string directoryPath)

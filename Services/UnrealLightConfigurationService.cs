@@ -32,8 +32,11 @@ internal sealed class UnrealLightConfigurationService
         var shapeCompletes = GetMaterialObjectPaths(character.Code, materials, BaseMaterialKind.FullMorphPortrait);
         var formation = GetVoiceObjectPaths(character.Code, voices, VoiceMaterialKind.Formation).FirstOrDefault() ?? string.Empty;
         var hurt = GetVoiceObjectPaths(character.Code, voices, VoiceMaterialKind.Hurt);
+        // 受击语音走角色自己的 OnDM MetaSound，不进这里。
+        // 音效也排除：并发控制的语义是「同一时刻只响一条角色语音」，
+        // 而音效本来就要能叠加。待分配语音仍然算语音，照常进并发。
         var talk = voices
-            .Where(section => section.Spec.Kind != VoiceMaterialKind.Hurt)
+            .Where(section => section.Spec.Kind is not (VoiceMaterialKind.Hurt or VoiceMaterialKind.SoundEffect))
             .SelectMany(section => section.Items)
             .OrderBy(item => item.Kind)
             .ThenBy(item => item.Index)
@@ -147,7 +150,11 @@ internal sealed class UnrealLightConfigurationService
             CreateNoWindow = true,
             WorkingDirectory = Path.GetDirectoryName(commandPath) ?? string.Empty,
             RedirectStandardOutput = true,
-            RedirectStandardError = true
+            RedirectStandardError = true,
+            // Unreal 的 Python 层写的是 UTF-8；不指定就按父进程 OEM 代码页解码
+            // （中文 Windows 是 936），出错时那段日志会整段乱码，等于线索全丢。
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8
         };
         startInfo.Environment["ZD_LIGHT_CONFIG_REQUEST"] = normalizedRequestPath;
         startInfo.Environment["ZD_LIGHT_CONFIG_RESULT"] = normalizedResultPath;
@@ -161,39 +168,22 @@ internal sealed class UnrealLightConfigurationService
         string progressPath = "",
         IProgress<UnrealExportProgressState>? progress = null)
     {
-        TryDelete(resultPath);
-        TryDelete(progressPath);
-        using var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("无法启动 Unreal 基础配置进程。");
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        var startedAt = DateTime.UtcNow;
-        var lastProgressAt = DateTime.MinValue;
-        while (!process.HasExited)
-        {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                KillProcessTree(process);
-                cancellationToken.ThrowIfCancellationRequested();
-            }
-            if (DateTime.UtcNow - startedAt > TimeSpan.FromMinutes(20))
-            {
-                KillProcessTree(process);
-                throw new TimeoutException("Unreal 基础配置超过 20 分钟，已终止命令进程。");
-            }
-
-            // 虚幻那一侧十几秒的静默期：脚本会把阶段写进进度文件，
-            // 这里轮询转发出去，进度条才不会整段一动不动。
-            ReportProgress(progressPath, progress, ref lastProgressAt);
-            await Task.Delay(500, cancellationToken);
-        }
-
-        var output = await outputTask + await errorTask;
-        if (!File.Exists(resultPath))
-        {
-            throw new InvalidOperationException(
-                $"Unreal 基础配置没有生成结果文件。退出码：{process.ExitCode}。{Environment.NewLine}{output}");
-        }
+        // 清场删除可能失败（编辑器/杀软占着），所以记下删没删掉，
+        // 好在结果不新鲜时把「残留删不掉」这条线索写进报错。
+        var staleResultRemoved = UnrealProcessRunner.TryClearStaleFile(resultPath);
+        UnrealProcessRunner.TryClearStaleFile(progressPath);
+        // 虚幻那一侧有十几秒的静默期：脚本会把阶段写进进度文件，
+        // Runner 轮询转发出去，进度条才不会整段一动不动。
+        await UnrealProcessRunner.RunAsync(
+            startInfo,
+            progressPath,
+            progress,
+            AppJsonSerializerContext.Default.UnrealExportProgressState,
+            TimeSpan.FromMinutes(20),
+            "无法启动 Unreal 基础配置进程。",
+            "Unreal 基础配置超过 20 分钟，已终止命令进程。",
+            verdict: completed => DescribeUnusableResult(resultPath, completed, staleResultRemoved),
+            cancellationToken: cancellationToken);
 
         try
         {
@@ -218,38 +208,26 @@ internal sealed class UnrealLightConfigurationService
         }
     }
 
-    /// <summary>进度文件没变就不重复转发，免得每 500 毫秒刷一次同样的文案。</summary>
-    private static void ReportProgress(
-        string progressPath,
-        IProgress<UnrealExportProgressState>? progress,
-        ref DateTime lastWriteUtc)
+    /// <summary>
+    /// 结果文件必须是这一轮写出来的，只判 <c>File.Exists</c> 会踩坑：
+    /// 结果路径是固定的，而开跑前的清场删除会被 IO 异常吞掉；删不掉时留在那儿的
+    /// 一定是上一次运行的结果，于是这一轮什么都没写出来，却把上一轮的配置结果
+    /// 当成本次结果读回去。
+    /// </summary>
+    private static string? DescribeUnusableResult(
+        string resultPath,
+        UnrealProcessResult run,
+        bool staleResultRemoved)
     {
-        if (progress is null || string.IsNullOrWhiteSpace(progressPath))
+        if (UnrealProcessRunner.IsFreshOutput(resultPath, run.StartedAtUtc))
         {
-            return;
+            return null;
         }
 
-        try
-        {
-            var info = new FileInfo(progressPath);
-            if (!info.Exists || info.LastWriteTimeUtc <= lastWriteUtc)
-            {
-                return;
-            }
-
-            lastWriteUtc = info.LastWriteTimeUtc;
-            var state = JsonSerializer.Deserialize(
-                File.ReadAllText(progressPath, Encoding.UTF8),
-                AppJsonSerializerContext.Default.UnrealExportProgressState);
-            if (state is not null)
-            {
-                progress.Report(state);
-            }
-        }
-        catch (Exception ex) when (ex is IOException or JsonException)
-        {
-            // 正在被写的进度文件读不全是常态，下一轮再读。
-        }
+        return File.Exists(resultPath) && !staleResultRemoved
+            ? $"Unreal 基础配置没有写出本轮结果文件，只留下删不掉的上一轮残留：{resultPath}。" +
+              $"退出码：{run.ExitCode}。{Environment.NewLine}{run.Output}"
+            : $"Unreal 基础配置没有生成结果文件。退出码：{run.ExitCode}。{Environment.NewLine}{run.Output}";
     }
 
     private static List<string> GetMaterialObjectPaths(
@@ -308,26 +286,4 @@ internal sealed class UnrealLightConfigurationService
     }
 
     private static string Quote(string value) => $"\"{value.Replace("\"", "\"\"")}\"";
-
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            if (File.Exists(path)) File.Delete(path);
-        }
-        catch (IOException)
-        {
-        }
-    }
-
-    private static void KillProcessTree(Process process)
-    {
-        try
-        {
-            if (!process.HasExited) process.Kill(entireProcessTree: true);
-        }
-        catch
-        {
-        }
-    }
 }

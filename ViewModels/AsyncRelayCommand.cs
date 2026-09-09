@@ -1,3 +1,4 @@
+using CrossingVoidZDTool.Services;
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -102,8 +103,19 @@ public sealed class AsyncRelayCommand : ObservableObject, ICommand
         {
             await _execute(parameter, cancellationTokenSource.Token);
         }
-        catch (OperationCanceledException) when (cancellationTokenSource.IsCancellationRequested)
+        catch (OperationCanceledException canceled)
         {
+            // 取消不是失败。这里以前带着 when (cancellationTokenSource.IsCancellationRequested)，
+            // 于是只认「按我这个命令自己的取消按钮」这一种：任务内部若响应的是别处传进来的
+            // token（比如全局进度条上的取消、或者窗口关闭时的联动取消），
+            // 就会掉到下面的 Exception 分支，被当成执行失败弹给用户。
+            //
+            // 不是自己发起的取消仍然记一笔——真要是哪段代码在没人取消的情况下抛了
+            // OperationCanceledException，日志里得留下线索，不能彻底无声。
+            if (!cancellationTokenSource.IsCancellationRequested)
+            {
+                ToolboxLog.Warn("命令被外部取消。", canceled);
+            }
         }
         catch (Exception ex)
         {

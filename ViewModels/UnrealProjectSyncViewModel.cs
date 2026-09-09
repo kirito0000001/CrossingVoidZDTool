@@ -427,6 +427,10 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     private void NotifyDetectionSummaryChanged()
     {
         OnPropertyChanged(nameof(DetectionResultSummaryText));
+        // 这段摘要还会经 WorkspacePlaceholderDetail 喂给中栏的占位文案。
+        // 只通知自己的话，重新检测后仍是「无差异」时，
+        // 占位面板的说明文字会停留在上一次的计数。
+        NotifyWorkspaceStateChanged();
     }
 
     public bool HasContentDetection => _hasImportDetection;
@@ -451,7 +455,18 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     };
 
     /// <summary>差异检测完成或从缓存恢复后，记下这棵树属于哪一步。</summary>
-    public void SetLoadedPublishStep(int step) => _loadedPublishStep = step;
+    public void SetLoadedPublishStep(int step)
+    {
+        if (_loadedPublishStep == step)
+        {
+            return;
+        }
+
+        // 这个字段经 IsWorkflowStepLoaded 直接决定中栏状态。以前它是个纯赋值，
+        // 三个调用点都恰好跟在 ReturnToWorkflowStep 后面才没出事——那是运气不是保障。
+        _loadedPublishStep = step;
+        NotifyWorkspaceStateChanged();
+    }
 
     public int WorkflowStep
     {
@@ -460,43 +475,53 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         {
             if (SetProperty(ref _workflowStep, Math.Clamp(value, UnrealSyncWorkflow.MinStep, UnrealSyncWorkflow.MaxStep)))
             {
-                OnPropertyChanged(nameof(WorkflowStep1StatusText));
-                OnPropertyChanged(nameof(WorkflowStep2StatusText));
-                OnPropertyChanged(nameof(WorkflowStep3StatusText));
-                OnPropertyChanged(nameof(WorkflowStep4StatusText));
-                OnPropertyChanged(nameof(WorkflowStep5StatusText));
-        OnPropertyChanged(nameof(WorkflowStep6StatusText));
-                OnPropertyChanged(nameof(WorkflowNextText));
-                OnPropertyChanged(nameof(WorkflowReloadText));
-                OnPropertyChanged(nameof(WorkflowConfirmationVisibility));
-                OnPropertyChanged(nameof(NormalizationDetailsVisibility));
-                OnPropertyChanged(nameof(WorkflowNextButtonVisibility));
-                OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
-                OnPropertyChanged(nameof(IsFoundationWorkspace));
-                OnPropertyChanged(nameof(IsLightConfigurationWorkspace));
-                OnPropertyChanged(nameof(IsBlueprintSetupWorkspace));
-                OnPropertyChanged(nameof(IsSequenceSynchronizationWorkspace));
-                OnPropertyChanged(nameof(FoundationWorkspaceVisibility));
-                OnPropertyChanged(nameof(FoundationDetailsVisibility));
-                OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
-                OnPropertyChanged(nameof(LightConfigurationDetailsVisibility));
-                OnPropertyChanged(nameof(BlueprintSetupWorkspaceVisibility));
-                OnPropertyChanged(nameof(BlueprintSetupDetailsVisibility));
-                OnPropertyChanged(nameof(SequenceSynchronizationDetailsVisibility));
-                OnPropertyChanged(nameof(WorkspaceTitle));
-                NotifyWorkspaceStateChanged();
-                OnPropertyChanged(nameof(WorkspaceDescription));
-                OnPropertyChanged(nameof(SelectionContentVisibility));
-                OnPropertyChanged(nameof(CanAdvanceWorkflow));
-                OnPropertyChanged(nameof(CanApplyLightConfiguration));
-                OnPropertyChanged(nameof(CanApplyBlueprintSetup));
-                OnPropertyChanged(nameof(HasNoPublishChanges));
-        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
-                OnPropertyChanged(nameof(CanStartPublish));
-                OnPropertyChanged(nameof(PublishActionText));
+                NotifyWorkflowStateChanged();
                 SaveSessionCache();
             }
         }
+    }
+
+    /// <summary>
+    /// 六步流程的可用性与文案是从步号、各步加载标志、检测结果一起算出来的，
+    /// 派生属性有二十多条。以前这串通知只写在 WorkflowStep 的 setter 里，
+    /// 于是别的路径（比如重置导入操作）改了同样的输入却只通知一两条，
+    /// 界面就停在上一刻的状态。提成方法是为了让每条改这些输入的路径都能复用。
+    /// </summary>
+    private void NotifyWorkflowStateChanged()
+    {
+        OnPropertyChanged(nameof(WorkflowStep1StatusText));
+        OnPropertyChanged(nameof(WorkflowStep2StatusText));
+        OnPropertyChanged(nameof(WorkflowStep3StatusText));
+        OnPropertyChanged(nameof(WorkflowStep4StatusText));
+        OnPropertyChanged(nameof(WorkflowStep5StatusText));
+        OnPropertyChanged(nameof(WorkflowStep6StatusText));
+        OnPropertyChanged(nameof(WorkflowNextText));
+        OnPropertyChanged(nameof(WorkflowReloadText));
+        OnPropertyChanged(nameof(WorkflowConfirmationVisibility));
+        OnPropertyChanged(nameof(NormalizationDetailsVisibility));
+        OnPropertyChanged(nameof(WorkflowNextButtonVisibility));
+        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
+        OnPropertyChanged(nameof(IsFoundationWorkspace));
+        OnPropertyChanged(nameof(IsLightConfigurationWorkspace));
+        OnPropertyChanged(nameof(IsBlueprintSetupWorkspace));
+        OnPropertyChanged(nameof(IsSequenceSynchronizationWorkspace));
+        OnPropertyChanged(nameof(FoundationWorkspaceVisibility));
+        OnPropertyChanged(nameof(FoundationDetailsVisibility));
+        OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
+        OnPropertyChanged(nameof(LightConfigurationDetailsVisibility));
+        OnPropertyChanged(nameof(BlueprintSetupWorkspaceVisibility));
+        OnPropertyChanged(nameof(BlueprintSetupDetailsVisibility));
+        OnPropertyChanged(nameof(SequenceSynchronizationDetailsVisibility));
+        OnPropertyChanged(nameof(WorkspaceTitle));
+        OnPropertyChanged(nameof(WorkspaceDescription));
+        OnPropertyChanged(nameof(SelectionContentVisibility));
+        OnPropertyChanged(nameof(CanAdvanceWorkflow));
+        OnPropertyChanged(nameof(CanApplyLightConfiguration));
+        OnPropertyChanged(nameof(CanApplyBlueprintSetup));
+        OnPropertyChanged(nameof(HasNoPublishChanges));
+        OnPropertyChanged(nameof(CanStartPublish));
+        OnPropertyChanged(nameof(PublishActionText));
+        NotifyWorkspaceStateChanged();
     }
 
     public string WorkflowStep1StatusText => WorkflowStep > 1 ? "已完成" : WorkflowStep == 1 ? "进行中" : "待处理";
@@ -2100,6 +2125,10 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     {
         UpdateImportSelectionSummary();
         ApplyPublishFilter();
+        // 右栏那组「已选择 N / M 项」是按步骤算的，和这里的导入摘要不是一回事。
+        // 第四、六步的单项勾选都记得通知它，唯独第三、五步这条路径漏了，
+        // 于是逐个勾选素材时计数一直卡在旧值，要点全选或切步骤才跳回来。
+        NotifyStepSelectionChanged();
         SaveSessionCache();
     }
 
@@ -2396,11 +2425,32 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         }
 
         var toolboxMatches = change.ToolboxItem is not null &&
-            string.Equals(change.ToolboxItem.ContentHash, entry.ToolboxHash, StringComparison.OrdinalIgnoreCase);
+            string.Equals(change.ToolboxItem.ContentHash, entry.ToolboxHash, StringComparison.OrdinalIgnoreCase) &&
+            BaselinePathMatches(change.ToolboxItem.ToolboxRelativePath, entry.ToolboxRelativePath);
         var unrealMatches = change.UnrealItem is not null &&
-            string.Equals(change.UnrealItem.ContentHash, entry.UnrealHash, StringComparison.OrdinalIgnoreCase);
+            string.Equals(change.UnrealItem.ContentHash, entry.UnrealHash, StringComparison.OrdinalIgnoreCase) &&
+            BaselinePathMatches(change.UnrealItem.SourceObjectPath, entry.UnrealObjectPath);
         return toolboxMatches && (unrealMatches || change.UnrealItem is null);
     }
+
+    /// <summary>
+    /// 基线记的路径要和这次差异里的路径对得上，才算「这条已经同步过了」。
+    ///
+    /// 只比内容哈希是不够的：把一条语音从「待分配」挪到「失败语音」时，
+    /// 文件字节没变、Unreal 那侧的资产也没被动过，两个哈希都和基线一致，
+    /// 于是这条 Renamed 被当成早就做完了、从第三步的列表里整条抹掉——
+    /// 界面还会因此报「全部素材无差异」，而 Unreal 里那条语音一直躺在 Other。
+    ///
+    /// 基线里没记路径（老版本写的）时一律判为「确认不了」。宁可多显示一条
+    /// 让用户自己看，也不要再悄悄跳过该做的事。
+    /// </summary>
+    private static bool BaselinePathMatches(string current, string recorded) =>
+        !string.IsNullOrWhiteSpace(recorded) &&
+        string.Equals(
+            current.Replace('\\', '/').Trim('/'),
+            recorded.Replace('\\', '/').Trim('/'),
+            // 资产路径在 Unreal 里大小写不敏感，这里也不能按大小写判成两条不同的路径
+            StringComparison.OrdinalIgnoreCase);
 
     private void ApplySelection(IEnumerable<UnrealSyncSelectionTreeItem> roots, IReadOnlySet<string> selectedIds)
     {
@@ -2694,6 +2744,11 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         ImportDetailVisibility = Visibility.Collapsed;
         ImportResultVisibility = Visibility.Collapsed;
         CanImportSelection = false;
+        // 这里清掉了 _hasImportDetection 和 _loadedPublishStep，中栏状态、
+        // 能否进下一步、发布勾选是否就绪全都跟着变。而本方法不动任何
+        // ObservableCollection，所以中栏的集合监听在这条路径上也不会触发——
+        // 不显式广播的话，中栏会停在上一刻的可见性上。
+        NotifyWorkflowStateChanged();
     }
 
     private void RebuildSourceLists()

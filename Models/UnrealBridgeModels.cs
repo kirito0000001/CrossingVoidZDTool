@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.IO;
 using System.Text.Json.Serialization;
 
@@ -222,6 +223,16 @@ internal sealed class UnrealBridgeSyncState
 
     public string TemplateCharacterCode { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 基线条目，键是 StableId。
+    ///
+    /// Populate 不能省：System.Text.Json 对有 setter 的集合属性默认是 Replace，
+    /// 会自己 new 一个默认比较器的字典填完再赋值，字段初始化器里的 OrdinalIgnoreCase 保不住。
+    /// 这张表是 UnrealBridgeDiffService 判「有没有变过」的唯一依据——
+    /// 比较器一退化成大小写敏感，同一个素材换个大小写就查不到基线，
+    /// 已经同步过的东西会被重新判成新增或冲突，第三步的差异永远归不了零。
+    /// </summary>
+    [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
     public Dictionary<string, UnrealBridgeSyncStateEntry> Entries { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
@@ -242,6 +253,11 @@ internal sealed class UnrealBridgeToolboxIdentityMap
 {
     public int ProtocolVersion { get; set; } = 1;
 
+    /// <summary>
+    /// 素材身份，键是 SyncId。同上，Populate 是为了让读回来的字典保留 OrdinalIgnoreCase——
+    /// <see cref="Services.UnrealBridgeToolboxIdentityService.TryResolveAssignedPath"/> 直接拿它 TryGetValue。
+    /// </summary>
+    [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
     public Dictionary<string, UnrealBridgeToolboxIdentityEntry> Entries { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
 }
@@ -398,6 +414,39 @@ internal sealed class UnrealBridgeExecutionItemResult
     public string OriginIdentity { get; set; } = string.Empty;
 
     public string OutputFilePath { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 条目种类。"action" 是真正执行过的动作，"diagnostic" 只是诊断信息
+    /// （比如序列同步里那条孤儿序列解绑），它不对应任何动作。
+    ///
+    /// 加这个字段是因为诊断条目以前会被算进「已成功的动作」：于是所有真实动作
+    /// 都失败时，「一个都没成功就抛」的判断失效，界面还报「已成功 1 个动作并写入基线」，
+    /// 而那个假 ID 也会被拿去生成基线条目。
+    ///
+    /// 默认必须是 "action"：别的脚本写出的结果不带这个字段，缺省当诊断会把它们整批滤掉。
+    /// </summary>
+    public string ItemKind { get; set; } = "action";
+
+    /// <summary>这条是不是诊断信息（不计入已成功动作、不进基线）。</summary>
+    public bool IsDiagnostic =>
+        string.Equals(ItemKind, "diagnostic", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// 从执行结果里挑出「真正成功了的动作」。
+    ///
+    /// 单独提成函数是为了能测：以前这段挑选逻辑埋在一个 583 行的 async void
+    /// 按钮处理器里，而它挑错的后果很重——序列同步的诊断条目
+    /// （orphan-sequences 那条）会被算成一个成功的动作，于是
+    /// 「一个动作都没成功就抛」的判断失效，界面报「已成功 1 个动作并写入基线」，
+    /// 那个假 ID 还会被拿去生成基线条目。
+    /// </summary>
+    public static string[] SelectSucceededActionStableIds(
+        IEnumerable<UnrealBridgeExecutionItemResult>? items) =>
+        items?
+            .Where(item => item is { Succeeded: true, IsDiagnostic: false }
+                && !string.IsNullOrWhiteSpace(item.StableId))
+            .Select(item => item.StableId)
+            .ToArray() ?? [];
 }
 
 internal sealed record UnrealBridgeDraftImportResult(

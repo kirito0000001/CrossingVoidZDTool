@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.Specialized;
 using System.Linq;
 using Microsoft.UI.Xaml;
@@ -15,7 +16,29 @@ namespace CrossingVoidZDTool.ViewModels;
 internal sealed partial class UnrealProjectSyncViewModel
 {
     private string _workspaceFailure = string.Empty;
-    private UnrealSyncWorkspaceState? _lastNotifiedWorkspaceState;
+    private (UnrealSyncWorkspaceState State, string StepName, string Title, string Description)?
+        _lastNotifiedWorkspaceSnapshot;
+
+    /// <summary>
+    /// 本类自己广播出去的属性名。监听器要跳过它们，否则会自己触发自己。
+    /// </summary>
+    private static readonly HashSet<string> SelfNotifiedProperties = new(StringComparer.Ordinal)
+    {
+        nameof(WorkspaceState),
+        nameof(WorkflowStepName),
+        nameof(WorkspaceContentVisibility),
+        nameof(WorkspacePlaceholderVisibility),
+        nameof(WorkspaceBusyVisibility),
+        nameof(FoundationWorkspaceVisibility),
+        nameof(LightConfigurationWorkspaceVisibility),
+        nameof(BlueprintSetupWorkspaceVisibility),
+        nameof(SelectionContentVisibility),
+        nameof(IsNormalizationWorkspace),
+        nameof(WorkspacePlaceholderGlyph),
+        nameof(WorkspacePlaceholderTitle),
+        nameof(WorkspacePlaceholderDescription),
+        nameof(IsWorkspacePlaceholderError),
+    };
 
     /// <summary>
     /// 让中栏自己盯着它依赖的数据，而不是指望每个改数据的地方都记得通知。
@@ -41,10 +64,15 @@ internal sealed partial class UnrealProjectSyncViewModel
 
         PropertyChanged += (_, e) =>
         {
-            // 只认真正会改变中栏状态的那几个输入，免得和下面的通知互相触发。
-            if (e.PropertyName is nameof(IsEngineToToolbox)
-                or nameof(WorkflowStep)
-                or nameof(SelectedSource))
+            // 这里原本是白名单，只认三个属性名。但中栏状态实际读了十一个输入
+            // （失败原因、是否正在跑、导入检测标志、四个步骤加载标志、
+            // 当前来源的角色……），白名单外的那些只能继续靠手工通知——
+            // 「重置导入操作后中栏不刷新」就是这么漏的。
+            //
+            // 改成黑名单：除了本函数自己广播出去的那些派生属性，其余一律重算。
+            // 重算本身很便宜（就是读几个字段），而且下面有值相等守卫兜着，
+            // 状态没变就不会惊动界面。宁可多算，也不要再漏。
+            if (e.PropertyName is not null && !SelfNotifiedProperties.Contains(e.PropertyName))
             {
                 NotifyWorkspaceStateIfChanged();
             }
@@ -54,7 +82,10 @@ internal sealed partial class UnrealProjectSyncViewModel
     /// <summary>状态真的变了才惊动界面，批量填充列表时不至于刷成百上千次。</summary>
     private void NotifyWorkspaceStateIfChanged()
     {
-        if (_lastNotifiedWorkspaceState == WorkspaceState)
+        // 只比枚举是不够的：同样是「无差异」态，占位面板的说明文字会随各步摘要变，
+        // 步骤名也会随步号变。只比状态会把这些变化一起吞掉。
+        var snapshot = (WorkspaceState, WorkflowStepName, WorkspacePlaceholderTitle, WorkspacePlaceholderDescription);
+        if (_lastNotifiedWorkspaceSnapshot == snapshot)
         {
             return;
         }
@@ -203,7 +234,7 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     public void NotifyWorkspaceStateChanged()
     {
-        _lastNotifiedWorkspaceState = WorkspaceState;
+        _lastNotifiedWorkspaceSnapshot = (WorkspaceState, WorkflowStepName, WorkspacePlaceholderTitle, WorkspacePlaceholderDescription);
         OnPropertyChanged(nameof(WorkspaceState));
         OnPropertyChanged(nameof(WorkflowStepName));
         OnPropertyChanged(nameof(WorkspaceContentVisibility));

@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
 using CrossingVoidZDTool;
+using CrossingVoidZDTool.Controls;
 using CrossingVoidZDTool.Services;
 using CrossingVoidZDTool.ViewModels;
 using Microsoft.UI.Xaml;
@@ -115,6 +116,36 @@ var tests = new (string Name, Action Run)[]
     ("中栏任何状态都有东西显示", WorkspaceNeverShowsBlankPanel),
     ("中栏分组与条目始终一致", WorkspaceGroupsStayConsistentWithItems),
     ("直接改列表中栏也会跟着刷新", WorkspaceReactsToRawCollectionChanges),
+    ("逐项勾选会刷新右栏的已选择计数", SingleItemSelectionRefreshesStepSelectionText),
+    ("重置导入操作会刷新中栏与流程状态", ResetImportOperationRefreshesWorkspaceAndWorkflow),
+    ("改过分类的语音不会被基线当成已同步", ReclassifiedVoiceSurvivesBaselineFilter),
+    ("元数据损坏时角色不会从角色台消失", CorruptMetadataKeepsCharacterVisible),
+    ("角色数据写到一半崩溃不会丢原文件", CharacterDataWriteIsAtomic),
+    ("语音名字识别不被角色代号误伤", VoiceClassificationIgnoresCharacterCodeNoise),
+    ("语音分类表与桥接脚本标签一致", VoiceSpecsMatchBridgeScriptLabels),
+    ("查看模式能看序列但改不了", ReadOnlySequenceCanBeViewedButNotEdited),
+    ("语音规范路径按分类落到对应目录", VoicePathPolicyBuildsCanonicalFolder),
+    ("清单读不出来时不清理帧文件", UnreadableManifestSkipsFramePruning),
+    ("设置文件损坏时留档并说出来", CorruptSettingsAreQuarantinedAndReported),
+    ("原子写不残留临时文件", AtomicWriteLeavesNoTemporaryFile),
+    ("取消时真的杀掉 Unreal 进程", CancellingUnrealRunKillsTheProcess),
+    ("子进程输出一律固定 UTF-8", RedirectedProcessOutputAlwaysFixesEncoding),
+    ("进程编排不再各写一份", ProcessOrchestrationIsNotDuplicated),
+    ("技术债只许降不许升", TechnicalDebtRatchetOnlyGoesDown),
+    ("整份设置换掉后派生属性会刷新", ReplacingSettingsNotifiesDerivedProperties),
+    ("诊断条目不算成功的动作", DiagnosticItemsDoNotCountAsSucceededActions),
+    ("技能数值解析不了要报错不要归零", UnparsableSkillNumbersAreReportedNotZeroed),
+    ("技能数值在逗号小数点区域仍能往返", SkillNumbersSurviveCommaDecimalCulture),
+    ("多余图片可删但其他图片受保护", StaleImagesAreDeletableExceptUnclassified),
+    ("认不出的技能状态要报错不要吞成空中", UnknownSkillStatesAreReported),
+    ("序列反推得其他时按名字归类语音", VoiceBucketsFallBackToNameWhenSequenceSaysOther),
+    ("每个全屏遮罩层都关得掉", EveryOverlayCanBeDismissed),
+    ("写回工具箱的技能身份和快照对得上", WriteBackSkillIdentityMatchesSnapshot),
+    ("重命名中途失败要全部回滚", FailedBatchRenameRollsEverythingBack),
+    ("外部取消不算命令执行失败", ExternalCancellationIsNotReportedAsFailure),
+    ("手动备份和自动备份分开计数", ManualAndAutomaticBackupsAreCappedSeparately),
+    ("会话缓存读回后仍按大小写不敏感查表", SessionCacheKeepsCaseInsensitiveLookupAfterRoundTrip),
+    ("语音与序列帧不再互相依赖", VoiceAndSequenceServicesDoNotDependOnEachOther),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
@@ -466,7 +497,7 @@ static void MaterialSequenceNumberWidthsMatchCategoryCount()
 
 static void VoiceSpecsDefineRequiredAndOptionalGroups()
 {
-    AssertEqual(12, VoiceMaterialService.Specs.Count);
+    AssertEqual(13, VoiceMaterialService.Specs.Count);
     AssertSequence(
         [
             VoiceMaterialKind.Formation,
@@ -484,7 +515,9 @@ static void VoiceSpecsDefineRequiredAndOptionalGroups()
             VoiceMaterialKind.Ultimate,
             VoiceMaterialKind.Support,
             VoiceMaterialKind.Combo,
-            VoiceMaterialKind.Other
+            VoiceMaterialKind.Other,
+            // 音效追加在最末尾：有三处按枚举序数排序，插进中间会静默改掉行为
+            VoiceMaterialKind.SoundEffect
         ],
         VoiceMaterialService.Specs.Where(spec => !spec.IsRequired).Select(spec => spec.Kind).ToArray());
     AssertEqual("支持多个，至少 1 个", VoiceMaterialService.GetSpec(VoiceMaterialKind.Formation).RequirementText);
@@ -860,7 +893,7 @@ static void LineArtRefreshLoadsVoiceSections()
 
         viewModel.RefreshAsync(character).GetAwaiter().GetResult();
 
-        AssertEqual(12, viewModel.VoiceSections.Count);
+        AssertEqual(13, viewModel.VoiceSections.Count);
         AssertEqual(6, viewModel.VoiceSections.Sum(section => section.MissingCount));
         AssertEqual(
             0,
@@ -956,7 +989,7 @@ static void DialogsFollowCurrentWindowTheme()
 
 static void PendingVoiceManagerSupportsAssignment()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.VoiceMaterials.cs"));
 
     AssertEqual(true, xaml.Contains("x:Name=\"VoiceMaterialAssignmentBar\"", StringComparison.Ordinal));
@@ -1221,7 +1254,7 @@ static void LegacyKeywordTagsMigrateToAliasesAndRemoveLegacyUi()
         AssertSequence(loaded.KeywordTagGroups.Aliases.ToArray(), persisted.KeywordTagGroups!.Aliases.ToArray());
         AssertEqual(0, persisted.KeywordTagGroups.LegacyKeywordTags.Count);
 
-        var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+        var xaml = ReadAllProjectXaml();
         var viewModel = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "ViewModels", "UnrealSyncViewModel.cs"));
         AssertEqual(false, xaml.Contains("旧版未分类 Tag", StringComparison.Ordinal));
         AssertEqual(false, xaml.Contains("HasLegacyKeywordTags", StringComparison.Ordinal));
@@ -1267,7 +1300,7 @@ static void CharacterAntiSwitchDefaultsAndPersists()
         AssertEqual(true, viewModel.SaveNow(character));
         AssertEqual(true, service.Load(character).Anti);
 
-        var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+        var xaml = ReadAllProjectXaml();
         var formLimitIndex = xaml.IndexOf("UnrealSync.FormLimitStat", StringComparison.Ordinal);
         var antiIndex = xaml.IndexOf("Text=\"抗性类别\"", StringComparison.Ordinal);
         AssertEqual(true, formLimitIndex >= 0 && antiIndex > formLimitIndex);
@@ -1535,7 +1568,7 @@ static void St1ListsAllDraftCharacters()
         CreateWorkspaceCharacterFolder(Path.Combine(root, "Completed"), "Asuna", "亚丝娜", isCompleted: true);
         var viewModel = new CharacterDeskViewModel(new CharacterWorkspaceService());
         viewModel.LoadCharactersAsync(root, null, null).GetAwaiter().GetResult();
-        var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+        var xaml = ReadAllProjectXaml();
 
         AssertSequence(["Kuroko", "Misaka"], viewModel.DraftCharacters.Select(character => character.Code).OrderBy(code => code).ToArray());
         AssertEqual(false, viewModel.DraftCharacters.Any(character => character.IsCompleted));
@@ -1650,13 +1683,14 @@ static void ExportCharacterCopiesWholeFolderAndRequiresOverwrite()
     try
     {
         var service = new CharacterWorkspaceService();
+        var exportService = new CharacterExportService();
         var character = service.EnsureCharacterByCode(root, "Misaka", "御坂美琴").Character;
         var nestedSource = Path.Combine(character.FolderPath, "tool", "CharacterBackups", "history.zip");
         Directory.CreateDirectory(Path.GetDirectoryName(nestedSource)!);
         File.WriteAllText(nestedSource, "backup");
-        var exportRoot = service.GetDefaultExportRootPath(root);
+        var exportRoot = exportService.GetDefaultExportRootPath(root);
 
-        var exportedPath = service.ExportCharacterFolder(character, exportRoot, overwrite: false);
+        var exportedPath = exportService.ExportCharacterFolder(character, exportRoot, overwrite: false);
 
         AssertEqual(Path.GetFullPath(Path.Combine(root, "Export", "Misaka")), Path.GetFullPath(exportedPath));
         AssertEqual("backup", File.ReadAllText(Path.Combine(exportedPath, "tool", "CharacterBackups", "history.zip")));
@@ -1666,7 +1700,7 @@ static void ExportCharacterCopiesWholeFolderAndRequiresOverwrite()
         var refused = false;
         try
         {
-            service.ExportCharacterFolder(character, exportRoot, overwrite: false);
+            exportService.ExportCharacterFolder(character, exportRoot, overwrite: false);
         }
         catch (IOException)
         {
@@ -1674,7 +1708,7 @@ static void ExportCharacterCopiesWholeFolderAndRequiresOverwrite()
         }
 
         AssertEqual(true, refused);
-        service.ExportCharacterFolder(character, exportRoot, overwrite: true);
+        exportService.ExportCharacterFolder(character, exportRoot, overwrite: true);
         AssertEqual(false, File.Exists(Path.Combine(exportedPath, "stale.txt")));
         AssertEqual(true, File.Exists(nestedSource));
     }
@@ -1686,7 +1720,7 @@ static void ExportCharacterCopiesWholeFolderAndRequiresOverwrite()
 
 static void CharacterDetailUsesFolderExportFlow()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.CharacterDesk.cs"));
 
     AssertEqual(true, xaml.Contains("x:Name=\"CharacterDetailExportButton\"", StringComparison.Ordinal));
@@ -2395,7 +2429,7 @@ static void SequenceFrameVoiceSelectionRefreshesAfterOptions()
         AssertEqual(true, matchingOptionAddedOrder > 0);
         AssertEqual(true, selectedPathNotifiedOrder > matchingOptionAddedOrder);
 
-        var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+        var xaml = ReadAllProjectXaml();
         AssertEqual(true, xaml.Contains("Text=\"当前帧语音\"", StringComparison.Ordinal));
         AssertEqual(
             true,
@@ -2736,7 +2770,7 @@ static void SequenceEditorHeaderUsesStableFramePositionSummary()
         viewModel.StepPreviewFrame(1);
         AssertEqual($"2 / {sourcePaths.Count}", Convert.ToString(property.GetValue(viewModel)) ?? string.Empty);
 
-        var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+        var xaml = ReadAllProjectXaml();
         AssertEqual(
             true,
             xaml.Contains(
@@ -2747,7 +2781,7 @@ static void SequenceEditorHeaderUsesStableFramePositionSummary()
 
 static void SequenceEditorCreatesFirstFrameAndCollectionSupportsModifierMultiSelect()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     var sequenceSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
     var shortcutSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.Logging.cs"));
 
@@ -2885,7 +2919,7 @@ static void SequenceCollectionResolvesAllDuplicatesKeepingMostUsedResource()
         AssertEqual(1, duplicatePaths.Count(File.Exists));
     });
 
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
     AssertEqual(true, xaml.Contains("Content=\"一键处理\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("Click=\"ResolveAllSequenceFrameDuplicatesButton_Click\"", StringComparison.Ordinal));
@@ -2894,7 +2928,7 @@ static void SequenceCollectionResolvesAllDuplicatesKeepingMostUsedResource()
 
 static void OuterSequencePreviewProvidesFrameCollectionEntry()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     AssertEqual(true, xaml.Contains("Content=\"帧素材合集\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains(
         "Click=\"OpenSequenceCollectionButton_Click\" Content=\"帧素材合集\"",
@@ -2928,7 +2962,7 @@ static void SequenceCollectionOrdersByActionThenFrameIndex()
 
 static void SequenceCollectionUsesCompactUsageFirstCards()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
 
     AssertEqual(true, xaml.Contains("x:Name=\"DetectSequenceFrameDuplicatesButton\"", StringComparison.Ordinal));
@@ -2970,7 +3004,7 @@ static void SequenceFrameImportPreservesOuterScrollPosition()
 
 static void SequencePreviewsShareDoubleBufferedPresenter()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
     var presenterXamlPath = Path.Combine(Directory.GetCurrentDirectory(), "Controls", "BufferedImagePresenter.xaml");
     var presenterSourcePath = Path.Combine(Directory.GetCurrentDirectory(), "Controls", "BufferedImagePresenter.xaml.cs");
@@ -3286,7 +3320,7 @@ static void SequenceCollectionMultiSelectionTracksClickOrder()
         [0, 2, 1, 3],
         items.Select(item => Convert.ToInt32(selectionOrderProperty?.GetValue(item))).ToArray());
 
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     AssertEqual(true, xaml.Contains("Text=\"{Binding SelectionOrderText, Mode=OneWay}\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("Visibility=\"{Binding SelectionOrderVisibility, Mode=OneWay}\"", StringComparison.Ordinal));
 }
@@ -4010,10 +4044,14 @@ static void UnrealProjectCharacterReadsChineseNameFromItemAsset()
 
 static void UnrealProjectCharacterRefreshUsesOfflineItemScan()
 {
-    var service = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "Services", "UnrealProjectSyncService.cs"));
     var window = ReadUnrealSyncWindowSource();
 
-    AssertEqual(true, service.Contains("ReadCharacterItemDisplayNames", StringComparison.Ordinal));
+    // 这里原本还断言 UnrealProjectSyncService.cs 里出现过 ReadCharacterItemDisplayNames
+    // ——查的是「某个方法名在某个文件里」，方法搬进 UnrealExportManifestReader 就红了，
+    // 而功能一点没变。它想证明的行为，紧邻上一条用例
+    // UnrealProjectCharacterReadsChineseNameFromItemAsset 已经在行为层面盖住了：
+    // 造一个只有 Content 目录、没有清单也没有引擎的临时工程，调 Check() 之后
+    // 断言角色名是从 Item_*.uasset 里读出来的。
     AssertEqual(true, window.Contains("_applicationViewModel.UnrealProjectSync.Detect();", StringComparison.Ordinal));
     var handlerStart = window.IndexOf("GetUnrealProjectCharactersButton_Click", StringComparison.Ordinal);
     var handlerEnd = window.IndexOf("ImportSelectedUnrealCharacterToDraftButton_Click", handlerStart, StringComparison.Ordinal);
@@ -4024,18 +4062,83 @@ static void UnrealProjectCharacterRefreshUsesOfflineItemScan()
 
 static void UnrealProjectDetailExportRejectsFailedProcess()
 {
-    var service = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "Services", "UnrealProjectSyncService.cs"));
+    // 导出成没成功以产物为准，不以退出码为准：commandlet 只要编辑器在别处报过错
+    // （实测是 Misaka_AnimBP 有个 Play Sequence 指向已不存在的序列）就返回非 0，
+    // 而日志里明写着 Python script executed successfully、清单也照常写出来了。
+    // 按退出码判，每次检测都会被判成导出失败。
+    //
+    // 这条用例以前是断言 UnrealProjectSyncService.cs 里存在某个字面量——查的是变量名，
+    // 改个命名就假报警，也拦不住逻辑写错。进程编排抽成 UnrealProcessRunner 之后，
+    // 同一份行为可以直接跑起来验。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var outputPath = Path.Combine(root, "manifest.json");
 
-    // 导出失败仍然要抛，但判据换成了产物而不是退出码：
-    // commandlet 只要编辑器在别处报过错（实测是 Misaka_AnimBP 有个 Play Sequence
-    // 指向已不存在的序列）就返回非 0，而日志里明写着 Python script executed successfully、
-    // 清单也照常写出来了。按退出码判，每次检测都会被判成导出失败。
-    AssertEqual(true, service.Contains("Unreal 角色数据导出失败", StringComparison.Ordinal));
-    AssertEqual(true, service.Contains("manifest is null || !manifestIsFresh", StringComparison.Ordinal));
-    // 清单必须是这一轮新写的，不能拿上一次的残留冒充成功。
-    AssertEqual(true, service.Contains("TryGetLastWriteUtc(manifestPath) > runStartedAtUtc", StringComparison.Ordinal));
-    // 退出码非 0 但清单有效时，只留告警。
-    AssertEqual(true, service.Contains("exportWarning", StringComparison.Ordinal));
+        // 上一轮留下的残留：写在本次开跑之前
+        File.WriteAllText(outputPath, "{}");
+        var staleStart = DateTime.UtcNow.AddSeconds(1);
+        AssertEqual(false, UnrealProcessRunner.IsFreshOutput(outputPath, staleStart));
+
+        // 本轮新写的产物
+        AssertEqual(true, UnrealProcessRunner.IsFreshOutput(outputPath, DateTime.UtcNow.AddSeconds(-5)));
+
+        // 文件根本不存在时不能算新鲜
+        AssertEqual(false, UnrealProcessRunner.IsFreshOutput(
+            Path.Combine(root, "missing.json"), DateTime.UtcNow.AddSeconds(-5)));
+
+        // 退出码非 0，但 verdict 说产物有效 —— 不许判失败
+        var okRun = UnrealProcessRunner.RunAsync(
+            NonZeroExitProcess(),
+            TimeSpan.FromMinutes(1),
+            "起不来",
+            "超时",
+            verdict: _ => null).GetAwaiter().GetResult();
+        AssertEqual(true, okRun.ExitCode != 0);
+
+        // 退出码为 0，但 verdict 说产物无效 —— 必须判失败，且用 verdict 给的理由
+        var threw = false;
+        try
+        {
+            UnrealProcessRunner.RunAsync(
+                ZeroExitProcess(),
+                TimeSpan.FromMinutes(1),
+                "起不来",
+                "超时",
+                verdict: _ => "没有生成有效清单").GetAwaiter().GetResult();
+        }
+        catch (InvalidOperationException error)
+        {
+            threw = true;
+            AssertEqual(true, error.Message.Contains("没有生成有效清单", StringComparison.Ordinal));
+        }
+
+        AssertEqual(true, threw);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+
+    static System.Diagnostics.ProcessStartInfo NonZeroExitProcess() => new()
+    {
+        FileName = "cmd.exe",
+        Arguments = "/c exit 3",
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+    };
+
+    static System.Diagnostics.ProcessStartInfo ZeroExitProcess() => new()
+    {
+        FileName = "cmd.exe",
+        Arguments = "/c exit 0",
+        UseShellExecute = false,
+        CreateNoWindow = true,
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+    };
 }
 
 static void UnrealProjectDetailExportRejectsMismatchedModuleBuildIds()
@@ -4896,6 +4999,993 @@ static void BlueprintSetupSelfCheckPasses()
     AssertEqual(true, source.Contains("def _reconcile_applied", StringComparison.Ordinal));
 }
 
+static void ReadOnlySequenceCanBeViewedButNotEdited()
+{
+    // 已完成角色进「查看」模式后看不了序列：把序列送进右侧预览器的那个播放按钮
+    // 被整块左栏的 IsHitTestVisible=false 一起挡住了，而右侧预览器自己没有
+    // 任何自动选中逻辑，于是没有任何可达路径能看序列。
+    // 限制应该只落在「改」上，不该把「看」一起禁掉。
+    WithSequenceFrameWorkspace((service, character, action, sourcePaths, voicePath) =>
+    {
+        service.ImportFrames(character, action, [sourcePaths[0], sourcePaths[1]]);
+        var viewModel = new SequenceFramesViewModel(service, new CharacterSkillsService())
+        {
+            IsReadOnly = true,
+        };
+        viewModel.LoadAsync(character).GetAwaiter().GetResult();
+
+        var section = viewModel.BaseSectionGroups.SelectMany(group => group.Sections)
+            .Single(item => item.Action.Code == action.Code);
+
+        // 看：选中动作后右侧必须真的有帧可放
+        viewModel.SelectSection(section);
+        AssertEqual(true, viewModel.PreviewFrames.Count > 0);
+        AssertEqual(section.Action.Code, viewModel.PreviewSection?.Action.Code);
+
+        // 改：一律拒绝，且要给出可见的理由而不是静默不动
+        var before = section.Frames.Count;
+        viewModel.DeleteFrameAsync(character, section, section.Frames[0]).GetAwaiter().GetResult();
+        AssertEqual(before, section.Frames.Count);
+        AssertEqual(true, viewModel.StatusText.Contains("查看模式", StringComparison.Ordinal));
+
+        viewModel.ImportAsync(character, section, [sourcePaths[0]]).GetAwaiter().GetResult();
+        AssertEqual(before, section.Frames.Count);
+        AssertEqual(0, viewModel.ResolveAllDuplicateFramesAsync(character).GetAwaiter().GetResult());
+
+        // 磁盘上的帧文件一个都不能少
+        var frameFiles = Directory.GetFiles(
+            Path.Combine(character.FolderPath, "ZDMaterial", action.Code, "Frames"), "*.png");
+        AssertEqual(before, frameFiles.Length);
+    });
+}
+
+static void UnreadableManifestSkipsFramePruning()
+{
+    // 清理冗余帧时会先收集「所有动作里被清单引用到的帧」。以前某个动作的
+    // sequence.json 读不出来（杀软刚扫完、文件被占用、上游非原子写留下的坏文件）
+    // 会被当作「这个动作零引用」，于是它名下的帧图全都不在引用集里，
+    // 紧接着被删光——用户的原始帧就这么没了，界面上没有任何提示。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var service = new SequenceFrameService();
+        var actions = SequenceFrameService.BuildActions(new CharacterSkillsData());
+        var first = actions[0];
+        var second = actions[1];
+
+        var sourceA = Path.Combine(root, "a.png");
+        var sourceB = Path.Combine(root, "b.png");
+        var sourceC = Path.Combine(root, "c.png");
+        foreach (var path in new[] { sourceA, sourceB, sourceC })
+        {
+            WriteSolidImage(path, Color.Red, SequenceFrameService.RequiredWidth, SequenceFrameService.RequiredHeight);
+        }
+
+        service.ImportFrames(character, first, [sourceA, sourceB]);
+        service.ImportFrames(character, second, [sourceC]);
+
+        var secondFramesFolder = Path.Combine(
+            character.FolderPath, "ZDMaterial", second.Code, "Frames");
+        AssertEqual(1, Directory.GetFiles(secondFramesFolder, "*.png").Length);
+
+        // 先把第一个动作读出来（LoadSections 会读全部清单，坏在这一步就命中不了要验的路径）
+        var firstSection = LoadSequenceSection(service, character, first);
+
+        // 在第一个动作的帧目录里放一张「清单没引用」的孤儿图。
+        // 正常情况下它就是清理的目标，会被删掉——下面用它来观察清理到底跑没跑。
+        var firstFramesFolder = Path.Combine(character.FolderPath, "ZDMaterial", first.Code, "Frames");
+        var orphanPath = Path.Combine(firstFramesFolder, "orphan.png");
+        WriteSolidImage(orphanPath, Color.Blue, SequenceFrameService.RequiredWidth, SequenceFrameService.RequiredHeight);
+
+        // 把另一个动作的清单写坏，模拟「读的时候好好的，清理时读不到了」
+        var brokenManifest = Path.Combine(character.FolderPath, "ZDMaterial", second.Code, "sequence.json");
+        AssertEqual(true, File.Exists(brokenManifest));
+        File.WriteAllText(brokenManifest, "{\"Frames\":[");
+
+        // 触发一次会带清理的操作
+        service.DeleteFrame(character, first, firstSection.Frames[0]);
+
+        // 引用集不完整时必须整个放弃清理：孤儿图还在，说明没有照着残缺的引用集去删。
+        // 修复前这里会把孤儿图删掉——而真实场景里被删的是用户的原始帧。
+        AssertEqual(true, File.Exists(orphanPath));
+        // 另一个动作的帧当然也一张不少
+        AssertEqual(1, Directory.GetFiles(secondFramesFolder, "*.png").Length);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void CorruptSettingsAreQuarantinedAndReported()
+{
+    // settings.json 损坏以前是个闭环：静默返回默认设置 -> 工作区路径回落到默认值
+    // -> 界面显示「目录已就绪」，用户的真实工程连同全部角色看起来空了
+    // -> 下一次改任何设置调用 Save()，损坏文件被默认值覆盖，丢失变成永久。
+    var messages = new List<string>();
+    ToolboxLog.SetSink(new CollectingLogSink(messages));
+    try
+    {
+        var service = new AppSettingsService();
+        var settingsPath = service.SettingsFilePath;
+        var backupPath = settingsPath + ".regression-backup";
+        var hadOriginal = File.Exists(settingsPath);
+        if (hadOriginal)
+        {
+            File.Copy(settingsPath, backupPath, overwrite: true);
+        }
+
+        try
+        {
+            Directory.CreateDirectory(service.SettingsDirectoryPath);
+            File.WriteAllText(settingsPath, "{ this is not json");
+
+            var loaded = service.Load();
+            // 读不出来时用默认设置是可以的，但必须留下痕迹
+            AssertEqual(true, loaded is not null);
+            AssertEqual(true, messages.Any(text => text.Contains("设置文件读取失败", StringComparison.Ordinal)));
+            // 坏文件要被改名留档，否则下一次保存就把证据盖掉了
+            AssertEqual(false, File.Exists(settingsPath));
+            var quarantined = Directory.GetFiles(service.SettingsDirectoryPath, "settings.json.corrupt-*");
+            AssertEqual(true, quarantined.Length >= 1);
+            foreach (var path in quarantined)
+            {
+                File.Delete(path);
+            }
+        }
+        finally
+        {
+            if (hadOriginal)
+            {
+                File.Copy(backupPath, settingsPath, overwrite: true);
+                File.Delete(backupPath);
+            }
+            else if (File.Exists(settingsPath))
+            {
+                File.Delete(settingsPath);
+            }
+        }
+    }
+    finally
+    {
+        ToolboxLog.SetSink(null);
+    }
+}
+
+static void CancellingUnrealRunKillsTheProcess()
+{
+    // 这是整次进程编排重构的核心行为。以前四处都把
+    //     if (ct.IsCancellationRequested) KillProcessTree(...)
+    // 写在轮询循环顶部，可取消几乎总是落在 await Task.Delay(..., ct) 里直接抛出，
+    // 那一句永远轮不到；而 using var process 的 Dispose 并不会结束进程。
+    // 结果就是 UnrealEditor-Cmd.exe 变成孤儿，继续占着工程锁，下一次同步起不来。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        // 子进程先等几秒再写这个文件。取消之后它要是还活着，文件迟早会出现——
+        // 用「文件有没有出现」判，比观察某个文件还在不在长要干脆得多。
+        var survivedPath = Path.Combine(root, "survived.txt");
+        var startInfo = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = "cmd.exe",
+            Arguments = $"/c ping -n 5 127.0.0.1 > nul & echo survived > \"{survivedPath}\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+        };
+
+        using var cancellation = new CancellationTokenSource();
+        var run = UnrealProcessRunner.RunAsync(
+            startInfo,
+            TimeSpan.FromMinutes(2),
+            "起不来",
+            "超时",
+            cancellationToken: cancellation.Token);
+
+        Thread.Sleep(600);
+        // 还没到写文件的时候，此刻取消
+        AssertEqual(false, File.Exists(survivedPath));
+        cancellation.Cancel();
+
+        var cancelled = false;
+        try
+        {
+            run.GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            cancelled = true;
+        }
+
+        AssertEqual(true, cancelled);
+
+        // 关键断言：等过子进程本来会写文件的时刻，它必须已经被杀掉了。
+        // 没杀掉的话这个文件会出现——那就是「孤儿进程还在跑」。
+        Thread.Sleep(6000);
+        AssertEqual(false, File.Exists(survivedPath));
+    }
+    finally
+    {
+        try
+        {
+            Directory.Delete(root, recursive: true);
+        }
+        catch (IOException)
+        {
+            // 子进程真没杀掉的话这里会删不动——上面的断言已经报出来了
+        }
+    }
+}
+
+static void RedirectedProcessOutputAlwaysFixesEncoding()
+{
+    // 中文 Windows 的控制台代码页是 936，而这些子进程写的是 UTF-8
+    // （UnrealPythonTaskExecutionService 还显式设了 PYTHONUTF8=1），
+    // 不固定 StandardOutputEncoding 就必然乱码——偏偏这些输出只在出故障时才会被人翻出来看。
+    foreach (var path in Directory.EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories))
+    {
+        var source = File.ReadAllText(path, Encoding.UTF8);
+        if (!source.Contains("RedirectStandardOutput", StringComparison.Ordinal))
+        {
+            continue;
+        }
+
+        if (!source.Contains("StandardOutputEncoding", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{path} 重定向了子进程输出但没有固定编码，中文诊断信息会乱码。");
+        }
+    }
+}
+
+static void TechnicalDebtRatchetOnlyGoesDown()
+{
+    // 棘轮护栏。这几个数字是「当前有多糟」的快照，用例只保证它们不再变糟。
+    //
+    // 为什么不是「一刀切禁止」：裸 catch 有 22 处、MainWindow 最大分部 2335 行，
+    // 要求一次清零只会让人把用例删掉。棘轮能真正落地——每次顺手改好一处，
+    // 就把上限往下调一格，退步则立刻红。
+    //
+    // 改好之后请把这里的数字调低，别只是让它继续过。
+    var violations = new List<string>();
+
+    void Ratchet(string what, int actual, int ceiling)
+    {
+        if (actual > ceiling)
+        {
+            violations.Add($"{what}：{actual} 超过上限 {ceiling}");
+        }
+    }
+
+    // 1) Services 层的裸 catch（没有异常类型、也没有 when 过滤）。
+    //    每一处都是「悄悄吞掉，出问题只能靠猜」的候选。
+    var bareCatches = 0;
+    foreach (var path in Directory.EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories))
+    {
+        bareCatches += File.ReadAllLines(path, Encoding.UTF8)
+            .Count(line => line.Trim() == "catch");
+    }
+
+    Ratchet("Services 层裸 catch", bareCatches, 19);
+
+    // 2) MainWindow 分部的体量。规约明写着「别把项目养成一个超大的 MainWindow」，
+    //    但没有任何机制拦住它长大。
+    var largestPartial = Directory.EnumerateFiles(".", "MainWindow*.cs")
+        .Select(path => File.ReadAllLines(path, Encoding.UTF8).Length)
+        .DefaultIfEmpty(0)
+        .Max();
+    Ratchet("MainWindow 最大分部行数", largestPartial, 2335);
+
+    // 3) 单文件 XAML。九个页面加十二个自建遮罩层全挤在这一个文件里。
+    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5522);
+
+    // 4) Services 最大单文件。
+    var largestService = Directory.EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories)
+        .Select(path => File.ReadAllLines(path, Encoding.UTF8).Length)
+        .DefaultIfEmpty(0)
+        .Max();
+    // 这个数字换过两次主了。三个 God Class 各拆过一轮：
+    //   UnrealProjectSyncService  3186 -> 896   （预览投影 / 素材分类 / 写回工具箱 / 清单解析）
+    //   CharacterWorkspaceService 1493 -> 1049  （Zip 备份 / 参考图 / 导出打包）
+    //   SequenceFrameService      1420 -> 714   （清单读写 / 帧池 / 目录布局 / 快照 / 分节构建）
+    // 现在最大的仍是 CharacterWorkspaceService，它还剩「工作区扫描 + 角色增删改名 +
+    // 元数据持久化 + 草稿读写」四件事，还能继续切，但边际收益已经明显下降了。
+    Ratchet("Services 最大单文件行数", largestService, 1049);
+
+    // 5) 断言源码文本的用例数。这类断言查的是变量名和换行位置，
+    //    改个命名就假报警，却拦不住逻辑写错——而且它们把反模式固化住了
+    //    （有一条直接断言 Click="XxxButton_Click"，等于规定不许改成 Command 绑定）。
+    //    只许往下走。
+    var ownSource = File.ReadAllText(
+        Path.Combine("Tests", "CrossingVoidZDTool.RegressionTests", "Program.cs"), Encoding.UTF8);
+    // 搜索串拆开拼，免得这一行把自己也算进去
+    var marker = "File.ReadAllText(Path.Combine(Directory." + "GetCurrentDirectory()";
+    var sourceTextAssertions = ownSource.Split(marker).Length - 1;
+    Ratchet("断言源码文本的用例", sourceTextAssertions, 49);
+
+    if (violations.Count > 0)
+    {
+        throw new InvalidOperationException(
+            "技术债棘轮退步了：" + Environment.NewLine + string.Join(Environment.NewLine, violations));
+    }
+}
+
+static (CharacterCard Character, CharacterInfoData Info, CharacterSkillsData Skills) BuildBlueprintSetupFixture(string root)
+{
+    var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴");
+    Directory.CreateDirectory(character.ToolFolderPath);
+    var info = new CharacterInfoData { Code = "Misaka", Name = "御坂美琴", FormLimit = 1 };
+    var skills = new CharacterSkillsData();
+    skills.FirstSkill.Add(new CharacterSkillEntry { TrueName = "超电磁炮" });
+    return (character, info, skills);
+}
+
+static UnrealBridgeChange CreateImageDeleteChange(string kind, string assetName)
+{
+    // 语义快照把素材分类塞在 PayloadJson 的第一段，分隔符是 0x1F
+    var payload = string.Join('\u001f', kind, assetName);
+    var unrealItem = new UnrealBridgeSnapshotItem(
+        $"material:{assetName}", $"module:{UnrealBridgeModule.BaseMaterials}",
+        UnrealBridgeModule.BaseMaterials, assetName, "unreal-hash", payload, string.Empty,
+        SourceObjectPath: $"/Game/AssetMaterial/ImageS/CharaterS/Misaka/{assetName}.{assetName}",
+        NormalizedName: assetName);
+    return new UnrealBridgeChange(
+        $"material:{assetName}", UnrealBridgeModule.BaseMaterials, assetName,
+        UnrealBridgeChangeKind.DeleteCandidate, null, unrealItem, false);
+}
+
+static void StaleImagesAreDeletableExceptUnclassified()
+{
+    // 以前只有序列帧的待删除能执行，于是 Unreal 侧多出来的图片和语音只能一直
+    // 挂在差异列表里，第三步的差异永远归不了零。
+    // 但「其他图片」是有意停在那儿的东西（还没归类、或压根不归工具箱管），
+    // 不能因为工具箱这边没有同名文件就当成多余资产删掉。
+    AssertEqual(true, UnrealBridgePublishSupportPolicy.CanExecute(
+        CreateImageDeleteChange(nameof(BaseMaterialKind.SkillIcon), "Misaka-SkillIcon-9")));
+    AssertEqual(true, UnrealBridgePublishSupportPolicy.CanExecute(
+        CreateImageDeleteChange(nameof(BaseMaterialKind.BattleAvatar), "Misaka-Avatar-9")));
+
+    // 其他图片：不许删
+    AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(
+        CreateImageDeleteChange(nameof(BaseMaterialKind.OtherImage), "Misaka-随手放的图")));
+
+    // 分类读不出来时也不许删——拿不准就留着，删错的代价高得多
+    AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(
+        CreateImageDeleteChange(string.Empty, "Misaka-来路不明")));
+
+    // 不知道删哪一个（没有对象路径）同样不许执行
+    var noPath = CreateImageDeleteChange(nameof(BaseMaterialKind.SkillIcon), "Misaka-SkillIcon-8");
+    AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(
+        noPath with { UnrealItem = noPath.UnrealItem! with { SourceObjectPath = string.Empty } }));
+}
+
+static void UnknownSkillStatesAreReported()
+{
+    // 「空」是合法取值（空中状态），没填也当空中——这两种都正常。
+    // 但认不出来的非空文本以前也一起无声变成 Air：角色 JSON 被手改过、
+    // 或从别处导入时，一个有意义的状态就这么被抹掉了。
+    AssertEqual("Normal", UnrealBlueprintSetupService.MapSkillStateToUnreal("常态"));
+    AssertEqual("Air", UnrealBlueprintSetupService.MapSkillStateToUnreal("空"));
+    AssertEqual("Air", UnrealBlueprintSetupService.MapSkillStateToUnreal(string.Empty));
+    AssertEqual("Defense", UnrealBlueprintSetupService.MapGuardStateToUnreal("防御"));
+    AssertEqual("Air", UnrealBlueprintSetupService.MapGuardStateToUnreal("空"));
+
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var (character, info, skills) = BuildBlueprintSetupFixture(root);
+        skills.FirstSkill[0].SkillState = "常態";  // 繁体，认不出来
+        var service = new UnrealBlueprintSetupService();
+
+        var threw = false;
+        try
+        {
+            service.BuildRequest(character, info, skills, []);
+        }
+        catch (Exception error)
+        {
+            threw = true;
+            AssertEqual(true, error.Message.Contains("常態", StringComparison.Ordinal));
+            AssertEqual(true, error.Message.Contains("技能状态", StringComparison.Ordinal));
+        }
+
+        AssertEqual(true, threw);
+
+        // 合法取值不该报错
+        skills.FirstSkill[0].SkillState = "常态";
+        skills.FirstSkill[0].GuardState = "空";
+        service.BuildRequest(character, info, skills, []);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void UnparsableSkillNumbersAreReportedNotZeroed()
+{
+    // 第六步以前对解析不了的数值一律 `: 0d` —— 技能倍率、护援值被静默写成 0，
+    // 扫描时看不出任何异常。又一例「显示成功但实际没做成」。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var (character, info, skills) = BuildBlueprintSetupFixture(root);
+        var service = new UnrealBlueprintSetupService();
+
+        // 空文本是常态（形态没填满），必须仍然当 0，不能报错
+        skills.FirstSkill[0].GuardValue = string.Empty;
+        service.BuildRequest(character, info, skills, []);
+
+        // 非空但解析不出来，必须抛，且要点名是哪个字段、原文是什么
+        skills.FirstSkill[0].GuardValue = "1,5";
+        var threw = false;
+        try
+        {
+            service.BuildRequest(character, info, skills, []);
+        }
+        catch (Exception error)
+        {
+            threw = true;
+            AssertEqual(true, error.Message.Contains("1,5", StringComparison.Ordinal));
+            AssertEqual(true, error.Message.Contains("Misaka", StringComparison.Ordinal));
+        }
+
+        AssertEqual(true, threw);
+
+        // 带单位的文本同理（技能编辑框不做数字校验，用户确实填得进去）
+        skills.FirstSkill[0].GuardValue = "1.5倍";
+        var threwAgain = false;
+        try
+        {
+            service.BuildRequest(character, info, skills, []);
+        }
+        catch (Exception)
+        {
+            threwAgain = true;
+        }
+
+        AssertEqual(true, threwAgain);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SkillNumbersSurviveCommaDecimalCulture()
+{
+    // 格式化用当前区域、解析用不变区域，这个不对称在小数点是逗号的区域下
+    // 必然坏掉：格式化写出 "1,5"，解析读不了，旧代码静默归 0。
+    // 这条用例一次钉死整族——不去逐个断言某处有没有写 InvariantCulture，
+    // 而是直接换个区域跑一遍往返。
+    var original = System.Globalization.CultureInfo.CurrentCulture;
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        System.Globalization.CultureInfo.CurrentCulture =
+            System.Globalization.CultureInfo.GetCultureInfo("de-DE");
+
+        var (character, info, skills) = BuildBlueprintSetupFixture(root);
+
+        // 走完整往返：Unreal 侧的数值 -> 回填成文本 -> 存进角色数据 -> 第六步再解析回去。
+        // 格式化用当前区域、解析用不变区域这个不对称，正是在这里断掉的。
+        var formatted = UnrealCharacterPreviewFactory.FormatDouble(1.5);
+        AssertEqual("1.5", formatted);
+        skills.FirstSkill[0].GuardValue = formatted;
+
+        // 在德语区域下拼请求：数值必须原样是 1.5，而不是被吞成 0
+        var request = new UnrealBlueprintSetupService().BuildRequest(character, info, skills, []);
+        var payload = JsonSerializer.Serialize(
+            request, UnrealBlueprintSetupJsonContext.Default.UnrealBlueprintSetupRequest);
+
+        // 落到载荷里的必须是英文句点写法，Python 侧才读得回来
+        AssertEqual(true, payload.Contains("1.5", StringComparison.Ordinal));
+        AssertEqual(false, payload.Contains("1,5", StringComparison.Ordinal));
+    }
+    finally
+    {
+        System.Globalization.CultureInfo.CurrentCulture = original;
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void DiagnosticItemsDoNotCountAsSucceededActions()
+{
+    // 序列同步的结果里混着一条 orphan-sequences 的诊断条目（孤儿序列解绑），
+    // 它不对应任何动作。以前它被算进「已成功的动作」，于是所有真实动作都失败时，
+    // 「一个都没成功就抛」的判断失效——界面报「已成功 1 个动作并写入基线」，
+    // 那个假 ID 还会被拿去生成基线条目。
+    var allFailed = new[]
+    {
+        new UnrealBridgeExecutionItemResult
+        {
+            StableId = "orphan-sequences", Succeeded = true, ItemKind = "diagnostic",
+        },
+        new UnrealBridgeExecutionItemResult
+        {
+            StableId = SequenceFrameIdentity.BuildActionStableId("Click"),
+            Succeeded = false, ItemKind = "action",
+        },
+    };
+    AssertEqual(0, UnrealBridgeExecutionItemResult.SelectSucceededActionStableIds(allFailed).Length);
+
+    // 真实动作成功了当然要算
+    var mixed = new[]
+    {
+        new UnrealBridgeExecutionItemResult
+        {
+            StableId = "orphan-sequences", Succeeded = true, ItemKind = "diagnostic",
+        },
+        new UnrealBridgeExecutionItemResult
+        {
+            StableId = "action:click", Succeeded = true, ItemKind = "action",
+        },
+    };
+    AssertSequence(["action:click"], UnrealBridgeExecutionItemResult.SelectSucceededActionStableIds(mixed));
+
+    // 别的脚本写出的结果不带 itemKind，缺省必须当成动作，否则会被整批滤掉
+    var legacy = new[]
+    {
+        new UnrealBridgeExecutionItemResult { StableId = "material:1", Succeeded = true },
+    };
+    AssertEqual("action", legacy[0].ItemKind);
+    AssertSequence(["material:1"], UnrealBridgeExecutionItemResult.SelectSucceededActionStableIds(legacy));
+
+    // 空 StableId 的条目也不算
+    var blank = new[]
+    {
+        new UnrealBridgeExecutionItemResult { StableId = string.Empty, Succeeded = true },
+    };
+    AssertEqual(0, UnrealBridgeExecutionItemResult.SelectSucceededActionStableIds(blank).Length);
+    AssertEqual(0, UnrealBridgeExecutionItemResult.SelectSucceededActionStableIds(null).Length);
+}
+
+static void ReplacingSettingsNotifiesDerivedProperties()
+{
+    // SettingsViewModel 里逐项修改的 setter 都记得通知，唯独「整份 _settings 被换掉」
+    // 这条路径没有——于是重新加载设置后，界面上的当前角色、上次编辑位置、
+    // 引擎与工程路径会停在旧值。
+    var viewModel = new SettingsViewModel(new AppSettingsService(), new ProjectRootMigrationService());
+    var changed = new List<string>();
+    viewModel.PropertyChanged += (_, e) => changed.Add(e.PropertyName ?? string.Empty);
+
+    viewModel.LoadAndEnsureProjectRoot();
+
+    foreach (var name in new[]
+             {
+                 nameof(SettingsViewModel.CurrentCharacterCode),
+                 nameof(SettingsViewModel.LastEditedCharacterCode),
+                 nameof(SettingsViewModel.LastEditedModuleTag),
+                 nameof(SettingsViewModel.UnrealEnginePath),
+                 nameof(SettingsViewModel.UnrealProjectPath),
+             })
+    {
+        if (!changed.Contains(name))
+        {
+            throw new InvalidOperationException($"重新加载设置后没有通知 {name}");
+        }
+    }
+}
+
+static void ProcessOrchestrationIsNotDuplicated()
+{
+    // 起进程、轮询、杀进程树这套编排原本在四个服务里各抄了一份，
+    // 除了轮询间隔各不相同之外还共享同样的两个坑（取消杀不掉、读到上一轮结果）。
+    // 收敛到 UnrealProcessRunner 之后，这条守卫挡住「下次又各自抄一份」。
+    // 扫整个 Services（含子目录），而不是写死几个文件名——
+    // 拆分会不断往子目录里搬东西，写死清单必然留下盲区。
+    // 只放过 Runner 自己：编排就该在那一个地方。
+    var runnerFileName = "UnrealProcessRunner.cs";
+    var shouldNotOrchestrate = Directory
+        .EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories)
+        .Where(path => !string.Equals(Path.GetFileName(path), runnerFileName, StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+
+    foreach (var path in shouldNotOrchestrate)
+    {
+        var source = File.ReadAllText(path, Encoding.UTF8);
+        foreach (var forbidden in new[] { "KillProcessTree", "entireProcessTree", "Process.Start" })
+        {
+            if (source.Contains(forbidden, StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    $"{path} 又自己编排进程了（出现 {forbidden}），应该走 UnrealProcessRunner。");
+            }
+        }
+    }
+}
+
+static void AtomicWriteLeavesNoTemporaryFile()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var path = Path.Combine(root, "data.json");
+        AtomicFileWriter.WriteAllText(path, "{\"a\":1}");
+        AssertEqual("{\"a\":1}", File.ReadAllText(path));
+
+        // 覆盖写：目标始终存在，且不留临时文件
+        AtomicFileWriter.WriteAllText(path, "{\"a\":2}");
+        AssertEqual("{\"a\":2}", File.ReadAllText(path));
+        AssertEqual(0, Directory.GetFiles(root, "*.tmp").Length);
+
+        // 临时名带 GUID，两次写入不会撞同一个临时文件
+        AssertEqual(1, Directory.GetFiles(root).Length);
+
+        // 写不进去时要如实抛出，并且不留半截临时文件
+        var directoryAsTarget = Path.Combine(root, "occupied");
+        Directory.CreateDirectory(directoryAsTarget);
+        var threw = false;
+        try
+        {
+            AtomicFileWriter.WriteAllText(directoryAsTarget, "x");
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            threw = true;
+        }
+
+        AssertEqual(true, threw);
+        AssertEqual(0, Directory.GetFiles(root, "*.tmp").Length);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void VoicePathPolicyBuildsCanonicalFolder()
+{
+    // UnrealBridgeVoicePathPolicy 是纯策略、零 IO，却一直没有任何测试覆盖，
+    // 而第三步语音改名的目标路径全靠它算。
+    const string current = "/Game/GameActor2D/Misaka/Sound/Other/Misaka-Defeat-1.Misaka-Defeat-1";
+
+    AssertEqual(true, UnrealBridgeVoicePathPolicy.TryBuildCanonicalObjectPath(
+        current, "{\"kind\":\"Defeat\"}", "Misaka-Defeat-1", out var defeatPath));
+    AssertEqual(
+        "/Game/GameActor2D/Misaka/Sound/Defeat/Misaka-Defeat-1.Misaka-Defeat-1",
+        defeatPath);
+
+    // 新加的音效分类要能落到自己的目录
+    AssertEqual(true, UnrealBridgeVoicePathPolicy.TryBuildCanonicalObjectPath(
+        current, "{\"kind\":\"SoundEffect\"}", "Misaka-SE-1", out var sePath));
+    AssertEqual(
+        "/Game/GameActor2D/Misaka/Sound/SoundEffect/Misaka-SE-1.Misaka-SE-1",
+        sePath);
+
+    // 连字符是合法的 Unreal 资产名字符，规范路径里必须原样保留
+    // （CONTEXT.md 的「语音规范名称」明确要求，不能改写成下划线）
+    AssertEqual(true, defeatPath.Contains("Misaka-Defeat-1", StringComparison.Ordinal));
+
+    // 认不出分类就不给目标路径，让调用方走原有的兜底
+    AssertEqual(false, UnrealBridgeVoicePathPolicy.TryBuildCanonicalObjectPath(
+        current, "{}", "Misaka-Defeat-1", out _));
+    AssertEqual(false, UnrealBridgeVoicePathPolicy.TryBuildCanonicalObjectPath(
+        current, "{\"kind\":\"Defeat\"}", string.Empty, out _));
+
+    // 路径里没有 /Sound/ 段时同样不给结论
+    AssertEqual(false, UnrealBridgeVoicePathPolicy.TryBuildCanonicalObjectPath(
+        "/Game/GameActor2D/Misaka/AssetMaterial/X.X", "{\"kind\":\"Defeat\"}", "X", out _));
+}
+
+static void VoiceClassificationIgnoresCharacterCodeNoise()
+{
+    const string sound = "/Game/GameActor2D/Misaka/Sound/Other";
+
+    // 失败语音的常见拼法都要认得。以前 token 只有 defeat/lose/failure，
+    // Vo_Fail1 这种识别不出来，会掉进待分配。
+    foreach (var assetName in new[] { "Vo_Defeat1", "Vo_Defeated1", "Vo_Lose1", "Vo_Fail1", "Vo_Lost1" })
+    {
+        AssertEqual(
+            VoiceMaterialKind.Defeat,
+            UnrealBridgeVoiceClassification.Classify(sound, assetName));
+    }
+
+    // ko / sub 这类两三个字母的 token 排在失败语音前面，
+    // 以前做子串匹配会被角色代号整批误伤：代号里带 ko 的角色（Kokona、Nakoruru）
+    // 所有语音都会被判成终结技语音。
+    foreach (var code in new[] { "Kokona", "Nakoruru", "Subaru", "Linkle", "Steam" })
+    {
+        AssertEqual(
+            VoiceMaterialKind.Defeat,
+            UnrealBridgeVoiceClassification.Classify($"/Game/GameActor2D/{code}/Sound/Other", "Vo_Defeat1"));
+    }
+
+    // 真正该命中的短 token 仍要命中
+    AssertEqual(VoiceMaterialKind.Ultimate, UnrealBridgeVoiceClassification.Classify(sound, "Vo_KO_1"));
+    AssertEqual(VoiceMaterialKind.Support, UnrealBridgeVoiceClassification.Classify(sound, "Vo-Sub-1"));
+    AssertEqual(VoiceMaterialKind.SoundEffect, UnrealBridgeVoiceClassification.Classify(sound, "Vo_SE_1"));
+    AssertEqual(VoiceMaterialKind.SoundEffect, UnrealBridgeVoiceClassification.Classify(sound, "Misaka_SoundEffect_1"));
+
+    // 认不出来的仍然进待分配
+    AssertEqual(VoiceMaterialKind.Other, UnrealBridgeVoiceClassification.Classify(sound, "Vo_Unknown_1"));
+}
+
+static void VoiceSpecsMatchBridgeScriptLabels()
+{
+    // 语音分类在 C# 和 Python 两边各有一份表，而且一条漂移校验都没有——
+    // 实际已经漂了（入队语音/编队语音、受击语音/受伤语音）。这里钉住它。
+    var scriptPath = Path.Combine("Tools", "UnrealBridge", "configure_unreal_light_settings.py");
+    var script = File.ReadAllText(scriptPath, Encoding.UTF8);
+    var start = script.IndexOf("VOICE_CATEGORY_LABELS = {", StringComparison.Ordinal);
+    AssertEqual(true, start >= 0);
+    var end = script.IndexOf("}", start, StringComparison.Ordinal);
+    AssertEqual(true, end > start);
+    var body = script[start..end];
+
+    foreach (var spec in VoiceMaterialService.Specs)
+    {
+        var expected = $"\"{spec.Kind}\": \"{spec.DisplayName}\"";
+        if (!body.Contains(expected, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"桥接脚本的语音标签与 VoiceMaterialService.Specs 不一致，缺少或写错：{expected}");
+        }
+    }
+}
+
+static void CorruptMetadataKeepsCharacterVisible()
+{
+    // character.json 坏掉时（写一半崩溃、被外部工具改坏），以前扫描直接跳过，
+    // 这个角色就从角色台上凭空消失——用户会以为素材全丢了，
+    // 而磁盘上的图片语音其实一个没少。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var service = new CharacterWorkspaceService();
+        CreateWorkspaceCharacterFolder(Path.Combine(root, "Draft"), "Misaka", "御坂美琴", isCompleted: false);
+        CreateWorkspaceCharacterFolder(Path.Combine(root, "Draft"), "ALO_Yuki", "结衣", isCompleted: false);
+        AssertEqual(2, service.LoadCharacters(root).Count);
+
+        // 把其中一个的元数据写成半截 JSON
+        var broken = Path.Combine(root, "Draft", "Misaka", "tool", "character.json");
+        File.WriteAllText(broken, "{\"Code\":\"Misa");
+
+        var cards = service.LoadCharacters(root);
+        // 角色必须还在，不能凭空消失
+        AssertEqual(2, cards.Count);
+        var recovered = cards.Single(card =>
+            string.Equals(card.Code, "Misaka", StringComparison.OrdinalIgnoreCase));
+        // 兜底卡片用目录名当代号，完成状态取自它所在的目录
+        AssertEqual(false, recovered.IsCompleted);
+        AssertEqual(true, Directory.Exists(recovered.FolderPath));
+
+        // 完全没有元数据文件的目录仍然不算角色
+        Directory.CreateDirectory(Path.Combine(root, "Draft", "随手建的空目录"));
+        AssertEqual(2, service.LoadCharacters(root).Count);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void CharacterDataWriteIsAtomic()
+{
+    // 这个函数名叫 WriteAllTextAtomic，但以前是「写临时文件 -> 删掉目标 -> 移过去」，
+    // 删和移之间崩溃就等于角色的技能、BUFF、信息整份消失。
+    // 没法真的在中途杀进程，退而验证两件可观察的事：
+    // 目标文件在整个过程中从不消失，且不会留下固定名的临时文件让并发写互相踩。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var service = new CharacterToolboxDataService();
+
+        service.Update(character, data => data.Skills = new CharacterSkillsData());
+        var dataPath = Path.Combine(character.ToolFolderPath, "ZDToolboxData.json");
+        AssertEqual(true, File.Exists(dataPath));
+
+        var workspace = new CharacterWorkspaceService();
+        for (var round = 0; round < 5; round++)
+        {
+            workspace.SaveDraft(character, "草稿第 " + round + " 轮");
+            // 每一轮之后目标文件都必须在，且内容完整可读
+            AssertEqual(true, File.Exists(dataPath));
+            AssertEqual("草稿第 " + round + " 轮", workspace.LoadDraft(character));
+        }
+
+        // 不许残留临时文件
+        var leftovers = Directory.GetFiles(character.ToolFolderPath, "*.tmp");
+        AssertEqual(0, leftovers.Length);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void ReclassifiedVoiceSurvivesBaselineFilter()
+{
+    // 用户报的：在工具箱里把一条语音从「待分配」归到「失败语音」，
+    // 第三步却怎么都同步不上去，Unreal 里那条一直躺在 Sound/Other。
+    //
+    // 差异服务其实判对了（Renamed，目标 Sound/Defeat），丢失发生在它之上：
+    // 恢复分步缓存时会拿基线把「已经同步过的」剔掉，而那个判定只比内容哈希。
+    // 改分类时文件字节没变、Unreal 那侧也没被动过，两个哈希都和基线一致，
+    // 于是这条 Renamed 被整条抹掉——界面还会因此报「全部素材无差异」。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var projectPath = Path.Combine(root, "CrossingVoid.uproject");
+        File.WriteAllText(projectPath, "{}");
+        var enginePath = Path.Combine(root, "UnrealEditor.exe");
+        File.WriteAllText(enginePath, "x");
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴") with { IsCompleted = true };
+        Directory.CreateDirectory(character.ToolFolderPath);
+
+        const string stableId = "voice:shared-sync-id";
+        const string oldRelative = "Sound/Other/Misaka-Defeat-1.wav";
+        const string newRelative = "Sound/Defeat/Misaka-Defeat-1.wav";
+        const string unrealPath = "/Game/GameActor2D/Misaka/Sound/Other/Misaka-Defeat-1.Misaka-Defeat-1";
+
+        // 工具箱侧已经归到 Defeat；Unreal 侧还在 Other。字节没变，所以两边哈希都和基线一致。
+        var toolboxItem = new UnrealBridgeSnapshotItem(
+            stableId, "module:Voices", UnrealBridgeModule.Voices, "失败语音 #1",
+            "wave-bytes-hash", "{\"kind\":\"Defeat\"}",
+            Path.Combine(character.FolderPath, "Sound", "Defeat", "Misaka-Defeat-1.wav"),
+            ToolboxRelativePath: newRelative,
+            NormalizedName: "Misaka-Defeat-1");
+        var unrealItem = new UnrealBridgeSnapshotItem(
+            stableId, "module:Voices", UnrealBridgeModule.Voices, "Misaka-Defeat-1",
+            "unreal-preview-hash", "{}", string.Empty,
+            SourceObjectPath: unrealPath,
+            OriginIdentity: "package-guid",
+            NormalizedName: "Misaka-Defeat-1");
+        var change = new UnrealBridgeChange(
+            stableId, UnrealBridgeModule.Voices, "失败语音 #1",
+            UnrealBridgeChangeKind.Renamed, toolboxItem, unrealItem, true);
+
+        // 基线记的是改分类之前的状态：路径还是 Other，哈希和现在一模一样
+        new UnrealBridgeStateService().Save(character, projectPath, new UnrealBridgeSyncState
+        {
+            CharacterCode = character.Code,
+            UnrealProjectPath = projectPath,
+            Entries =
+            {
+                [stableId] = new UnrealBridgeSyncStateEntry(
+                    "wave-bytes-hash",
+                    "unreal-preview-hash",
+                    unrealPath,
+                    "package-guid",
+                    oldRelative,
+                    "Misaka-Defeat-1"),
+            },
+        });
+
+        // 先把这条差异写进第三步的分步缓存
+        var writer = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        writer.Load(enginePath, projectPath);
+        writer.IsEngineToToolbox = false;
+        writer.RefreshDraftSources([character]);
+        writer.SelectSource(writer.CharacterSources.Single());
+        writer.ReturnToWorkflowStep(3);
+        writer.SetPublishSelectionTree(
+            UnrealSyncSelectionTreeBuilder.FromChanges(
+                [change], UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: true),
+            [change]);
+        writer.FlushSessionCache();
+
+        // 换一个视图模型从缓存恢复——这正是切角色/切步骤时走的那条路
+        var reader = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        reader.Load(enginePath, projectPath);
+        reader.IsEngineToToolbox = false;
+        reader.RefreshDraftSources([character]);
+        reader.SelectSource(reader.CharacterSources.Single());
+
+        var restored = reader.SelectionTreeRoots
+            .SelectMany(item => item.Children)
+            .Select(item => item.StableId)
+            .ToArray();
+        AssertSequence([stableId], restored);
+        // 只剩这一条差异时，绝不能对外宣称「全部素材无差异」
+        AssertEqual(false, reader.HasNoPublishChanges);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SingleItemSelectionRefreshesStepSelectionText()
+{
+    // 右栏那句「已选择 N / M 项」是按步骤算的，和导入摘要不是一回事。
+    // 第四、六步的单项勾选都记得通知它，唯独第三、五步这条路径漏了：
+    // 逐个勾选素材时计数一直卡在旧值，要点全选或切步骤才跳回来。
+    const string actionCode = "Sk1";
+    var changes = new List<UnrealBridgeChange>
+    {
+        // 树是「动作根 + 帧叶子」两层，少了根节点就建不出子项
+        new(
+            SequenceFrameIdentity.BuildActionStableId(actionCode),
+            UnrealBridgeModule.SequenceFrames,
+            actionCode,
+            UnrealBridgeChangeKind.Unchanged,
+            null,
+            null,
+            false,
+            SequenceFrameIdentity.BuildActionStableId(actionCode)),
+    };
+    for (var frame = 0; frame < 3; frame++)
+    {
+        changes.Add(CreateSequenceDeleteChange(
+            actionCode,
+            "/Game/GameActor2D/Misaka/Material/" + actionCode + "/F" + frame + ".F" + frame));
+    }
+
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    // 计数是按当前步骤算的，默认停在第一步会去数底层检测项
+    viewModel.ReturnToWorkflowStep(5);
+    var roots = UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
+        changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: false);
+    viewModel.SetPublishSelectionTree(roots, changes);
+    AssertEqual(true, viewModel.IsWorkflowStepLoaded(5));
+
+    var leaf = viewModel.SelectionTreeRoots.SelectMany(root => root.Children).First();
+    AssertEqual(false, leaf.IsChecked);
+    var before = viewModel.SelectedStepItemCount;
+
+    var changed = new List<string>();
+    viewModel.PropertyChanged += (_, e) => changed.Add(e.PropertyName ?? string.Empty);
+    leaf.IsChecked = true;
+
+    // 计数本身要变
+    AssertEqual(before + 1, viewModel.SelectedStepItemCount);
+    // 而且必须真的通知出去——否则界面上那行字不会动
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.StepSelectionText)));
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.SelectedStepItemCount)));
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.AreAllStepItemsSelected)));
+}
+
+static void ResetImportOperationRefreshesWorkspaceAndWorkflow()
+{
+    // 重置导入操作会清掉 _hasImportDetection 和 _loadedPublishStep，
+    // 中栏状态、能否进下一步、发布勾选是否就绪全都跟着变。
+    // 但它不动任何 ObservableCollection，所以中栏的集合监听在这条路径上
+    // 不会触发——不显式广播的话，中栏会停在上一刻的可见性上。
+    var changes = new List<UnrealBridgeChange>
+    {
+        new(
+            SequenceFrameIdentity.BuildActionStableId("Click"),
+            UnrealBridgeModule.SequenceFrames,
+            "Click",
+            UnrealBridgeChangeKind.Unchanged,
+            null,
+            null,
+            false,
+            SequenceFrameIdentity.BuildActionStableId("Click")),
+        CreateSequenceDeleteChange("Click", "/Game/GameActor2D/Misaka/Material/Click/F0.F0"),
+    };
+
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    viewModel.IsEngineToToolbox = true;
+    var roots = UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
+        changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: true);
+    viewModel.SetPublishSelectionTree(roots, changes);
+    viewModel.SetLoadedPublishStep(3);
+    AssertEqual(true, viewModel.HasContentDetection);
+
+    var changed = new List<string>();
+    viewModel.PropertyChanged += (_, e) => changed.Add(e.PropertyName ?? string.Empty);
+
+    // 导入方向 + 空树 -> 走到 ResetImportOperation
+    viewModel.SetPublishSelectionTree([], []);
+    viewModel.FailImportDetection("检测失败");
+
+    AssertEqual(false, viewModel.HasContentDetection);
+    AssertEqual(false, viewModel.IsWorkflowStepLoaded(3));
+    // 中栏必须被通知到，否则占位和内容可能双双隐藏
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.WorkspaceState)));
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.WorkspacePlaceholderVisibility)));
+    // 流程可用性也要被通知到
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.CanAdvanceWorkflow)));
+    AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.WorkflowNextButtonEnabled)));
+}
+
 static void WorkspaceReactsToRawCollectionChanges()
 {
     // 中栏空白反复出现的根因是「谁改了数据、谁负责通知」这条约定守不住：
@@ -5193,8 +6283,10 @@ static void CharacterOwnedPathsArePortableOnDisk()
 
         // 读回来必须还原成能直接喂给图片控件的绝对路径
         var reloaded = service.Load(character);
-        AssertEqual(iconPath, reloaded.Skills.FirstSkill[0].IconPath);
-        AssertEqual(iconPath, reloaded.Buffs.Buffs[0].IconPath);
+        AssertEqual(true, reloaded.Skills is not null);
+        AssertEqual(true, reloaded.Buffs is not null);
+        AssertEqual(iconPath, reloaded.Skills!.FirstSkill[0].IconPath);
+        AssertEqual(iconPath, reloaded.Buffs!.Buffs[0].IconPath);
         AssertEqual(true, File.Exists(reloaded.Buffs.Buffs[0].IconPath));
     }
     finally
@@ -5228,9 +6320,10 @@ static void PortablePathsSurviveCharacterFolderMove()
 
         var moved = CreateCharacter(completedFolder, "Misaka", "御坂美琴") with { IsCompleted = true };
         var reloaded = service.Load(moved);
+        AssertEqual(true, reloaded.Skills is not null);
         AssertEqual(
             Path.Combine(completedFolder, "AssetMaterial", "SkillIcon", "Misaka-1.png"),
-            reloaded.Skills.FirstSkill[0].IconPath);
+            reloaded.Skills!.FirstSkill[0].IconPath);
         AssertEqual(true, File.Exists(reloaded.Skills.FirstSkill[0].IconPath));
     }
     finally
@@ -6617,7 +7710,7 @@ static void UnrealLightConfigurationScriptUsesConfirmedWhitelist()
     AssertEqual(true, exportSource.Contains("UI_TeamSelect", StringComparison.Ordinal));
     AssertEqual(true, exportSource.Contains("CharVoice", StringComparison.Ordinal));
 
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadAllProjectXaml();
     AssertEqual(true, xaml.Contains("LightConfigurationItems", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("ApplyUnrealLightConfigurationButton_Click", StringComparison.Ordinal));
 }
@@ -7265,8 +8358,382 @@ static void UnrealBridgeExporterProducesVoiceBuckets()
     AssertEqual(true, script.Contains("output_path = os.path.join(folder, \"{}.wav\"", StringComparison.Ordinal));
     AssertEqual(true, script.Contains("_export_sound_wave(asset, export_root)", StringComparison.Ordinal));
     AssertEqual(true, script.Contains("\"schemaVersion\": 2", StringComparison.Ordinal));
-    AssertEqual(true, service.Contains("BuildVoiceBuckets(zdAssets, sequencePreview)", StringComparison.Ordinal));
+
+    // 这里原本还有一条 service.Contains("BuildVoiceBuckets(zdAssets, sequencePreview)")，
+    // 断言的是「某个方法名出现在某个文件里」。方法被抽到 UnrealMaterialClassifier
+    // 之后它只因为限定前缀不影响子串匹配才没红——纯属侥幸，而且它本来也拦不住
+    // 分桶逻辑写错。真正该验的行为放在下面那条独立用例里。
 }
+
+static void FailedBatchRenameRollsEverythingBack()
+{
+    // 批量重命名分两段：先全部改成临时名，再逐个落到目标名。
+    // 第二段中途失败时，前面几个已经落到目标名了——回滚以前只还原「还停在临时名」的，
+    // 于是一半改了名一半没改，编号从此对不上，而函数名叫 Atomic。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var first = Path.Combine(root, "a.png");
+        var second = Path.Combine(root, "b.png");
+        var third = Path.Combine(root, "c.png");
+        foreach (var path in new[] { first, second, third })
+        {
+            File.WriteAllText(path, Path.GetFileName(path));
+        }
+
+        // 让第三个的目标名落不下去：那儿摆一个同名目录。
+        // 前置检查看的是 File.Exists，目录不会被它拦住，所以能走到第二段才炸。
+        var blocked = Path.Combine(root, "3.png");
+        Directory.CreateDirectory(blocked);
+
+        var threw = false;
+        try
+        {
+            MaterialSequenceNaming.RenameFilesAtomically(
+            [
+                new MaterialPathRename(first, Path.Combine(root, "1.png")),
+                new MaterialPathRename(second, Path.Combine(root, "2.png")),
+                new MaterialPathRename(third, blocked),
+            ]);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            threw = true;
+        }
+
+        AssertEqual(true, threw);
+
+        // 三个源文件必须原封不动地回到原位，内容也不能串
+        AssertEqual(true, File.Exists(first));
+        AssertEqual(true, File.Exists(second));
+        AssertEqual(true, File.Exists(third));
+        AssertEqual("a.png", File.ReadAllText(first));
+        AssertEqual("b.png", File.ReadAllText(second));
+        AssertEqual("c.png", File.ReadAllText(third));
+
+        // 不许留下改了一半的目标名，也不许留下临时文件
+        AssertEqual(false, File.Exists(Path.Combine(root, "1.png")));
+        AssertEqual(false, File.Exists(Path.Combine(root, "2.png")));
+        AssertEqual(0, Directory.GetFiles(root, ".material-rename-*").Length);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void ManualAndAutomaticBackupsAreCappedSeparately()
+{
+    // 手动备份和自动备份各留 3 份，分开计数。这是有意为之：
+    // 导入失败时会自动打一份备份，如果和手动备份挤在同一个额度里，
+    // 连着几次导入失败就能把用户自己存的存档全顶掉。
+    // 但在此之前没有任何用例拦着有人把两个计数合并。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var workspace = new CharacterWorkspaceService();
+        var character = workspace.EnsureCharacterByCode(root, "Misaka", "御坂美琴").Character;
+        var backups = new CharacterBackupService();
+
+        for (var i = 0; i < 5; i++)
+        {
+            backups.BackupCharacter(character, $"手动 {i}");
+        }
+
+        var afterManual = backups.LoadCharacterBackups(character);
+        AssertEqual(3, afterManual.Count(entry => !entry.IsAutomatic));
+
+        for (var i = 0; i < 5; i++)
+        {
+            backups.BackupCharacter(character, $"自动 {i}", CharacterBackupKinds.Automatic);
+        }
+
+        var afterAutomatic = backups.LoadCharacterBackups(character);
+        // 自动的也是 3 份，而且手动那 3 份一份不能少
+        AssertEqual(3, afterAutomatic.Count(entry => entry.IsAutomatic));
+        AssertEqual(3, afterAutomatic.Count(entry => !entry.IsAutomatic));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SessionCacheKeepsCaseInsensitiveLookupAfterRoundTrip()
+{
+    // System.Text.Json 对「有 setter 的集合属性」默认新建一个默认比较器的实例再赋值，
+    // 声明处的 OrdinalIgnoreCase 就丢了——而这类丢失是静默的：
+    // 基线查不到就把已同步的素材判成新增/冲突，第三步差异永远归不了零。
+    // 声明处标了 [JsonObjectCreationHandling(Populate)] 才保得住，这条用例是它的回归网。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var projectPath = Path.Combine(root, "CrossingVoid.uproject");
+        File.WriteAllText(projectPath, "{}");
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴") with { IsCompleted = true };
+        Directory.CreateDirectory(character.ToolFolderPath);
+
+        var service = new UnrealSyncSessionCacheService();
+        var cache = new UnrealSyncSessionCache
+        {
+            ProtocolVersion = 3,
+            ProjectPath = projectPath,
+            SelectedCharacterCode = character.Code,
+            WorkflowStep = 3,
+        };
+        cache.NormalizationDecisions["aBcDeF"] = "redirect";
+        cache.SelectedStableIds.Add("aBcDeF");
+        AssertEqual(true, service.Write(character, projectPath, cache));
+
+        var loaded = service.LoadStep(character, projectPath, character.Code, 3);
+        AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, loaded.Status);
+        // 大小写不同也要查得到——落盘再读回之后比较器不能退化
+        AssertEqual(true, loaded.Cache!.NormalizationDecisions.ContainsKey("ABCDEF"));
+        AssertEqual(true, loaded.Cache.SelectedStableIds.Contains("ABCDEF"));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void VoiceAndSequenceServicesDoNotDependOnEachOther()
+{
+    // 这两个服务曾经互相引用，是全仓唯一的循环依赖：
+    // 序列帧那边要判断文件是不是 wav，语音那边要在重编号后回写序列帧绑定。
+    // 现在中间隔着 WaveFileFormat 和 SequenceVoiceBindingService，
+    // 这条守卫挡住「下次图省事又直接引回去」。
+    static string StripComments(string source) => string.Join(
+        Environment.NewLine,
+        source.Split('\n').Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+    var voice = StripComments(File.ReadAllText(
+        Path.Combine("Services", "VoiceMaterialService.cs"), Encoding.UTF8));
+    if (voice.Contains("SequenceFrameService", StringComparison.Ordinal))
+    {
+        throw new InvalidOperationException(
+            "VoiceMaterialService 又直接引用 SequenceFrameService 了，请走 SequenceVoiceBindingService。");
+    }
+
+    var sequenceFiles = new List<string> { Path.Combine("Services", "SequenceFrameService.cs") };
+    if (Directory.Exists(Path.Combine("Services", "SequenceFrames")))
+    {
+        sequenceFiles.AddRange(Directory.EnumerateFiles(
+            Path.Combine("Services", "SequenceFrames"), "*.cs", SearchOption.AllDirectories));
+    }
+
+    foreach (var path in sequenceFiles)
+    {
+        var source = StripComments(File.ReadAllText(path, Encoding.UTF8));
+        if (source.Contains("VoiceMaterialService", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{path} 又直接引用 VoiceMaterialService 了，请走 WaveFileFormat 或 SequenceVoiceBindingService。");
+        }
+    }
+}
+
+static void ExternalCancellationIsNotReportedAsFailure()
+{
+    // 取消不是失败。判定以前带着「而且必须是本命令自己的取消源」这个条件，
+    // 于是任务内部响应别处传进来的 token（全局进度条上的取消、窗口关闭时的联动取消）
+    // 时，会掉到通用的 Exception 分支，被当成执行失败弹给用户。
+    using var external = new CancellationTokenSource();
+    var failures = new List<Exception>();
+
+    var command = new AsyncRelayCommand(async () =>
+    {
+        await external.CancelAsync();
+        external.Token.ThrowIfCancellationRequested();
+    });
+    command.ExecutionFailed += (_, error) => failures.Add(error);
+
+    command.ExecuteAsync().GetAwaiter().GetResult();
+    AssertEqual(0, failures.Count);
+
+    // 真正的异常仍然要报出来，别把这条路修成什么都吞
+    var realFailures = new List<Exception>();
+    var failing = new AsyncRelayCommand(() => throw new InvalidOperationException("真的炸了"));
+    failing.ExecutionFailed += (_, error) => realFailures.Add(error);
+    failing.ExecuteAsync().GetAwaiter().GetResult();
+    AssertEqual(1, realFailures.Count);
+    AssertEqual("真的炸了", realFailures[0].Message);
+}
+
+static void WriteBackSkillIdentityMatchesSnapshot()
+{
+    // 技能的稳定身份由三处各自拼一遍：语义快照、导入时的选中判定、写回工具箱。
+    // 三边必须逐字一致——曾经有两边把 suffix 和 slotKey 写反了，
+    // 结果「从虚幻导入角色时技能一条都进不来」，而且不报任何错。
+    //
+    // 这条用例真的跑一遍写回、再和快照比对，而不是去数源码里的字符串。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var workspace = new CharacterWorkspaceService();
+        var character = workspace.EnsureCharacterByCode(root, "Misaka", "御坂美琴").Character;
+
+        var stage = new UnrealProjectSyncSkillStagePreview(
+            1, "一技能", "超电磁炮", "介绍", "3", "2", "1", "常态", "空", "0",
+            string.Empty, string.Empty, string.Empty, []);
+        var coreSlot = new UnrealProjectSyncSkillSlotPreview(
+            "SkillSlot1", "一技能", true, true, string.Empty, [stage]);
+        var supportSlot = new UnrealProjectSyncSkillSlotPreview(
+            "SkillSlot4", "护援技", true, false, "未读取", []);
+        var skills = new UnrealProjectSyncSkillsPreview(
+            true, string.Empty, string.Empty, string.Empty, [coreSlot], supportSlot, []);
+
+        var candidate = new UnrealProjectSyncCharacterCandidate(
+            "Misaka", "御坂美琴", string.Empty, string.Empty, 1, 0,
+            new UnrealProjectSyncCharacterInfoPreview(
+                string.Empty, string.Empty, false, string.Empty, string.Empty, string.Empty,
+                [], [], 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            skills,
+            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], [], []),
+            new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
+            [],
+            hasLatestData: true);
+
+        // 写回：第一个核心槽的后缀是 core:0
+        var written = new UnrealToolboxWriteBackService()
+            .SyncSkillStageToToolbox(character, candidate, coreSlot, 0, "core:0");
+        AssertEqual(1, written);
+
+        var syncId = new CharacterSkillsService().Load(character).FirstSkill[0].SyncId;
+        AssertEqual(false, string.IsNullOrWhiteSpace(syncId));
+
+        // 快照侧对同一个槽位算出来的身份必须一模一样
+        var snapshot = new UnrealBridgeSemanticSnapshotService().Build(candidate);
+        var skillItem = snapshot.Items.Single(item => item.Module == UnrealBridgeModule.Skills);
+        AssertEqual($"skill:{syncId}", skillItem.StableId);
+
+        // 顺带钉住字段顺序：suffix 必须排在 slotKey 之前。
+        // 写反了上面那条也会红，但那时只知道「对不上」，不知道错在哪。
+        AssertEqual(
+            $"skill:{UnrealBridgeSemanticSnapshotService.CreateOriginIdentity("Misaka|skill|core:0|SkillSlot1|0")}",
+            skillItem.StableId);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void EveryOverlayCanBeDismissed()
+{
+    // 这些遮罩层不是 ContentDialog，而是铺满窗口的 Grid，关闭手势得自己接。
+    // 新增一个却忘了接，用户就只能重启程序——而这种事没人会去逐个点一遍。
+    //
+    // 这条用例只管「有没有关法」，不管是哪种：各遮罩层的手势本来就不一样
+    // （草稿层点外面只吞不关、裁切器只认右键、序列帧管理器只认左键），
+    // 那些差异是有道理的，不该被强行统一。
+    var xamlPath = Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml");
+    var document = XDocument.Load(xamlPath);
+    XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+
+    var named = document.Descendants()
+        .Where(element => element.Attribute(x + "Name") is not null)
+        .ToDictionary(
+            element => element.Attribute(x + "Name")!.Value,
+            element => element,
+            StringComparer.Ordinal);
+
+    foreach (var overlayName in OverlayDismiss.DismissibleOverlayNames)
+    {
+        if (!named.TryGetValue(overlayName, out var overlay))
+        {
+            throw new InvalidOperationException(
+                $"清单里的遮罩层 {overlayName} 在 MainWindow.xaml 里找不到了——" +
+                "要么改名了，要么删了，请同步更新 OverlayDismiss.DismissibleOverlayNames。");
+        }
+
+        var gestures = new[] { "Tapped", "RightTapped", "KeyDown" }
+            .Where(attribute => !string.IsNullOrWhiteSpace(overlay.Attribute(attribute)?.Value))
+            .ToArray();
+        if (gestures.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"遮罩层 {overlayName} 一个关闭手势都没接，打开之后关不掉。");
+        }
+    }
+
+    // 反过来也要盯：XAML 里新出现的全屏遮罩层必须进清单，
+    // 否则这条护栏会随着新增遮罩层慢慢失效。
+    // 判据用「盖满整个窗口 + 有独立层级」，这正是自建遮罩层的形态。
+    var known = new HashSet<string>(OverlayDismiss.DismissibleOverlayNames, StringComparer.Ordinal);
+    foreach (var pair in OverlayDismiss.NonDismissibleOverlays)
+    {
+        known.Add(pair.Key);
+    }
+
+    XNamespace canvas = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+    foreach (var (name, element) in named)
+    {
+        var spansAllRows = string.Equals(
+            element.Attribute("Grid.RowSpan")?.Value, "2", StringComparison.Ordinal);
+        var hasLayer = !string.IsNullOrWhiteSpace(element.Attribute("Canvas.ZIndex")?.Value);
+        if (spansAllRows && hasLayer && !known.Contains(name))
+        {
+            throw new InvalidOperationException(
+                $"MainWindow.xaml 里新增了全屏遮罩层 {name}，但它不在 OverlayDismiss 的清单里。" +
+                "请把它加进 DismissibleOverlayNames，或者说明它为什么不需要关闭手势。");
+        }
+    }
+}
+
+static void VoiceBucketsFallBackToNameWhenSequenceSaysOther()
+{
+    // 第一批修的那条：一条失败语音只要被任何一个「不认识的动作」的 PlaySound
+    // 通知引用过，序列反推就返回 Other，而以前只要反推命中就直接采用、
+    // 绝不回退到按名字识别 —— 文件名里明写着 Defeat 也没用。
+    // 标准动作表有 19 个，反推只认得其中 9 个，所以这条触发得相当容易。
+    const string voicePath = "/Game/GameActor2D/Misaka/Sound/Defeat/Misaka-Defeat-1.Misaka-Defeat-1";
+
+    var asset = new UnrealProjectExportAsset
+    {
+        AssetName = "Misaka-Defeat-1",
+        AssetClass = "SoundWave",
+        PackagePath = "/Game/GameActor2D/Misaka/Sound/Defeat",
+        ObjectPath = voicePath,
+    };
+
+    // Dodge 是标准动作，但反推的 switch 不认得它 -> 返回 Other
+    var dodge = CreateVoiceCarryingAction("Dodge", voicePath);
+    var preview = new UnrealProjectSyncSequenceFramesPreview(
+        true, false, string.Empty, string.Empty, [dodge], [], [], [], []);
+
+    var buckets = UnrealMaterialClassifier.BuildVoiceBuckets([asset], preview);
+    var bucket = buckets.Single(item => item.Assets.Any(entry => entry.AssetName == "Misaka-Defeat-1"));
+    AssertEqual(VoiceMaterialKind.Defeat.ToString(), bucket.Kind);
+
+    // 反推认得的动作仍然以反推为准：这条语音名字里没有任何分类线索，
+    // 全靠 Click 这个动作定性。
+    var clickOnly = new UnrealProjectExportAsset
+    {
+        AssetName = "Misaka-Vo-7",
+        AssetClass = "SoundWave",
+        PackagePath = "/Game/GameActor2D/Misaka/Sound/Other",
+        ObjectPath = "/Game/GameActor2D/Misaka/Sound/Other/Misaka-Vo-7.Misaka-Vo-7",
+    };
+    var click = CreateVoiceCarryingAction("Click", clickOnly.ObjectPath);
+    var clickPreview = new UnrealProjectSyncSequenceFramesPreview(
+        true, false, string.Empty, string.Empty, [click], [], [], [], []);
+    var clickBuckets = UnrealMaterialClassifier.BuildVoiceBuckets([clickOnly], clickPreview);
+    AssertEqual(
+        VoiceMaterialKind.Click.ToString(),
+        clickBuckets.Single(item => item.Assets.Any(entry => entry.AssetName == "Misaka-Vo-7")).Kind);
+}
+
+static UnrealProjectSyncSequenceActionPreview CreateVoiceCarryingAction(string actionCode, string voiceObjectPath) =>
+    new(
+        actionCode, actionCode, string.Empty, "base", string.Empty, true,
+        [1], 1, 1, 0, 0, 0, 12, [], [],
+        SoundNotifies:
+        [
+            new UnrealProjectSyncSequenceSoundNotifyPreview(
+                0, 0, 0, voiceObjectPath, "Misaka-Defeat-1", "SoundWave", string.Empty,
+                IsCharacterVoice: true),
+        ]);
 
 static void UnrealBridgeSequenceVoiceNotificationsClassifyAndBindFrames()
 {
@@ -9879,6 +11346,29 @@ static int RunPortablePathMigration(string[] args)
 /// 假的界面侧。记下控制器要求检测了哪几步、说了什么话，
 /// 这样六步编排可以整段跑起来断言，而不用去匹配 MainWindow 的源码文本。
 /// </summary>
+static string ReadAllProjectXaml()
+{
+    // 界面结构要按「整个界面」来断言，不能只盯 MainWindow.xaml 一个文件。
+    //
+    // 这批断言以前逐字读 MainWindow.xaml，等于规定所有界面都必须写在那一个
+    // 5522 行的文件里：把十二个自建遮罩层抽成 Controls/*.xaml 会让它们集体失败，
+    // 而功能一点没坏，只是字符串搬了家。测试不该把反模式钉死。
+    //
+    // 断言「不存在」的那几条也一并受益——它们本来就该保证整个界面里都没有。
+    var files = Directory
+        .EnumerateFiles(Directory.GetCurrentDirectory(), "*.xaml", SearchOption.AllDirectories)
+        .Where(path => !path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase)
+            && !path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.OrdinalIgnoreCase))
+        .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+        .ToArray();
+    if (files.Length == 0)
+    {
+        throw new InvalidOperationException("没有找到任何 XAML 文件，工作目录可能不对（请在仓库根目录运行）。");
+    }
+
+    return string.Join(Environment.NewLine, files.Select(path => File.ReadAllText(path, Encoding.UTF8)));
+}
+
 sealed class FakeWorkflowHost : IUnrealSyncWorkflowHost
 {
     public List<int> DetectedSteps { get; } = [];
@@ -9899,6 +11389,11 @@ sealed class FakeWorkflowHost : IUnrealSyncWorkflowHost
     public void Notify(UnrealSyncNotice notice) => Notices.Add(notice);
 
     public void Log(string message) => Logs.Add(message);
+}
+
+sealed class CollectingLogSink(List<string> messages) : IToolboxLogSink
+{
+    public void Write(ToolboxLogLevel level, string message, Exception? error) => messages.Add(message);
 }
 
 sealed class SingleThreadTestSynchronizationContext : SynchronizationContext, IDisposable

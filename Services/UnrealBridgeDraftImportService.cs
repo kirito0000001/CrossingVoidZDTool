@@ -9,19 +9,28 @@ namespace CrossingVoidZDTool.Services;
 internal sealed class UnrealBridgeDraftImportService
 {
     private readonly CharacterWorkspaceService _workspaceService;
-    private readonly UnrealProjectSyncService _semanticImportService;
+
+    // 写回工具箱那一段原本长在 UnrealProjectSyncService 上，这里注入的是从它里面抽出来的
+    // UnrealToolboxWriteBackService——本类只需要「写回」，不需要找引擎、跑 commandlet、读清单。
+    private readonly UnrealToolboxWriteBackService _writeBackService;
+
+    // 导入失败要能整个退回去，所以还需要角色备份。它以前是从
+    // CharacterWorkspaceService 上顺手拿的，那个类因此一直背着备份职责。
+    private readonly CharacterBackupService _backupService;
 
     public UnrealBridgeDraftImportService()
-        : this(new CharacterWorkspaceService(), new UnrealProjectSyncService())
+        : this(new CharacterWorkspaceService(), new UnrealToolboxWriteBackService(), new CharacterBackupService())
     {
     }
 
     internal UnrealBridgeDraftImportService(
         CharacterWorkspaceService workspaceService,
-        UnrealProjectSyncService semanticImportService)
+        UnrealToolboxWriteBackService writeBackService,
+        CharacterBackupService? backupService = null)
     {
         _workspaceService = workspaceService;
-        _semanticImportService = semanticImportService;
+        _writeBackService = writeBackService;
+        _backupService = backupService ?? new CharacterBackupService();
     }
 
     public UnrealBridgeDraftImportResult Import(
@@ -65,7 +74,7 @@ internal sealed class UnrealBridgeDraftImportService
         CharacterBackupEntry? rollbackBackup = null;
         if (!ensureResult.CreatedNewFolder)
         {
-            rollbackBackup = _workspaceService.BackupCharacter(
+            rollbackBackup = _backupService.BackupCharacter(
                 character,
                 "从虚幻导入前自动保护",
                 CharacterBackupKinds.Automatic);
@@ -76,7 +85,7 @@ internal sealed class UnrealBridgeDraftImportService
             var importedModules = new List<UnrealBridgeModule>();
             if (selectedStableIds.Contains("character:info") && candidate.CharacterInfo.HasItemData)
             {
-                _semanticImportService.SyncCharacterInfoToToolbox(character, candidate);
+                _writeBackService.SyncCharacterInfoToToolbox(character, candidate);
                 importedModules.Add(UnrealBridgeModule.CharacterInfo);
             }
 
@@ -109,7 +118,7 @@ internal sealed class UnrealBridgeDraftImportService
             {
                 foreach (var action in selectedActions)
                 {
-                    _semanticImportService.SyncSequenceActionToToolbox(character, action);
+                    _writeBackService.SyncSequenceActionToToolbox(character, action);
                 }
 
                 AssignImportedSequenceIdentities(character, candidate, selectedStableIds);
@@ -124,7 +133,7 @@ internal sealed class UnrealBridgeDraftImportService
             {
                 foreach (var buff in selectedBuffs)
                 {
-                    _semanticImportService.SyncBuffToToolbox(character, buff);
+                    _writeBackService.SyncBuffToToolbox(character, buff);
                 }
 
                 AssignImportedBuffIdentities(character, candidate, selectedStableIds);
@@ -172,7 +181,7 @@ internal sealed class UnrealBridgeDraftImportService
                 throw new InvalidOperationException("已有 Draft 导入失败，但没有可用于自动恢复的备份。");
             }
 
-            _workspaceService.RestoreCharacterBackup(character, rollbackBackup);
+            _backupService.RestoreCharacterBackup(character, rollbackBackup);
             return;
         }
 
@@ -324,7 +333,7 @@ internal sealed class UnrealBridgeDraftImportService
             {
                 if (selectedStableIds.Contains(GetSkillStableId(candidate.Code, slot.SlotKey, suffix, stageIndex)))
                 {
-                    importedCount += _semanticImportService.SyncSkillStageToToolbox(
+                    importedCount += _writeBackService.SyncSkillStageToToolbox(
                         character, candidate, slot, stageIndex, suffix);
                 }
             }
@@ -337,7 +346,7 @@ internal sealed class UnrealBridgeDraftImportService
             if (link.SkillSlot.Stages.Count > 0 &&
                 selectedStableIds.Contains(GetSkillStableId(candidate.Code, link.SkillSlot.SlotKey, suffix, 0)))
             {
-                importedCount += _semanticImportService.SyncLinkSkillToToolbox(character, candidate, link, suffix);
+                importedCount += _writeBackService.SyncLinkSkillToToolbox(character, candidate, link, suffix);
             }
         }
 
@@ -381,7 +390,12 @@ internal sealed class UnrealBridgeDraftImportService
                     : VoiceMaterialKind.Other;
                 var objectPath = NormalizeObjectPath(item.Asset.ObjectPath);
                 return (
-                    Kind: sequenceKinds.TryGetValue(objectPath, out var sequenceKind) ? sequenceKind : fallbackKind,
+                    // 反推得 Other 时要退回上一层的分类结论，理由同 UnrealProjectSyncService：
+                    // 十九个标准动作里有十个反推不出分类，一律返回 Other。
+                    Kind: sequenceKinds.TryGetValue(objectPath, out var sequenceKind)
+                        && sequenceKind != VoiceMaterialKind.Other
+                        ? sequenceKind
+                        : fallbackKind,
                     Asset: item.Asset,
                     ObjectPath: objectPath);
             })

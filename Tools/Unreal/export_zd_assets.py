@@ -122,6 +122,17 @@ def _load_previous_manifest(path):
         return {}
 
 
+def _path_starts_with(value, prefix):
+    """包路径的前缀比较，一律忽略大小写。
+
+    UE 里包路径本来就是大小写不敏感的（FName 比较就不敏感），磁盘上目录叫
+    Material 还是 material 全看当初是谁建的。用 str.startswith 死比大小写，
+    对不上的资产会被静默丢掉：清单照样写出、导出照样报成功，用户只看到
+    "这个角色什么都没有"。
+    """
+    return _to_text(value).lower().startswith(_to_text(prefix).lower())
+
+
 def _character_code_from_package_path(package_path, root_path):
     package_path = _to_text(package_path).strip().rstrip("/")
     root_path = _to_text(root_path).strip().rstrip("/")
@@ -374,13 +385,17 @@ def _png_is_up_to_date(output_path, package_name):
 
 def _export_texture_png(asset_data, export_root):
     package_path = _to_text(asset_data.package_path)
-    if package_path.startswith(BASE_MATERIAL_ROOT + "/"):
+    # 分支判定全部走小写：磁盘目录写成 material/ 时，原来的 "/Material/" in ...
+    # 会漏判，贴图掉进最后的 else 直接返回 ""，exportedFilePath 于是是空的——
+    # 界面上这个动作有帧、没预览图，也没法跟本地素材比对，而导出全程不报错。
+    lowered_package = package_path.lower()
+    if _path_starts_with(package_path, BASE_MATERIAL_ROOT + "/"):
         source_root = BASE_MATERIAL_ROOT
         output_root_name = "Images"
-    elif package_path.startswith(CHARACTER_ACTOR_ROOT + "/") and "/Material/" in package_path:
+    elif _path_starts_with(package_path, CHARACTER_ACTOR_ROOT + "/") and "/material/" in lowered_package:
         source_root = CHARACTER_ACTOR_ROOT
         output_root_name = "SequenceFrames"
-    elif package_path.startswith(CHARACTER_ACTOR_ROOT + "/") and "/buff" in package_path.lower():
+    elif _path_starts_with(package_path, CHARACTER_ACTOR_ROOT + "/") and "/buff" in lowered_package:
         source_root = CHARACTER_ACTOR_ROOT
         output_root_name = "BuffIcons"
     else:
@@ -1216,7 +1231,10 @@ def _content_path_to_disk(project_path, content_path):
     project_dir = os.path.dirname(project_path)
     relative = content_path.strip("/")
     game_prefix = "Game/"
-    if relative.startswith(game_prefix):
+    # 跟隔壁 _package_file_path 保持一致：那边已经是 .lower().startswith("/game/")。
+    # 前缀没剥掉会算出 Content/Game/... 这种多套一层的路径，os.path.isfile 判 False，
+    # 于是"资产不在盘上"，静默走空数据分支。
+    if relative.lower().startswith(game_prefix.lower()):
         relative = relative[len(game_prefix):]
     return os.path.join(project_dir, "Content", *relative.split("/"))
 
@@ -1243,7 +1261,10 @@ def _export_character_items_from_disk(project_path):
         if not file_name.lower().endswith(".uasset"):
             continue
         asset_name = os.path.splitext(file_name)[0]
-        if not asset_name.startswith("Item_"):
+        # 同一个函数上一行已经是 file_name.lower().endswith(".uasset")，这里却死比大小写：
+        # ITEM_Misaka.uasset 会被整条丢掉，角色列表里直接没这个人。
+        # 下面 asset_name[5:] 是按下标切的，跟大小写无关。
+        if not asset_name.lower().startswith("item_"):
             continue
 
         object_path = "{}/{}.{}".format(CHAR_ITEM_ROOT, asset_name, asset_name)
@@ -1285,7 +1306,8 @@ def _export_character_items(registry, project_path):
     seen_codes = set()
     for asset in found:
         asset_name = _to_text(asset.asset_name)
-        if not asset_name.startswith("Item_"):
+        # 与上面的磁盘回退用同一判据，否则两条路径认出来的角色集合会不一样。
+        if not asset_name.lower().startswith("item_"):
             continue
 
         try:
@@ -1369,12 +1391,17 @@ def _export_character_actors(manifest_assets):
     for asset_data in manifest_assets:
         package_path = asset_data.get("packagePath", "")
         asset_name = asset_data.get("assetName", "")
-        if not package_path.startswith(CHARACTER_ACTOR_ROOT + "/"):
+        if not _path_starts_with(package_path, CHARACTER_ACTOR_ROOT + "/"):
             continue
         relative = package_path[len(CHARACTER_ACTOR_ROOT) + 1:]
         if "/" in relative:
             continue
-        if asset_name != relative:
+        # 这里认的是"文件夹同名的那个蓝图"。文件夹 Misaka/ 里蓝图叫 MISAKA 时，
+        # 死比大小写就整个角色都不进 character_actors——序列导出、BUFF 导出
+        # 一并跳过，而清单照样写出、导出照样报成功，用户只看到"这个角色什么都没有"。
+        # code 仍取文件夹名：actor_asset_map 和 _split_character_actor_relative_path
+        # 都按文件夹名建索引，换成资产名会把它们全对不上。
+        if asset_name.lower() != relative.lower():
             continue
 
         object_path = asset_data.get("objectPath", "")
@@ -1407,7 +1434,10 @@ def _sequence_object_path_array(obj, property_name):
 
 def _split_character_actor_relative_path(package_path, code):
     prefix = CHARACTER_ACTOR_ROOT + "/" + code + "/"
-    if not package_path.startswith(prefix):
+    # code 来自文件夹名、package_path 来自资产注册表，正常情况下拼写一致；
+    # 但这是"路径按大小写比"的同一族写法，比不上就是这个角色的资产一条都分不了类
+    # （序列不认、素材不认）。切片按下标做，不受影响。
+    if not _path_starts_with(package_path, prefix):
         return []
     relative = package_path[len(prefix):].strip("/")
     return [part for part in relative.split("/") if part]
@@ -1676,12 +1706,17 @@ def _object_path_matches_asset(asset, object_path):
     text = str(object_path or "")
     if not text:
         return False
+    # 路径一律按小写比。传进来的 object_path 有相当一部分不是注册表给的，而是
+    # _collect_referenced_object_paths 从属性文本里正则扫出来的，拼写不保证一致；
+    # 比不上就是"这张贴图/这个音效在清单里查无此物"，对应的帧或语音静默少一条。
+    lowered = text.lower()
     asset_object_path = asset.get("objectPath", "")
-    if text == asset_object_path:
+    if lowered == asset_object_path.lower():
         return True
     asset_name = asset.get("assetName", "")
     package_path = asset.get("packagePath", "")
-    return bool(asset_name and package_path and text.endswith("{}/{}.{}".format(package_path, asset_name, asset_name)))
+    return bool(asset_name and package_path and lowered.endswith(
+        "{}/{}.{}".format(package_path, asset_name, asset_name).lower()))
 
 
 def _asset_path_matches(asset, value):
@@ -1690,14 +1725,16 @@ def _asset_path_matches(asset, value):
         return False
     if _object_path_matches_asset(asset, text):
         return True
+    # 同上：包名/包路径的比对同样不该受大小写影响。
+    lowered = text.lower()
     package_name = asset.get("packageName", "")
     package_path = asset.get("packagePath", "")
     asset_name = asset.get("assetName", "")
-    if package_name and text == package_name:
+    if package_name and lowered == package_name.lower():
         return True
-    if package_path and asset_name and text in (
-        "{}/{}".format(package_path, asset_name),
-        "{}/{}.{}".format(package_path, asset_name, asset_name),
+    if package_path and asset_name and lowered in (
+        "{}/{}".format(package_path, asset_name).lower(),
+        "{}/{}.{}".format(package_path, asset_name, asset_name).lower(),
     ):
         return True
     return False
@@ -2009,10 +2046,10 @@ def _export_sound_wave(asset_data, export_root):
         asset = unreal.load_asset(_object_path(asset_data))
     if asset is None:
         return ""
-    if package_path.startswith(CHARACTER_ACTOR_ROOT + "/"):
+    if _path_starts_with(package_path, CHARACTER_ACTOR_ROOT + "/"):
         relative_package = package_path[len(CHARACTER_ACTOR_ROOT) + 1:]
         folder = os.path.join(export_root, "Voices", *relative_package.split("/")[:-1])
-    elif package_path.startswith(SHARED_BATTLE_EFFECT_ROOT):
+    elif _path_starts_with(package_path, SHARED_BATTLE_EFFECT_ROOT):
         relative_package = package_path[len(SHARED_BATTLE_EFFECT_ROOT):].strip("/")
         folder = os.path.join(export_root, "Shared", "Audio", "BattleEffects", *relative_package.split("/")[:-1])
     else:
@@ -2281,7 +2318,7 @@ def _build_sequence_actions(code, obj, actor_asset, actor_asset_map, manifest_as
             bucket["animSequences"],
             all_actor_assets + [
                 asset for asset in manifest_assets
-                if asset.get("packagePath", "").startswith(SHARED_BATTLE_EFFECT_ROOT)
+                if _path_starts_with(asset.get("packagePath", ""), SHARED_BATTLE_EFFECT_ROOT)
             ],
             code,
             frames_per_second,
@@ -2328,7 +2365,7 @@ def _export_character_sequences(character_actors, manifest_assets, project_path)
     actor_asset_map = {}
     for asset in manifest_assets:
         package_path = asset.get("packagePath", "")
-        if not package_path.startswith(CHARACTER_ACTOR_ROOT + "/"):
+        if not _path_starts_with(package_path, CHARACTER_ACTOR_ROOT + "/"):
             continue
         relative = package_path[len(CHARACTER_ACTOR_ROOT) + 1:]
         code = relative.split("/", 1)[0] if relative else ""
@@ -2410,7 +2447,11 @@ def _is_dream_task_buff_by_disk(project_path, object_path):
     if not disk_path or not os.path.isfile(disk_path):
         return False
     try:
-        data = open(disk_path, "rb").read()
+        # 必须用 with。脚本跑在长驻的编辑器进程里，靠引用计数收句柄的前提是没人留住栈帧，
+        # 而这里任何一次异常都会把帧挂在 traceback 上。Windows 的文件锁是强制的：
+        # 句柄没放，编辑器再保存/改名这个 .uasset 就会失败。
+        with open(disk_path, "rb") as source:
+            data = source.read()
     except Exception:
         return False
     markers = [
@@ -2448,7 +2489,7 @@ def _export_texture_object_png(texture, object_path, export_root):
 
     asset_name = _safe_file_name(_asset_name_from_object_path(object_path) or _to_text(_get_editor_property(texture, "Name")) or "BuffIcon")
     folder = os.path.join(export_root, "BuffIcons", "Direct")
-    if object_path.startswith(CHARACTER_ACTOR_ROOT + "/"):
+    if _path_starts_with(object_path, CHARACTER_ACTOR_ROOT + "/"):
         package_path = object_path.split(".", 1)[0]
         relative_package = package_path[len(CHARACTER_ACTOR_ROOT) + 1:]
         folder = os.path.join(export_root, "BuffIcons", *relative_package.split("/")[:-1])
@@ -2487,7 +2528,9 @@ def _find_exported_asset_for_object_path(manifest_assets, object_path):
         return None
     asset_name = _asset_name_from_object_path(normalized)
     for asset in manifest_assets:
-        if _normalize_object_path_text(asset.get("objectPath", "")) == normalized:
+        # 紧跟着的按名兜底早就是 .lower() 比的，这一条却死比大小写；
+        # 比不上就落到按名兜底，可能挑中同名但不同目录的另一张图。
+        if _normalize_object_path_text(asset.get("objectPath", "")).lower() == normalized.lower():
             return asset
     for asset in manifest_assets:
         if asset_name and asset.get("assetName", "").lower() == asset_name.lower():
@@ -2654,7 +2697,7 @@ def _export_character_buffs(character_actors, manifest_assets, export_root, proj
     asset_map = {}
     for asset in manifest_assets:
         package_path = asset.get("packagePath", "")
-        if not package_path.startswith(CHARACTER_ACTOR_ROOT + "/"):
+        if not _path_starts_with(package_path, CHARACTER_ACTOR_ROOT + "/"):
             continue
         relative = package_path[len(CHARACTER_ACTOR_ROOT) + 1:]
         code = relative.split("/", 1)[0] if relative else ""
@@ -2767,7 +2810,9 @@ def _export_link_skill_library_from_text(project_path):
         }
 
     try:
-        text = open(disk_path, "rb").read().decode("utf-16le", errors="ignore")
+        # 同上：编辑器进程长驻，.uasset 的读句柄必须当场归还。
+        with open(disk_path, "rb") as source:
+            text = source.read().decode("utf-16le", errors="ignore")
         start = text.find("((\"")
         sub_index = text.find("SubCharName=(", start)
         if start < 0 or sub_index < 0:
@@ -3421,7 +3466,9 @@ def _export_support_skill_library_from_text(project_path, character_items=None):
         }
 
     try:
-        data = open(disk_path, "rb").read()
+        # 同上：编辑器进程长驻，.uasset 的读句柄必须当场归还。
+        with open(disk_path, "rb") as source:
+            data = source.read()
         entries, read_message = _parse_support_skill_library_from_bytes(data, character_items)
         if not entries:
             text = data.decode("utf-16le", errors="ignore")

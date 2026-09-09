@@ -1832,7 +1832,7 @@
                             <ScrollViewer
                                 x:Name="SequenceFramesScrollViewer"
                                 VerticalScrollBarVisibility="Auto">
-                                <StackPanel Spacing="12" IsHitTestVisible="{Binding CharacterDesk.CanEditCurrentCharacter, Mode=OneWay}">
+                                <StackPanel Spacing="12">
                                     <ItemsControl
                                         ItemTemplate="{StaticResource SequenceFrameSectionGroupTemplate}"
                                         ItemsSource="{Binding SequenceFrames.BaseSectionGroups, Mode=OneWay}" />

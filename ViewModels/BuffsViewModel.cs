@@ -34,6 +34,8 @@ internal sealed class BuffsViewModel : ObservableObject
     {
         _buffService = buffService;
         _dispatcherQueue = dispatcherQueue;
+        // 同 SkillsViewModel：订阅静态事件且从不退订。单例使用下安全，
+        // 但每 new 一个实例就多一份永久订阅，测试里反复构造会互相串台。
         BuffEntry.AnyBuffEdited += (_, _) => NotifyEdited();
     }
 

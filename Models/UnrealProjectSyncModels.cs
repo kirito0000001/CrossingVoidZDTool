@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System;
+using System.Globalization;
 using System.Linq;
 using System.Text.Json.Serialization;
 using Microsoft.UI.Xaml;
@@ -515,8 +516,11 @@ internal sealed record UnrealProjectSyncSequenceActionPreview(
 
     public string FpsText => $"帧率 {FormattedFps}";
 
+    // 这个帧率是从 Unreal 导出清单里读回来的（JSON，不变区域），显示时用同一套写法，
+    // 用户把界面和清单摆在一起才对得上。跟着系统区域走的话，小数点是逗号的区域
+    // （de/fr/ru）界面写「12,5」而清单里是「12.5」，白白多出一处对不上的地方。
     private string FormattedFps => FramesPerSecond > 0
-        ? FramesPerSecond.ToString("0.##")
+        ? FramesPerSecond.ToString("0.##", CultureInfo.InvariantCulture)
         : "12";
 
     public IReadOnlyList<UnrealProjectSyncSequenceSoundNotifyPreview> SequenceSounds => SoundNotifies ?? [];

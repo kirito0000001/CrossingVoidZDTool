@@ -22,7 +22,9 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         ("Click", VoiceMaterialKind.Click),
         ("Death", VoiceMaterialKind.Death),
         ("Defeat", VoiceMaterialKind.Defeat),
-        ("Ondm", VoiceMaterialKind.Hurt),
+        // 工具箱侧的动作码是 OnDamage；写成 Ondm 时 IsActionCodeInFamily 匹配不上
+        // （它只接受完全相等或「基码+纯数字」），受伤动作的语音下拉就完全不过滤了。
+        ("OnDamage", VoiceMaterialKind.Hurt),
         ("Victory", VoiceMaterialKind.Victory),
         ("Sk1", VoiceMaterialKind.Skill1),
         ("Sk2", VoiceMaterialKind.Skill2),
@@ -54,6 +56,7 @@ internal sealed class SequenceFramesViewModel : ObservableObject
     private bool _isPreloadingPreview;
     private bool _pauseEditorPreviewWhenVoiceEnds;
     private SequenceEditorPlaybackMode _editorPlaybackMode = SequenceEditorPlaybackMode.Loop;
+    private bool _isReadOnly;
     private SequenceFrameSection? _previewSection;
     private SequenceFrameSection? _selectedSection;
     private SequenceFrameItem? _selectedEditorFrame;
@@ -239,7 +242,19 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     public bool HasSelectedSection => SelectedSection is not null;
 
-    public SequenceFrameSection? PreviewSection => _previewSection;
+
+    /// <summary>
+    /// 右侧预览器当前装着哪个动作。
+    ///
+    /// 这里以前是普通字段 + 只读表达式属性，四个赋值点没有任何一处通知，
+    /// 全文件 OnPropertyChanged(nameof(PreviewSection)) 出现 0 次。
+    /// 当时只被 code-behind 直读所以没暴露，谁在 XAML 里绑它就是个死值。
+    /// </summary>
+    public SequenceFrameSection? PreviewSection
+    {
+        get => _previewSection;
+        private set => SetProperty(ref _previewSection, value);
+    }
 
     public SequenceFrameItem? SelectedEditorFrame
     {
@@ -302,6 +317,31 @@ internal sealed class SequenceFramesViewModel : ObservableObject
     public SequenceFrameItem? CurrentPreviewFrame => PreviewFrames.Count == 0 || _previewIndex < 0 || _previewIndex >= PreviewFrames.Count
         ? null
         : PreviewFrames[_previewIndex];
+
+    /// <summary>
+    /// 查看模式。已完成角色是「看」不是「改」，但看序列本身必须允许——
+    /// 以前这层限制是在 XAML 上给整块左栏设 IsHitTestVisible=false 实现的，
+    /// 而把序列送进右侧预览器的那个播放按钮也在这块里面，
+    /// 于是只读模式下根本没有任何可达路径能看序列。
+    /// 现在界面保持可交互，改数据的入口由下面这些守卫挡住。
+    /// </summary>
+    public bool IsReadOnly
+    {
+        get => _isReadOnly;
+        set => SetProperty(ref _isReadOnly, value);
+    }
+
+    /// <summary>拒绝写操作时用：调用方据此提示用户，而不是静默什么都不做。</summary>
+    public bool RejectWhenReadOnly()
+    {
+        if (!IsReadOnly)
+        {
+            return false;
+        }
+
+        StatusText = "查看模式下不能修改序列帧，请先从角色台点「继续制作」。";
+        return true;
+    }
 
     public async Task LoadAsync(CharacterCard? character, CancellationToken cancellationToken = default)
     {
@@ -368,12 +408,22 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     public async Task ImportAsync(CharacterCard character, SequenceFrameSection section, IReadOnlyList<string> sourceFilePaths, CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         await Task.Run(() => _sequenceFrameService.ImportFrames(character, section.Action, sourceFilePaths), cancellationToken);
         await LoadAsync(character, cancellationToken);
     }
 
     public async Task DeleteFrameAsync(CharacterCard character, SequenceFrameSection section, SequenceFrameItem frame, CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var frames = await Task.Run(() => _sequenceFrameService.DeleteFrame(character, section.Action, frame), cancellationToken);
         ApplyFrameMutation(section, frames, frame.Index);
     }
@@ -384,6 +434,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         IReadOnlyList<SequenceFrameItem> selectedFrames,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var selectedIndex = selectedFrames.Count == 0 ? 1 : selectedFrames.Min(frame => frame.Index);
         var frames = await Task.Run(
             () => _sequenceFrameService.DeleteFrames(character, section.Action, selectedFrames),
@@ -417,6 +472,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         SequenceFrameInsertPosition position,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var frames = await Task.Run(
             () => _sequenceFrameService.InsertBlankFrame(character, section.Action, anchorFrame, position),
             cancellationToken);
@@ -445,6 +505,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     public async Task ReorderFramesAsync(CharacterCard character, SequenceFrameSection section, IReadOnlyList<SequenceFrameItem> orderedFrames, CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var selectedIndex = SelectedEditorFrame is null
             ? 1
             : Math.Max(
@@ -464,6 +529,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         string sourceFilePath,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var frames = await Task.Run(
             () => _sequenceFrameService.ReplaceFrame(character, section.Action, frame, sourceFilePath),
             cancellationToken);
@@ -477,6 +547,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         IReadOnlyList<string> sourceFilePaths,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var frames = await Task.Run(
             () => _sequenceFrameService.ReplaceFrameWithSources(character, section.Action, frame, sourceFilePaths),
             cancellationToken);
@@ -490,6 +565,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         int durationFrames,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return;
+        }
+
         var frames = await Task.Run(
             () => _sequenceFrameService.SetFrameDuration(character, section.Action, frame, durationFrames),
             cancellationToken);
@@ -525,7 +605,7 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         }
 
         _previewIndex = 0;
-        _previewSection = section;
+        PreviewSection = section;
         PreviewTitle = $"{section.Action.DisplayName} / {section.Action.Code}";
         IsPreviewing = false;
         UpdateCurrentFrame(PreviewFrames.FirstOrDefault());
@@ -621,10 +701,9 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         }
     }
 
-    public void RefreshCollection()
-    {
-        RefreshCollectionAsync().GetAwaiter().GetResult();
-    }
+    // 这里曾经有一个 RefreshCollection()，内部 RefreshCollectionAsync().GetAwaiter().GetResult()。
+    // 它全仓没有调用点，但只要有人调就会和 UI 线程互锁（和关窗那条死锁同一形状）。
+    // 需要同步刷新时请直接 await RefreshCollectionAsync()，别再包一层阻塞等待。
 
     private IReadOnlyList<SequenceFrameCollectionItem> BuildCollectionItems(
         IReadOnlyList<SequenceFrameSection> sections,
@@ -853,6 +932,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         IProgress<ProgressUpdate>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return 0;
+        }
+
         var skills = await Task.Run(() => _skillsService.Load(character), cancellationToken);
         var updatedCount = await Task.Run(
             () => _sequenceFrameService.ReplaceDuplicateFrameReferences(
@@ -873,6 +957,11 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         IProgress<ProgressUpdate>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        if (RejectWhenReadOnly())
+        {
+            return 0;
+        }
+
         var indexedItems = CollectionItems
             .Select((item, index) => new { Item = item, Index = index })
             .ToList();
@@ -1025,12 +1114,12 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     private void SaveSelectedSectionFps(int fps)
     {
-        if (_currentCharacter is null || _previewSection is null)
+        if (_currentCharacter is null || PreviewSection is null)
         {
             return;
         }
 
-        var actionCode = _previewSection.Action.Code;
+        var actionCode = PreviewSection.Action.Code;
         if (string.IsNullOrWhiteSpace(actionCode))
         {
             return;
@@ -1045,14 +1134,14 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
         settings.Fps = fps;
         _sequenceFrameService.SaveData(_currentCharacter, _data);
-        _sequenceFrameService.SetActionFps(_currentCharacter, _previewSection.Action, fps);
+        _sequenceFrameService.SetActionFps(_currentCharacter, PreviewSection.Action, fps);
         SequenceFramesSaved?.Invoke(this, EventArgs.Empty);
     }
 
     private void ClearPreview()
     {
         PreviewFrames.Clear();
-        _previewSection = null;
+        PreviewSection = null;
         PreviewTitle = "未选择动作";
         CurrentFrameUri = string.Empty;
         CurrentFrameFilePath = string.Empty;
@@ -1061,6 +1150,10 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         IsPreviewing = false;
         _previewIndex = 0;
         OnPropertyChanged(nameof(EditorPlaybackPositionText));
+        // CurrentPreviewFrame 是从 PreviewFrames 和 _previewIndex 算出来的，
+        // 它唯一的通知点在 UpdateCurrentFrame 里，而清空不走那条路。
+        // 它绑在界面上（空白帧提示的可见性），漏通知会让提示停在上一帧的状态。
+        OnPropertyChanged(nameof(CurrentPreviewFrame));
     }
 
     private void ClearSelectedSection()
@@ -1103,7 +1196,7 @@ internal sealed class SequenceFramesViewModel : ObservableObject
             ComboSections[comboIndex] = updatedSection;
         }
 
-        _previewSection = updatedSection;
+        PreviewSection = updatedSection;
         SelectedSection = updatedSection;
         SynchronizeFrameCollection(PreviewFrames, orderedFrames);
         SynchronizeFrameCollection(SelectedSectionFrames, orderedFrames);
@@ -1265,9 +1358,9 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         var updatedSection = ApplyVoiceSyncAnalysis(SelectedSection);
         SelectedSection = updatedSection;
         SynchronizeFrameCollection(SelectedSectionFrames, updatedSection.Frames);
-        if (_previewSection?.Action.Code == updatedSection.Action.Code)
+        if (PreviewSection?.Action.Code == updatedSection.Action.Code)
         {
-            _previewSection = updatedSection;
+            PreviewSection = updatedSection;
             SynchronizeFrameCollection(PreviewFrames, updatedSection.Frames);
             _previewIndex = PreviewFrames.Count == 0
                 ? 0
@@ -1324,7 +1417,7 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         var width = MaterialSequenceNaming.GetWidth(total);
         var frameIndexText = $"{frame.Index.ToString().PadLeft(width, '0')}/{total.ToString().PadLeft(width, '0')}";
         CurrentFrameText = $"{frameIndexText}  {frame.PlainFileName}  |  {frame.ActualWidth}x{frame.ActualHeight}";
-        if (SelectedSection?.Action.Code == _previewSection?.Action.Code &&
+        if (SelectedSection?.Action.Code == PreviewSection?.Action.Code &&
             !Equals(_selectedEditorFrame, frame))
         {
             SetProperty(ref _selectedEditorFrame, frame, nameof(SelectedEditorFrame));

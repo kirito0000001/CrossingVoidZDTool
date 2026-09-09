@@ -44,6 +44,7 @@ internal sealed class UnrealBlueprintSetupService
         var code = character.Code;
         var formCount = Math.Max(1, info.FormLimit);
         var avatars = GetBattleAvatarObjectPaths(code, materialSections);
+        var failures = new SkillNumberParseFailures(code);
 
         var request = new UnrealBlueprintSetupRequest
         {
@@ -59,8 +60,16 @@ internal sealed class UnrealBlueprintSetupService
             AnimInstanceClassObjectPath = $"{CharacterActorRoot}/{code}/{code}_AnimBP.{code}_AnimBP_C",
             IdleFlipbookObjectPath = BuildIdleFlipbookObjectPath(code),
             Sequences = BuildSequenceBindings(code, formCount),
-            Skills = BuildSkillPayloads(code, formCount, skills),
+            Skills = BuildSkillPayloads(code, formCount, skills, failures),
         };
+
+        // 数值解析不了就在这里停住，绝不能带着「解析失败 = 0」往下走：
+        // 第六步是把这些值真正写进角色蓝图和数据表的最后一步，一旦归 0，
+        // Unreal 侧比对看到的就是「工具箱说这里本来就该是 0」，于是不算差异、
+        // 界面一路显示成功，而技能倍率和守备数值其实已经被清空。
+        // 这个异常由 ExecuteUnrealBlueprintSetupAsync 外层的 catch 接住，
+        // 走 FailBlueprintSetup / ShowFloatingTip / AppendLog 显示到界面上。
+        failures.ThrowIfAny();
 
         if (selectedStableIds is not null)
         {
@@ -164,14 +173,15 @@ internal sealed class UnrealBlueprintSetupService
     private static List<UnrealBlueprintSkillPayload> BuildSkillPayloads(
         string characterCode,
         int formCount,
-        CharacterSkillsData skills)
+        CharacterSkillsData skills,
+        SkillNumberParseFailures failures)
     {
         var payloads = new List<UnrealBlueprintSkillPayload>
         {
-            BuildSkillPayload(characterCode, formCount, "SkillSlot1", "一技能", skills.FirstSkill),
-            BuildSkillPayload(characterCode, formCount, "SkillSlot2", "二技能", skills.SecondSkill),
-            BuildSkillPayload(characterCode, formCount, "SkillSlot3", "终结技", skills.UltimateSkill),
-            BuildSkillPayload(characterCode, formCount, "SubSkill", "护援技", skills.SupportSkill),
+            BuildSkillPayload(characterCode, formCount, "SkillSlot1", "一技能", skills.FirstSkill, failures),
+            BuildSkillPayload(characterCode, formCount, "SkillSlot2", "二技能", skills.SecondSkill, failures),
+            BuildSkillPayload(characterCode, formCount, "SkillSlot3", "终结技", skills.UltimateSkill, failures),
+            BuildSkillPayload(characterCode, formCount, "SubSkill", "护援技", skills.SupportSkill, failures),
         };
 
         // 连携技按搭档分组：数据表里一个角色对每个搭档各存一条。
@@ -181,7 +191,7 @@ internal sealed class UnrealBlueprintSetupService
                      .OrderBy(group => group.Key, StringComparer.Ordinal))
         {
             var payload = BuildSkillPayload(
-                characterCode, formCount, "Combo", $"连携技 · {group.Key}", group.ToList());
+                characterCode, formCount, "Combo", $"连携技 · {group.Key}", group.ToList(), failures);
             payload.PartnerName = group.Key;
             payloads.Add(payload);
         }
@@ -194,7 +204,8 @@ internal sealed class UnrealBlueprintSetupService
         int formCount,
         string slotKey,
         string displayName,
-        IReadOnlyList<CharacterSkillEntry> entries)
+        IReadOnlyList<CharacterSkillEntry> entries,
+        SkillNumberParseFailures failures)
     {
         var payload = new UnrealBlueprintSkillPayload
         {
@@ -204,64 +215,178 @@ internal sealed class UnrealBlueprintSetupService
 
         // 技能条目本来就是按形态排列的；护援技和连携技在工具箱里也可能只填一条，
         // 那就照实只下发一条，不去替用户补齐形态。
-        foreach (var entry in entries)
+        for (var index = 0; index < entries.Count; index++)
         {
+            var entry = entries[index];
+            // 报错要能让用户直接找到出问题的那个输入框，所以定位到「技能 + 形态」这一层。
+            // 只有一条时不写形态号，免得凭空造出一个界面上根本不存在的编号。
+            var location = entries.Count > 1 ? $"{displayName} 形态{index + 1}" : displayName;
             payload.Names.Add(entry.PositionName?.Trim() ?? string.Empty);
             payload.SkillNames.Add(entry.TrueName?.Trim() ?? string.Empty);
             payload.Descriptions.Add(entry.Description?.Trim() ?? string.Empty);
             payload.IconObjectPaths.Add(BuildImageObjectPath(characterCode, entry.IconPath));
-            payload.PointCosts.Add(ParseInt(entry.PtCost));
-            payload.AttackCapacities.Add(ParseInt(entry.AttackCapacity));
-            payload.AutoPriorities.Add(ParseInt(entry.AutoPriority));
-            payload.SkillStates.Add(MapSkillStateToUnreal(entry.SkillState));
-            payload.PreformTypes.Add(MapGuardStateToUnreal(entry.GuardState));
-            payload.PreSkillValues.Add(ParseDouble(entry.GuardValue));
-            payload.SkillRates.Add(BuildSkillRate(entry.LevelMultipliers));
+            payload.PointCosts.Add(ParseInt(entry.PtCost, location, "Pt消耗", failures));
+            payload.AttackCapacities.Add(ParseInt(entry.AttackCapacity, location, "攻击容量", failures));
+            payload.AutoPriorities.Add(ParseInt(entry.AutoPriority, location, "自动优先级", failures));
+            payload.SkillStates.Add(MapSkillStateToUnreal(entry.SkillState, location, failures));
+            payload.PreformTypes.Add(MapGuardStateToUnreal(entry.GuardState, location, failures));
+            payload.PreSkillValues.Add(ParseDouble(entry.GuardValue, location, "守备数值", failures));
+            payload.SkillRates.Add(BuildSkillRate(entry.LevelMultipliers, location, failures));
         }
 
         return payload;
     }
 
-    private static UnrealBlueprintSkillRate BuildSkillRate(IReadOnlyList<SkillMultiplierLevel> levels)
+    private static UnrealBlueprintSkillRate BuildSkillRate(
+        IReadOnlyList<SkillMultiplierLevel> levels,
+        string location,
+        SkillNumberParseFailures failures)
     {
         var rate = new UnrealBlueprintSkillRate();
         foreach (var level in levels)
         {
             var key = level.Level.ToString(CultureInfo.InvariantCulture);
-            rate.Physical[key] = ParseDouble(level.PhysicalMultiplier);
-            rate.Energy[key] = ParseDouble(level.EnergyMultiplier);
+            rate.Physical[key] = ParseDouble(level.PhysicalMultiplier, $"{location} {key}级", "物理倍率", failures);
+            rate.Energy[key] = ParseDouble(level.EnergyMultiplier, $"{location} {key}级", "异能倍率", failures);
         }
 
         return rate;
     }
 
     /// <summary>工具箱的中文选项 -> Unreal 的 E2DSkillType 名称。</summary>
-    public static string MapSkillStateToUnreal(string? value) => (value ?? string.Empty).Trim() switch
+    /// <summary>
+    /// 工具箱的中文选项 -> Unreal 的 E2DSkillState 名称。
+    ///
+    /// 「空」是合法取值（空中状态），没填也当空中——这两种都是正常的。
+    /// 但**认不出来的非空文本**以前也一起无声变成 Air：角色 JSON 被手改过、
+    /// 或从别处导入过来时，一个有意义的状态就这么被抹掉了，
+    /// 症状和「技能倍率被静默写成 0」是同一族。所以现在要记账。
+    /// </summary>
+    public static string MapSkillStateToUnreal(
+        string? value,
+        string? location = null,
+        SkillNumberParseFailures? failures = null)
     {
-        "常态" => "Normal",
-        "禁用" => "Disable",
-        "舍弃" => "Abandon",
-        _ => "Air",
-    };
+        var text = (value ?? string.Empty).Trim();
+        switch (text)
+        {
+            case "常态": return "Normal";
+            case "禁用": return "Disable";
+            case "舍弃": return "Abandon";
+            case "空":
+            case "": return "Air";
+            default:
+                failures?.Add(location ?? string.Empty, "技能状态", text, "可选的技能状态");
+                return "Air";
+        }
+    }
 
     /// <summary>工具箱的中文选项 -> Unreal 的 EPreformType 名称。</summary>
-    public static string MapGuardStateToUnreal(string? value) => (value ?? string.Empty).Trim() switch
+    /// <summary>工具箱的中文选项 -> Unreal 的 EPreformType 名称。理由同上。</summary>
+    public static string MapGuardStateToUnreal(
+        string? value,
+        string? location = null,
+        SkillNumberParseFailures? failures = null)
     {
-        "防御" => "Defense",
-        "反击" => "Attack",
-        "闪避" => "Dodge",
-        _ => "Air",
-    };
+        var text = (value ?? string.Empty).Trim();
+        switch (text)
+        {
+            case "防御": return "Defense";
+            case "反击": return "Attack";
+            case "闪避": return "Dodge";
+            case "空":
+            case "": return "Air";
+            default:
+                failures?.Add(location ?? string.Empty, "守备类型", text, "可选的守备类型");
+                return "Air";
+        }
+    }
 
-    private static int ParseInt(string? value) =>
-        int.TryParse((value ?? string.Empty).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var result)
-            ? result
-            : 0;
+    /// <summary>
+    /// 数值一律按不变区域解析，和 <see cref="UnrealProjectSyncService"/> 把 Unreal 侧数值
+    /// 回填进技能编辑器文本框时用的格式化区域配对——两头必须是同一个区域，
+    /// 否则小数点是逗号的区域（de/fr/ru）写出来的「1,5」在这里根本解析不回来。
+    ///
+    /// 解析不出来时**只记账、不当成 0 用**：归零会让 Unreal 侧比对认为
+    /// 「工具箱说这里就该是 0」，于是不算差异、界面一路显示成功，
+    /// 而倍率和守备数值其实已经被清空——本项目反复出现的
+    /// 「显示成功但实际没做成」又一例。记下的账由 <see cref="BuildRequest"/> 统一抛出；
+    /// 这里仍然返回 0 只是为了把这一轮请求拼完、好把剩下的错也一并收齐，
+    /// 这份载荷永远不会被真正下发。
+    ///
+    /// 空文本是「用户没填」而不是解析失败，照旧算 0——技能表里空着的形态很常见。
+    /// </summary>
+    private static int ParseInt(string? value, string location, string fieldName, SkillNumberParseFailures failures)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (text.Length == 0)
+        {
+            return 0;
+        }
 
-    private static double ParseDouble(string? value) =>
-        double.TryParse((value ?? string.Empty).Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var result)
-            ? result
-            : 0d;
+        if (int.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var result))
+        {
+            return result;
+        }
+
+        failures.Add(location, fieldName, text, "整数");
+        return 0;
+    }
+
+    /// <inheritdoc cref="ParseInt(string?, string, string, SkillNumberParseFailures)"/>
+    private static double ParseDouble(string? value, string location, string fieldName, SkillNumberParseFailures failures)
+    {
+        var text = (value ?? string.Empty).Trim();
+        if (text.Length == 0)
+        {
+            return 0d;
+        }
+
+        if (double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var result))
+        {
+            return result;
+        }
+
+        failures.Add(location, fieldName, text, "小数");
+        return 0d;
+    }
+
+    /// <summary>
+    /// 一轮请求里所有解析不了的数值字段。
+    ///
+    /// 碰到第一个就抛会逼着用户「改一个、重跑一遍、再发现下一个」，
+    /// 而每跑一遍都要起一次 Unreal 编辑器，所以先把这一轮的问题攒齐再一次性报出来。
+    /// 列举有上限是因为这条消息要塞进浮动提示，列一百行没人看得完。
+    /// </summary>
+    internal sealed class SkillNumberParseFailures(string characterCode)
+    {
+        private const int MaxListedCount = 10;
+
+        private readonly List<string> _items = [];
+
+        public void Add(string location, string fieldName, string text, string expectation) =>
+            _items.Add($"· {location} · {fieldName}：「{text}」不是{expectation}");
+
+        public void ThrowIfAny()
+        {
+            if (_items.Count == 0)
+            {
+                return;
+            }
+
+            var listed = _items.Take(MaxListedCount).ToList();
+            if (_items.Count > MaxListedCount)
+            {
+                listed.Add($"· 另有 {_items.Count - MaxListedCount} 处同类问题");
+            }
+
+            throw new InvalidDataException(
+                $"角色 {characterCode} 有 {_items.Count} 处技能数值解析不了，蓝图置入已中止" +
+                "（继续下去会把这些字段静默写成 0）。" + Environment.NewLine +
+                string.Join(Environment.NewLine, listed) + Environment.NewLine +
+                "小数点请用英文句点（例如 1.5），并去掉数字以外的字符。");
+        }
+    }
 
     public void SaveRequest(string path, UnrealBlueprintSetupRequest request)
     {
@@ -322,69 +447,46 @@ internal sealed class UnrealBlueprintSetupService
         string progressPath = "",
         IProgress<UnrealExportProgressState>? progress = null)
     {
-        TryDelete(resultPath);
-        TryDelete(progressPath);
-        using var process = Process.Start(startInfo)
-            ?? throw new InvalidOperationException("无法启动 Unreal 蓝图置入进程。");
-        var outputTask = process.StandardOutput.ReadToEndAsync(cancellationToken);
-        var errorTask = process.StandardError.ReadToEndAsync(cancellationToken);
-        var startedAt = DateTime.UtcNow;
-        var lastProgressAt = DateTime.MinValue;
-        while (!process.HasExited)
-        {
-            if (cancellationToken.IsCancellationRequested)
-            {
-                KillProcessTree(process);
-                cancellationToken.ThrowIfCancellationRequested();
-            }
-            if (DateTime.UtcNow - startedAt > TimeSpan.FromMinutes(20))
-            {
-                KillProcessTree(process);
-                throw new TimeoutException("Unreal 蓝图置入超过 20 分钟，已终止命令进程。");
-            }
+        // 清场删除可能失败（编辑器/杀软占着），所以记下删没删掉，
+        // 好在结果不新鲜时把「残留删不掉」这条线索写进报错。
+        var staleResultRemoved = UnrealProcessRunner.TryClearStaleFile(resultPath);
+        UnrealProcessRunner.TryClearStaleFile(progressPath);
+        // 虚幻那一侧有十几秒的静默期：脚本会把阶段写进进度文件，
+        // Runner 轮询转发出去，进度条才不会整段一动不动。
+        var run = await UnrealProcessRunner.RunAsync(
+            startInfo,
+            progressPath,
+            progress,
+            AppJsonSerializerContext.Default.UnrealExportProgressState,
+            TimeSpan.FromMinutes(20),
+            "无法启动 Unreal 蓝图置入进程。",
+            "Unreal 蓝图置入超过 20 分钟，已终止命令进程。",
+            verdict: completed => DescribeUnusableResult(resultPath, completed, staleResultRemoved),
+            cancellationToken: cancellationToken);
 
-            // 虚幻那一侧十几秒的静默期：脚本会把阶段写进进度文件，
-            // 这里轮询转发出去，进度条才不会整段一动不动。
-            ReportProgress(progressPath, progress, ref lastProgressAt);
-            await Task.Delay(500, cancellationToken);
-        }
-
-        var output = await outputTask + await errorTask;
-        return ReadResult(resultPath, output, process.ExitCode);
+        return ReadResult(resultPath, run.Output, run.ExitCode);
     }
 
-    /// <summary>进度文件没变就不重复转发，免得每 500 毫秒刷一次同样的文案。</summary>
-    private static void ReportProgress(
-        string progressPath,
-        IProgress<UnrealExportProgressState>? progress,
-        ref DateTime lastWriteUtc)
+    /// <summary>
+    /// 结果文件必须是这一轮写出来的，只判 <c>File.Exists</c> 会踩坑：
+    /// 结果路径是固定的，而开跑前的清场删除会被 IO 异常吞掉；删不掉时留在那儿的
+    /// 一定是上一次运行的结果，于是这一轮什么都没写出来，却把上一轮的条目清单
+    /// 当成本次结果展示出来。
+    /// </summary>
+    private static string? DescribeUnusableResult(
+        string resultPath,
+        UnrealProcessResult run,
+        bool staleResultRemoved)
     {
-        if (progress is null || string.IsNullOrWhiteSpace(progressPath))
+        if (UnrealProcessRunner.IsFreshOutput(resultPath, run.StartedAtUtc))
         {
-            return;
+            return null;
         }
 
-        try
-        {
-            var info = new FileInfo(progressPath);
-            if (!info.Exists || info.LastWriteTimeUtc <= lastWriteUtc)
-            {
-                return;
-            }
-
-            lastWriteUtc = info.LastWriteTimeUtc;
-            var state = JsonSerializer.Deserialize(
-                File.ReadAllText(progressPath, Encoding.UTF8),
-                AppJsonSerializerContext.Default.UnrealExportProgressState);
-            if (state is not null)
-            {
-                progress.Report(state);
-            }
-        }
-        catch (Exception ex) when (ex is IOException or JsonException)
-        {
-            // 正在被写的进度文件读不全是常态，下一轮再读。
-        }
+        return File.Exists(resultPath) && !staleResultRemoved
+            ? $"Unreal 蓝图置入没有写出本轮结果文件，只留下删不掉的上一轮残留：{resultPath}。" +
+              $"退出码：{run.ExitCode}。{Environment.NewLine}{run.Output}"
+            : $"Unreal 蓝图置入没有生成结果文件。退出码：{run.ExitCode}。{Environment.NewLine}{run.Output}";
     }
 
     public static UnrealBlueprintSetupResult ReadResult(string resultPath, string processOutput, int exitCode)
@@ -422,23 +524,6 @@ internal sealed class UnrealBlueprintSetupService
         }
     }
 
-    private static void TryDelete(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-            {
-                File.Delete(path);
-            }
-        }
-        catch (IOException)
-        {
-        }
-        catch (UnauthorizedAccessException)
-        {
-        }
-    }
-
     private static string ResolveEditorCommandPath(string editorPath)
     {
         if (string.IsNullOrWhiteSpace(editorPath))
@@ -455,22 +540,5 @@ internal sealed class UnrealBlueprintSetupService
 
         var commandPath = Path.Combine(directory, fileName + "-Cmd" + Path.GetExtension(editorPath));
         return File.Exists(commandPath) ? commandPath : editorPath;
-    }
-
-    private static void KillProcessTree(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch (InvalidOperationException)
-        {
-        }
-        catch (NotSupportedException)
-        {
-        }
     }
 }

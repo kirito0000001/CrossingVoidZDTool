@@ -3,6 +3,7 @@ import copy
 import json
 import os
 import re
+import sys
 import traceback
 
 import unreal
@@ -37,10 +38,13 @@ STATUS_UNCHANGED = 0
 STATUS_PENDING = 1
 STATUS_ERROR = 2
 
+# 必须与 C# 的 VoiceMaterialService.Specs 逐字一致。
+# 回归用例「语音分类表与桥接脚本标签一致」会校验这张表——
+# 以前没有校验，Formation 和 Hurt 两条已经和 C# 漂开了（入队/编队、受击/受伤）。
 VOICE_CATEGORY_LABELS = {
-    "Formation": "入队语音",
+    "Formation": "编队语音",
     "Click": "点击语音",
-    "Hurt": "受击语音",
+    "Hurt": "受伤语音",
     "Death": "死亡语音",
     "Defeat": "失败语音",
     "Victory": "胜利语音",
@@ -50,6 +54,7 @@ VOICE_CATEGORY_LABELS = {
     "Support": "护援技语音",
     "Combo": "连携技语音",
     "Other": "待分配语音",
+    "SoundEffect": "音效",
 }
 
 
@@ -1019,16 +1024,36 @@ try:
         raise RuntimeError("unsupported light configuration protocol")
     _write_json_atomic(result_path, _execute(request_value))
     unreal.log("ZD light configuration completed: " + result_path)
-except Exception as error:
+except Exception:
+    # str(error) 只有一行，界面上拿到「'NoneType' object has no attribute ...」
+    # 根本看不出是哪一段配置塌的。完整回溯要进结果文件，第六步 _run() 就是这么写的。
+    details = traceback.format_exc()
+    unreal.log_error("ZD light configuration failed:\n" + details)
+    # 结果路径为空、或者结果文件本身写不出去时，工具箱只剩进程输出可看，
+    # 所以回溯同时往 stderr 抄一份；否则那边只会显示一句
+    # 「没有生成结果文件。退出码：0」——一次失败长得和一次成功一模一样。
+    # stderr 的编码不归我们管，抄不过去也不能盖住真正的异常。
+    try:
+        sys.stderr.write("ZD light configuration failed:\n" + details + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
     if result_path:
-        _write_json_atomic(result_path, {
-            "protocolVersion": PROTOCOL_VERSION,
-            "succeeded": False,
-            "errorMessage": str(error),
-            "characterCode": "",
-            "completedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-            "items": [],
-            "appliedStableIds": [],
-            "savedAssets": [],
-        })
-    unreal.log_error("ZD light configuration failed:\n" + traceback.format_exc())
+        try:
+            _write_json_atomic(result_path, {
+                "protocolVersion": PROTOCOL_VERSION,
+                "succeeded": False,
+                "errorMessage": details,
+                "characterCode": "",
+                "completedAt": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                "items": [],
+                "appliedStableIds": [],
+                "savedAssets": [],
+            })
+        except Exception:
+            # 连结果文件都写不出去（目录没了、盘满了）——这才是最需要说清楚的一种失败。
+            unreal.log_error(
+                "ZD light configuration result could not be written:\n" + traceback.format_exc())
+    # 必须重抛：吞掉异常的话退出码恒为 0，工具箱那边一个失败和一次成功
+    # 从退出码上分不出来。结果文件正常写出时不受影响——那一侧只认结果文件。
+    raise

@@ -19,7 +19,11 @@ internal enum VoiceMaterialKind
     Ultimate,
     Support,
     Combo,
-    Other
+    Other,
+    // 追加在最末尾而不是插进中间：有三处按枚举序数排序
+    // （写进 Unreal 的 TalkSoundObjectPaths 数组顺序、语音分组显示顺序、
+    // 导入顺序进而影响分配到的文件编号），插在中间会静默改掉这些行为。
+    SoundEffect
 }
 
 internal enum VoiceMaterialStatus

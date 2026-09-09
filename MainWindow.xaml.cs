@@ -110,6 +110,9 @@ namespace CrossingVoidZDTool
                 _voiceMaterialService);
             InitializeComponent();
             RootGrid.DataContext = _applicationViewModel;
+            // Services 层从这里开始能写日志。在此之前它整层没有任何日志出口，
+            // 约九十处 catch 全是静默的，出问题只能靠猜。
+            ToolboxLog.SetSink(new ToolboxLogBridge(this));
             _dialogService = new WinUiDialogService(() => RootGrid.XamlRoot);
             InitializeVoicePlayback();
             RegisterSettingsShortcuts();
@@ -175,6 +178,8 @@ namespace CrossingVoidZDTool
             FlushPendingCharacterInfoSave();
             FlushPendingSkillsSave();
             FlushPendingBuffsSave();
+            // 草稿也是防抖保存的，以前唯独漏了它，关窗会丢掉最后 900 毫秒的输入
+            FlushPendingDraftSave();
             _applicationViewModel.UnrealProjectSync.FlushSessionCache();
             DisposeVoicePlayback();
         }

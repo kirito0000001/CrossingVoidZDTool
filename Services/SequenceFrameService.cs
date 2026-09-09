@@ -1,43 +1,39 @@
 using System;
 using System.Collections.Generic;
-using System.Drawing;
-using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Serialization.Metadata;
 using System.Text.RegularExpressions;
 using System.Threading;
 
 namespace CrossingVoidZDTool.Services;
 
+/// <summary>
+/// 序列帧这一摊的门面：对界面暴露「一个角色有哪些动作、每个动作有哪些帧格、
+/// 以及能对帧格做的那些编辑操作」，具体活分给四个下层小类干。
+///
+/// 原本这是个 1400 行的大类，路径推导、清单 JSON、帧文件删改、界面用的帧格组装、
+/// 快照备份全挤在一起——其中会删用户文件的那几段和纯计算的那几段没有任何界线，
+/// 改一处编辑操作要先确认自己没碰到删除路径。现在按职责拆成：
+/// <list type="bullet">
+/// <item><see cref="SequenceActionFolderLayout"/>：动作目录布局与相对/绝对路径互转</item>
+/// <item><see cref="SequenceManifestStore"/>：sequence.json 的读写、规范化、引用集枚举</item>
+/// <item><see cref="SequenceFramePool"/>：帧池的文件操作（唯一会删用户文件的地方）</item>
+/// <item><see cref="SequenceFrameSectionBuilder"/>：把清单摊成界面用的帧格列表（只读）</item>
+/// <item><see cref="SequenceFrameSnapshotStore"/>：撤销用的动作快照</item>
+/// </list>
+/// 语音绑定的跨域重写在 <see cref="SequenceVoiceBindingService"/>，
+/// 那是为了断开和 <see cref="VoiceMaterialService"/> 之间的循环依赖。
+///
+/// 留在这里的是编排：几乎每个编辑操作都是「读清单 → 改帧格 → 存清单 →（必要时）清冗余帧 → 重新组装帧格列表」。
+/// </summary>
 internal sealed class SequenceFrameService
 {
-    public const int RequiredWidth = 928;
-    public const int RequiredHeight = 640;
-    public const int DefaultFps = 12;
-    public const int MaxFrameDuration = 600;
-
-    private const string ZdMaterialFolderName = "ZDMaterial";
-    private const string FramesFolderName = "Frames";
-    private const string ManifestFileName = "sequence.json";
-    private const string SnapshotManifestFileName = "sequence.snapshot.json";
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true
-    };
-    private static readonly AppJsonSerializerContext JsonContext = new(JsonOptions);
-    private static readonly JsonTypeInfo<SequenceFrameManifest> ManifestJsonTypeInfo = JsonContext.SequenceFrameManifest;
-    private static readonly string[] SupportedImageExtensions =
-    [
-        ".png",
-        ".jpg",
-        ".jpeg",
-        ".webp",
-        ".bmp"
-    ];
+    // 规格常量的实际定义在 SequenceFrameSpec，这里按原名转发：
+    // 回归用例和四个 Unreal 侧服务都是按 SequenceFrameService.XXX 取值的。
+    public const int RequiredWidth = SequenceFrameSpec.RequiredWidth;
+    public const int RequiredHeight = SequenceFrameSpec.RequiredHeight;
+    public const int DefaultFps = SequenceFrameSpec.DefaultFps;
+    public const int MaxFrameDuration = SequenceFrameSpec.MaxFrameDuration;
 
     private static readonly SequenceFrameAction[] BaseActions =
     [
@@ -111,29 +107,29 @@ internal sealed class SequenceFrameService
     public IReadOnlyList<SequenceFrameItem> ImportFrames(CharacterCard character, SequenceFrameAction action, IReadOnlyList<string> sourceFilePaths)
     {
         var supported = OrderImportSourcePaths(sourceFilePaths
-            .Where(path => File.Exists(path) && IsSupportedImage(path))
+            .Where(path => File.Exists(path) && SequenceFramePool.IsSupportedImage(path))
             .ToList());
         if (supported.Count == 0)
         {
             return [];
         }
 
-        var folderPath = GetActionFolderPath(character, action);
+        var folderPath = SequenceActionFolderLayout.GetActionFolderPath(character, action);
         Directory.CreateDirectory(folderPath);
         var previousFps = LoadOrCreateManifest(character, action).Fps;
-        var framesFolderPath = GetFramesFolderPath(character, action);
+        var framesFolderPath = SequenceActionFolderLayout.GetFramesFolderPath(character, action);
         Directory.CreateDirectory(framesFolderPath);
-        ClearActionFolder(folderPath);
+        SequenceFramePool.ClearActionFolder(folderPath);
 
-        var manifest = CreateManifest(action);
+        var manifest = SequenceManifestStore.Create(action);
         manifest.Fps = previousFps;
         for (var index = 0; index < supported.Count; index++)
         {
-            var relativePath = ImportSourceIntoPool(character, action, supported[index]);
+            var relativePath = SequenceFramePool.ImportSource(character, action, supported[index]);
             manifest.Frames.Add(new SequenceFrameManifestEntry { RelativePath = relativePath });
         }
 
-        SaveManifest(character, action, manifest);
+        SequenceManifestStore.Save(character, action, manifest);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
@@ -182,19 +178,19 @@ internal sealed class SequenceFrameService
         int fps)
     {
         var validFrames = frames
-            .Where(frame => frame.IsBlank || File.Exists(frame.FilePath) && IsSupportedImage(frame.FilePath))
+            .Where(frame => frame.IsBlank || File.Exists(frame.FilePath) && SequenceFramePool.IsSupportedImage(frame.FilePath))
             .ToList();
         if (validFrames.Count == 0)
         {
             return [];
         }
 
-        var folderPath = GetActionFolderPath(character, action);
+        var folderPath = SequenceActionFolderLayout.GetActionFolderPath(character, action);
         Directory.CreateDirectory(folderPath);
-        Directory.CreateDirectory(GetFramesFolderPath(character, action));
-        ClearActionFolder(folderPath);
+        Directory.CreateDirectory(SequenceActionFolderLayout.GetFramesFolderPath(character, action));
+        SequenceFramePool.ClearActionFolder(folderPath);
 
-        var manifest = CreateManifest(action);
+        var manifest = SequenceManifestStore.Create(action);
         manifest.Fps = Math.Clamp(fps <= 0 ? DefaultFps : fps, 1, 60);
         foreach (var frame in validFrames)
         {
@@ -202,11 +198,11 @@ internal sealed class SequenceFrameService
                 ? new SequenceFrameManifestEntry { IsBlank = true }
                 : new SequenceFrameManifestEntry
                 {
-                    RelativePath = ImportSourceIntoPool(character, action, frame.FilePath)
+                    RelativePath = SequenceFramePool.ImportSource(character, action, frame.FilePath)
                 });
         }
 
-        SaveManifest(character, action, manifest);
+        SequenceManifestStore.Save(character, action, manifest);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
@@ -219,8 +215,8 @@ internal sealed class SequenceFrameService
             manifest.Frames.RemoveAt(index);
         }
 
-        SaveManifest(character, action, manifest);
-        PruneUnreferencedFrameFiles(character, action, manifest);
+        SequenceManifestStore.Save(character, action, manifest);
+        SequenceFramePool.PruneUnreferenced(character, action);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
@@ -241,116 +237,19 @@ internal sealed class SequenceFrameService
             manifest.Frames.RemoveAt(index);
         }
 
-        SaveManifest(character, action, manifest);
-        PruneUnreferencedFrameFiles(character, action, manifest);
+        SequenceManifestStore.Save(character, action, manifest);
+        SequenceFramePool.PruneUnreferenced(character, action);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
     public void RestoreActionFrames(CharacterCard character, SequenceFrameAction action, IReadOnlyList<string> snapshotFilePaths)
     {
-        var snapshotManifestPath = snapshotFilePaths.FirstOrDefault(path =>
-            string.Equals(Path.GetFileName(path), SnapshotManifestFileName, StringComparison.OrdinalIgnoreCase));
-        if (string.IsNullOrWhiteSpace(snapshotManifestPath) || !File.Exists(snapshotManifestPath))
-        {
-            throw new InvalidDataException("序列帧快照清单不存在，无法恢复。");
-        }
-
-        var snapshotManifest = JsonSerializer.Deserialize(
-            File.ReadAllText(snapshotManifestPath, Encoding.UTF8),
-            AppJsonSerializerContext.Default.SequenceFrameManifest)
-            ?? throw new InvalidDataException("序列帧快照清单内容无效。");
-        var folderPath = GetActionFolderPath(character, action);
-        Directory.CreateDirectory(folderPath);
-        ClearActionFolder(folderPath);
-        var manifest = CreateManifest(action);
-        manifest.Fps = snapshotManifest.Fps;
-        var snapshotFolderPath = Path.GetDirectoryName(snapshotManifestPath)!;
-        foreach (var entry in snapshotManifest.Frames)
-        {
-            if (entry.IsBlank)
-            {
-                manifest.Frames.Add(CloneEntry(entry));
-                continue;
-            }
-
-            var sourcePath = Path.Combine(snapshotFolderPath, NormalizeRelativePath(entry.RelativePath));
-            if (!File.Exists(sourcePath) || !IsSupportedImage(sourcePath))
-            {
-                throw new FileNotFoundException("序列帧快照中的图片不存在。", sourcePath);
-            }
-
-            manifest.Frames.Add(new SequenceFrameManifestEntry
-            {
-                SyncId = entry.SyncId,
-                RelativePath = ImportSourceIntoPool(character, action, sourcePath),
-                DurationFrames = entry.DurationFrames,
-                VoiceRelativePath = entry.VoiceRelativePath
-            });
-        }
-
-        SaveManifest(character, action, manifest);
+        SequenceFrameSnapshotStore.Restore(character, action, snapshotFilePaths);
     }
 
     public IReadOnlyList<string> CreateActionSnapshot(CharacterCard character, SequenceFrameAction action)
     {
-        var manifest = LoadOrCreateManifest(character, action);
-        var snapshotFolderPath = Path.Combine(
-            character.ToolFolderPath,
-            "OperationSnapshots",
-            "SequenceFrames",
-            $"{action.Code}-{DateTime.Now:yyyyMMddHHmmssfff}-{Guid.NewGuid():N}");
-        Directory.CreateDirectory(snapshotFolderPath);
-        var snapshotPaths = new List<string>();
-        var snapshotIndexWidth = MaterialSequenceNaming.GetWidth(manifest.Frames.Count);
-        var snapshotManifest = new SequenceFrameManifest
-        {
-            SchemaVersion = 3,
-            ActionCode = action.Code,
-            Fps = manifest.Fps
-        };
-        for (var index = 0; index < manifest.Frames.Count; index++)
-        {
-            var entry = manifest.Frames[index];
-            if (entry.IsBlank)
-            {
-                var blankPath = Path.Combine(
-                    snapshotFolderPath,
-                    $"{(index + 1).ToString().PadLeft(snapshotIndexWidth, '0')}.blank");
-                File.WriteAllText(blankPath, "blank", Encoding.UTF8);
-                snapshotPaths.Add(blankPath);
-                snapshotManifest.Frames.Add(CloneEntry(entry));
-                continue;
-            }
-
-            var sourcePath = ResolveManifestPath(character, action, entry.RelativePath);
-            if (!File.Exists(sourcePath) || !IsSupportedImage(sourcePath))
-            {
-                continue;
-            }
-
-            var extension = Path.GetExtension(sourcePath);
-            var targetPath = Path.Combine(
-                snapshotFolderPath,
-                $"{(index + 1).ToString().PadLeft(snapshotIndexWidth, '0')}{extension}");
-            File.Copy(sourcePath, targetPath, overwrite: true);
-            snapshotPaths.Add(targetPath);
-            snapshotManifest.Frames.Add(new SequenceFrameManifestEntry
-            {
-                SyncId = entry.SyncId,
-                RelativePath = Path.GetFileName(targetPath),
-                DurationFrames = entry.DurationFrames,
-                VoiceRelativePath = entry.VoiceRelativePath
-            });
-        }
-
-        var snapshotManifestPath = Path.Combine(snapshotFolderPath, SnapshotManifestFileName);
-        File.WriteAllText(
-            snapshotManifestPath,
-            JsonSerializer.Serialize(snapshotManifest, ManifestJsonTypeInfo),
-            Encoding.UTF8);
-        snapshotPaths.Add(snapshotManifestPath);
-
-        return snapshotPaths;
+        return SequenceFrameSnapshotStore.Create(character, action, LoadOrCreateManifest(character, action));
     }
 
     public IReadOnlyList<SequenceFrameItem> DuplicateFrame(CharacterCard character, SequenceFrameAction action, SequenceFrameItem frame)
@@ -374,12 +273,12 @@ internal sealed class SequenceFrameService
             ? new SequenceFrameManifestEntry
             {
                 IsBlank = frame.IsBlank,
-                RelativePath = frame.IsBlank ? string.Empty : ToManifestRelativePath(character, action, frame.FilePath),
+                RelativePath = frame.IsBlank ? string.Empty : SequenceFramePool.ToManifestRelativePath(character, action, frame.FilePath),
                 DurationFrames = Math.Clamp(frame.DurationFrames, 1, MaxFrameDuration),
-                VoiceRelativePath = ToCharacterRelativePath(character, frame.VoiceFilePath)
+                VoiceRelativePath = SequenceActionFolderLayout.ToCharacterRelativePath(character, frame.VoiceFilePath)
             }
-            : CloneEntry(sourceEntry, preserveSyncId: false));
-        SaveManifest(character, action, manifest);
+            : SequenceManifestStore.CloneEntry(sourceEntry, preserveSyncId: false));
+        SequenceManifestStore.Save(character, action, manifest);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
@@ -408,14 +307,14 @@ internal sealed class SequenceFrameService
         }
 
         var entries = indexes
-            .Select(index => CloneEntry(manifest.Frames[index], preserveSyncId: false))
+            .Select(index => SequenceManifestStore.CloneEntry(manifest.Frames[index], preserveSyncId: false))
             .ToList();
         for (var index = 0; index < entries.Count; index++)
         {
             manifest.Frames.Insert(targetIndex + 1 + index, entries[index]);
         }
 
-        SaveManifest(character, action, manifest);
+        SequenceManifestStore.Save(character, action, manifest);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
@@ -436,14 +335,14 @@ internal sealed class SequenceFrameService
             ? Math.Max(0, index)
             : index + 1;
         manifest.Frames.Insert(insertIndex, new SequenceFrameManifestEntry { IsBlank = true });
-        SaveManifest(character, action, manifest);
+        SequenceManifestStore.Save(character, action, manifest);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
     public IReadOnlyList<SequenceFrameItem> ReorderFrames(CharacterCard character, SequenceFrameAction action, IReadOnlyList<SequenceFrameItem> orderedFrames)
     {
         var existing = orderedFrames
-            .Where(frame => frame.IsBlank || File.Exists(frame.FilePath) && IsSupportedImage(frame.FilePath))
+            .Where(frame => frame.IsBlank || File.Exists(frame.FilePath) && SequenceFramePool.IsSupportedImage(frame.FilePath))
             .ToList();
         if (existing.Count == 0)
         {
@@ -457,18 +356,18 @@ internal sealed class SequenceFrameService
         {
             var existingEntry = sourceEntries.ElementAtOrDefault(frame.Index - 1);
             manifest.Frames.Add(existingEntry is not null
-                ? CloneEntry(existingEntry)
+                ? SequenceManifestStore.CloneEntry(existingEntry)
                 : new SequenceFrameManifestEntry
                 {
                     IsBlank = frame.IsBlank,
-                    RelativePath = frame.IsBlank ? string.Empty : ToManifestRelativePath(character, action, frame.FilePath),
+                    RelativePath = frame.IsBlank ? string.Empty : SequenceFramePool.ToManifestRelativePath(character, action, frame.FilePath),
                     DurationFrames = Math.Clamp(frame.DurationFrames, 1, MaxFrameDuration),
-                    VoiceRelativePath = ToCharacterRelativePath(character, frame.VoiceFilePath)
+                    VoiceRelativePath = SequenceActionFolderLayout.ToCharacterRelativePath(character, frame.VoiceFilePath)
                 });
         }
 
-        SaveManifest(character, action, manifest);
-        PruneUnreferencedFrameFiles(character, action, manifest);
+        SequenceManifestStore.Save(character, action, manifest);
+        SequenceFramePool.PruneUnreferenced(character, action);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
@@ -478,7 +377,7 @@ internal sealed class SequenceFrameService
         SequenceFrameItem frame,
         string sourceFilePath)
     {
-        if (!File.Exists(sourceFilePath) || !IsSupportedImage(sourceFilePath))
+        if (!File.Exists(sourceFilePath) || !SequenceFramePool.IsSupportedImage(sourceFilePath))
         {
             throw new InvalidDataException("请选择有效的 PNG、JPG、WEBP 或 BMP 图片。");
         }
@@ -491,10 +390,10 @@ internal sealed class SequenceFrameService
         }
 
         var entry = manifest.Frames[index];
-        entry.RelativePath = ImportSourceIntoPool(character, action, sourceFilePath);
+        entry.RelativePath = SequenceFramePool.ImportSource(character, action, sourceFilePath);
         entry.IsBlank = false;
-        SaveManifest(character, action, manifest);
-        PruneUnreferencedFrameFiles(character, action, manifest);
+        SequenceManifestStore.Save(character, action, manifest);
+        SequenceFramePool.PruneUnreferenced(character, action);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
@@ -505,7 +404,7 @@ internal sealed class SequenceFrameService
         IReadOnlyList<string> sourceFilePaths)
     {
         if (sourceFilePaths.Count == 0 ||
-            sourceFilePaths.Any(path => !File.Exists(path) || !IsSupportedImage(path)))
+            sourceFilePaths.Any(path => !File.Exists(path) || !SequenceFramePool.IsSupportedImage(path)))
         {
             throw new InvalidDataException("请选择至少一张有效的 PNG、JPG、WEBP 或 BMP 图片。");
         }
@@ -518,7 +417,7 @@ internal sealed class SequenceFrameService
         }
 
         var relativePaths = sourceFilePaths
-            .Select(path => ImportSourceIntoPool(character, action, path))
+            .Select(path => SequenceFramePool.ImportSource(character, action, path))
             .ToList();
         var targetEntry = manifest.Frames[index];
         targetEntry.RelativePath = relativePaths[0];
@@ -531,8 +430,8 @@ internal sealed class SequenceFrameService
             });
         }
 
-        SaveManifest(character, action, manifest);
-        PruneUnreferencedFrameFiles(character, action, manifest);
+        SequenceManifestStore.Save(character, action, manifest);
+        SequenceFramePool.PruneUnreferenced(character, action);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
@@ -550,7 +449,7 @@ internal sealed class SequenceFrameService
         }
 
         manifest.Frames[index].DurationFrames = Math.Clamp(durationFrames, 1, MaxFrameDuration);
-        SaveManifest(character, action, manifest);
+        SequenceManifestStore.Save(character, action, manifest);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
@@ -569,8 +468,8 @@ internal sealed class SequenceFrameService
 
         manifest.Frames[index].VoiceRelativePath = string.IsNullOrWhiteSpace(voiceFilePath)
             ? string.Empty
-            : ToCharacterRelativePath(character, ValidateVoicePath(character, voiceFilePath));
-        SaveManifest(character, action, manifest);
+            : SequenceActionFolderLayout.ToCharacterRelativePath(character, ValidateVoicePath(character, voiceFilePath));
+        SequenceManifestStore.Save(character, action, manifest);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
@@ -599,7 +498,7 @@ internal sealed class SequenceFrameService
             manifest.Frames[index].SyncId = normalized[index];
         }
 
-        SaveManifest(character, action, manifest);
+        SequenceManifestStore.Save(character, action, manifest);
     }
 
     /// <summary>
@@ -617,7 +516,7 @@ internal sealed class SequenceFrameService
     {
         var manifest = LoadOrCreateManifest(character, action);
         manifest.Fps = Math.Clamp(fps, 1, 60);
-        SaveManifest(character, action, manifest);
+        SequenceManifestStore.Save(character, action, manifest);
     }
 
     public int ReplaceDuplicateFrameReferences(
@@ -655,12 +554,12 @@ internal sealed class SequenceFrameService
                 15 + (actionIndex + 1) * 55d / actions.Count,
                 action.DisplayName));
             var manifest = LoadOrCreateManifest(character, action);
-            var actionFolderPath = GetActionFolderPath(character, action);
-            var keptRelativePath = NormalizeRelativePath(Path.GetRelativePath(actionFolderPath, keptFullPath));
+            var actionFolderPath = SequenceActionFolderLayout.GetActionFolderPath(character, action);
+            var keptRelativePath = SequenceActionFolderLayout.NormalizeRelativePath(Path.GetRelativePath(actionFolderPath, keptFullPath));
             var changed = false;
             foreach (var entry in manifest.Frames)
             {
-                var resolvedPath = Path.GetFullPath(ResolveManifestPath(character, action, entry.RelativePath));
+                var resolvedPath = Path.GetFullPath(SequenceActionFolderLayout.ResolveManifestPath(character, action, entry.RelativePath));
                 if (!duplicateFullPaths.Contains(resolvedPath))
                 {
                     continue;
@@ -673,7 +572,7 @@ internal sealed class SequenceFrameService
 
             if (changed)
             {
-                SaveManifest(character, action, manifest);
+                SequenceManifestStore.Save(character, action, manifest);
             }
         }
 
@@ -695,9 +594,10 @@ internal sealed class SequenceFrameService
         return updatedReferenceCount;
     }
 
+    /// <summary>界面上的「打开动作目录」要用。</summary>
     public string GetActionFolderPath(CharacterCard character, SequenceFrameAction action)
     {
-        return Path.Combine(character.FolderPath, ZdMaterialFolderName, action.Code);
+        return SequenceActionFolderLayout.GetActionFolderPath(character, action);
     }
 
     public static IReadOnlyList<SequenceFrameAction> BuildActions(CharacterSkillsData skillsData, int formLimit = 1)
@@ -734,444 +634,29 @@ internal sealed class SequenceFrameService
 
     private SequenceFrameSection LoadSection(CharacterCard character, SequenceFrameAction action, CancellationToken cancellationToken)
     {
-        var manifest = LoadOrCreateManifest(character, action);
-        var frames = manifest.Frames
-            .Select((entry, index) =>
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (entry.IsBlank)
-                {
-                    return CreateBlankFrameItem(character, entry, index + 1);
-                }
-
-                return CreateFrameItem(
-                    ResolveManifestPath(character, action, entry.RelativePath),
-                    index + 1,
-                    manifest.Frames.Count,
-                    entry.DurationFrames,
-                    ResolveVoicePath(character, entry.VoiceRelativePath),
-                    entry.SyncId);
-            })
-            .Where(frame => frame.IsBlank || File.Exists(frame.FilePath))
-            .OrderBy(frame => frame.Index)
-            .ToList();
-        frames = AnnotateFrameReuse(frames);
-
-        var invalidCount = frames.Count(frame => !frame.IsValid);
-        var statusText = frames.Count == 0
-            ? "未设置"
-            : invalidCount > 0
-                ? $"{frames.Count} 张，{invalidCount} 张尺寸不合规"
-                : $"{frames.Count} 张，尺寸合规";
-        return new SequenceFrameSection(action, frames, statusText, frames.Count == 0 || invalidCount > 0);
+        return SequenceFrameSectionBuilder.Build(
+            character,
+            action,
+            LoadOrCreateManifest(character, action),
+            cancellationToken);
     }
 
-    private static List<SequenceFrameItem> AnnotateFrameReuse(IReadOnlyList<SequenceFrameItem> frames)
-    {
-        var annotated = frames
-            .Select(frame => frame with
-            {
-                ReuseCount = 1,
-                ReuseOccurrence = 1,
-                ReuseSourceIndex = 0,
-                ReusePositionsText = string.Empty,
-                ReuseColorIndex = -1
-            })
-            .ToList();
-        var groups = annotated
-            .Where(frame => !frame.IsBlank && !string.IsNullOrWhiteSpace(frame.FilePath))
-            .GroupBy(frame => frame.FilePath, StringComparer.OrdinalIgnoreCase)
-            .Where(group => group.Count() > 1)
-            .OrderBy(group => group.Min(frame => frame.Index))
-            .ToList();
-
-        for (var colorIndex = 0; colorIndex < groups.Count; colorIndex++)
-        {
-            var groupFrames = groups[colorIndex].OrderBy(frame => frame.Index).ToList();
-            var positions = string.Join("、", groupFrames.Select(frame => frame.Index));
-            for (var occurrenceIndex = 0; occurrenceIndex < groupFrames.Count; occurrenceIndex++)
-            {
-                var frameIndex = annotated.FindIndex(frame => frame.Index == groupFrames[occurrenceIndex].Index);
-                annotated[frameIndex] = annotated[frameIndex] with
-                {
-                    ReuseCount = groupFrames.Count,
-                    ReuseOccurrence = occurrenceIndex + 1,
-                    ReuseSourceIndex = groupFrames[0].Index,
-                    ReusePositionsText = positions,
-                    ReuseColorIndex = colorIndex
-                };
-            }
-        }
-
-        return annotated;
-    }
-
-    private static SequenceFrameItem CreateFrameItem(
-        string path,
-        int sequenceIndex,
-        int sequenceCount,
-        int durationFrames,
-        string voiceFilePath,
-        string syncId)
-    {
-        var actualWidth = 0;
-        var actualHeight = 0;
-        try
-        {
-            using var image = Image.FromFile(path);
-            actualWidth = image.Width;
-            actualHeight = image.Height;
-        }
-        catch
-        {
-            // The item stays invalid and the UI will show its size as unreadable.
-        }
-
-        var info = new FileInfo(path);
-        var version = $"{info.LastWriteTimeUtc.Ticks}-{info.Length}";
-        var fileUri = $"{new Uri(info.FullName).AbsoluteUri}?v={Uri.EscapeDataString(version)}";
-        return new SequenceFrameItem(
-            info.FullName,
-            fileUri,
-            $"{MaterialSequenceNaming.FormatIndex(sequenceIndex, sequenceCount)}  {info.Name}",
-            $"{info.FullName}|{version}",
-            sequenceIndex,
-            actualWidth,
-            actualHeight,
-            actualWidth == RequiredWidth && actualHeight == RequiredHeight,
-            info.LastWriteTime,
-            DurationFrames: Math.Clamp(durationFrames, 1, MaxFrameDuration),
-            VoiceFilePath: voiceFilePath,
-            VoiceFileName: Path.GetFileName(voiceFilePath),
-            SyncId: syncId);
-    }
-
-    private static SequenceFrameItem CreateBlankFrameItem(
-        CharacterCard character,
-        SequenceFrameManifestEntry entry,
-        int sequenceIndex)
-    {
-        var voiceFilePath = ResolveVoicePath(character, entry.VoiceRelativePath);
-        return new SequenceFrameItem(
-            string.Empty,
-            string.Empty,
-            "空白帧",
-            $"blank|{sequenceIndex}",
-            sequenceIndex,
-            RequiredWidth,
-            RequiredHeight,
-            true,
-            DateTime.MinValue,
-            true,
-            Math.Clamp(entry.DurationFrames, 1, MaxFrameDuration),
-            voiceFilePath,
-            Path.GetFileName(voiceFilePath),
-            SyncId: entry.SyncId);
-    }
-
-    private static void ClearActionFolder(string folderPath)
-    {
-        foreach (var path in Directory.EnumerateFiles(folderPath, "*", SearchOption.TopDirectoryOnly))
-        {
-            File.Delete(path);
-        }
-
-        var framesFolderPath = Path.Combine(folderPath, FramesFolderName);
-        if (Directory.Exists(framesFolderPath))
-        {
-            foreach (var path in Directory.EnumerateFiles(framesFolderPath).Where(IsSupportedImage))
-            {
-                File.Delete(path);
-            }
-        }
-    }
-
-    private static void SaveAsPng(string sourcePath, string targetPath)
-    {
-        using var source = Image.FromFile(sourcePath);
-        using var output = new Bitmap(source.Width, source.Height);
-        using (var graphics = Graphics.FromImage(output))
-        {
-            graphics.DrawImage(source, 0, 0, source.Width, source.Height);
-        }
-
-        output.Save(targetPath, ImageFormat.Png);
-    }
-
-    private List<string> LoadManifestFramePaths(CharacterCard character, SequenceFrameAction action)
-    {
-        var manifest = LoadOrCreateManifest(character, action);
-        return manifest.Frames
-            .Select(entry => ResolveManifestPath(character, action, entry.RelativePath))
-            .Where(path => File.Exists(path) && IsSupportedImage(path))
-            .ToList();
-    }
-
+    /// <summary>
+    /// 取一份可用的清单。这里把三段拼在一起：先按历史拼写把动作目录搬到规范名下，
+    /// 再看有没有清单文件——没有就说明这是个还没升级过的老目录，交给帧池就地迁移。
+    /// </summary>
     private SequenceFrameManifest LoadOrCreateManifest(CharacterCard character, SequenceFrameAction action)
     {
-        var folderPath = GetActionFolderPath(character, action);
-        MigrateLegacyActionFolderPath(character, action, folderPath);
+        var folderPath = SequenceActionFolderLayout.GetActionFolderPath(character, action);
+        SequenceActionFolderLayout.MigrateLegacyActionFolderPath(character, action, folderPath);
         Directory.CreateDirectory(folderPath);
-        Directory.CreateDirectory(GetFramesFolderPath(character, action));
-        var manifestPath = GetManifestPath(character, action);
-        if (!File.Exists(manifestPath))
+        Directory.CreateDirectory(SequenceActionFolderLayout.GetFramesFolderPath(character, action));
+        if (!File.Exists(SequenceActionFolderLayout.GetManifestPath(character, action)))
         {
-            return MigrateLegacyActionFolder(character, action);
+            return SequenceFramePool.MigrateLegacyActionFolder(character, action);
         }
 
-        try
-        {
-            var manifest = JsonSerializer.Deserialize(
-                File.ReadAllText(manifestPath, Encoding.UTF8),
-                AppJsonSerializerContext.Default.SequenceFrameManifest) ?? CreateManifest(action);
-            return NormalizeManifest(character, action, manifest);
-        }
-        catch (JsonException ex)
-        {
-            throw new InvalidDataException($"序列帧清单读取失败：{manifestPath}", ex);
-        }
-    }
-
-    private static void MigrateLegacyActionFolderPath(CharacterCard character, SequenceFrameAction action, string canonicalFolderPath)
-    {
-        if (Directory.Exists(canonicalFolderPath)) return;
-        var aliases = action.Code switch
-        {
-            "OnDamage" => new[] { "Ondm", "OnDM" },
-            "Defence" => new[] { "Defense" },
-            "FlyDown" => new[] { "Flydown" },
-            "FlyStart" => new[] { "Flystart" },
-            "StandUP" => new[] { "Standup" },
-            _ => Array.Empty<string>()
-        };
-        foreach (var alias in aliases)
-        {
-            var legacyPath = Path.Combine(character.FolderPath, ZdMaterialFolderName, alias);
-            if (!Directory.Exists(legacyPath)) continue;
-            Directory.Move(legacyPath, canonicalFolderPath);
-            return;
-        }
-    }
-
-    private SequenceFrameManifest MigrateLegacyActionFolder(CharacterCard character, SequenceFrameAction action)
-    {
-        var folderPath = GetActionFolderPath(character, action);
-        var legacyPaths = Directory
-            .EnumerateFiles(folderPath, "*", SearchOption.TopDirectoryOnly)
-            .Where(IsSupportedImage)
-            .Select(path => new
-            {
-                Path = path,
-                Index = ResolveIndex(Path.GetFileName(path))
-            })
-            .OrderBy(item => item.Index)
-            .ThenBy(item => item.Path, StringComparer.OrdinalIgnoreCase)
-            .Select(item => item.Path)
-            .ToList();
-        var manifest = CreateManifest(action);
-        foreach (var path in legacyPaths)
-        {
-            manifest.Frames.Add(new SequenceFrameManifestEntry
-            {
-                RelativePath = ImportSourceIntoPool(character, action, path)
-            });
-        }
-
-        foreach (var path in legacyPaths.Where(File.Exists))
-        {
-            File.Delete(path);
-        }
-
-        SaveManifest(character, action, manifest);
-        return manifest;
-    }
-
-    private SequenceFrameManifest NormalizeManifest(CharacterCard character, SequenceFrameAction action, SequenceFrameManifest manifest)
-    {
-        manifest.SchemaVersion = 3;
-        MigrateActionCodeAliases(manifest, action);
-        manifest.ActionCode = action.Code;
-        manifest.Fps = Math.Clamp(manifest.Fps <= 0 ? DefaultFps : manifest.Fps, 1, 60);
-        manifest.Frames ??= [];
-        for (var index = manifest.Frames.Count - 1; index >= 0; index--)
-        {
-            var entry = manifest.Frames[index];
-            if (entry is null)
-            {
-                manifest.Frames.RemoveAt(index);
-                continue;
-            }
-
-            entry.DurationFrames = Math.Clamp(entry.DurationFrames, 1, MaxFrameDuration);
-            entry.SyncId = string.IsNullOrWhiteSpace(entry.SyncId)
-                ? Guid.NewGuid().ToString("N")
-                : entry.SyncId.Trim();
-            entry.VoiceRelativePath = NormalizeRelativePath(entry.VoiceRelativePath ?? string.Empty);
-            if (entry.IsBlank)
-            {
-                entry.RelativePath = string.Empty;
-                continue;
-            }
-
-            if (string.IsNullOrWhiteSpace(entry.RelativePath))
-            {
-                manifest.Frames.RemoveAt(index);
-                continue;
-            }
-
-            entry.RelativePath = NormalizeRelativePath(entry.RelativePath);
-        }
-
-        SaveManifest(character, action, manifest);
-        return manifest;
-    }
-
-    private static void MigrateActionCodeAliases(SequenceFrameManifest manifest, SequenceFrameAction action)
-    {
-        if (string.IsNullOrWhiteSpace(manifest.ActionCode) || string.Equals(manifest.ActionCode, action.Code, StringComparison.OrdinalIgnoreCase))
-            return;
-        var aliases = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-        {
-            ["Ondm"] = "OnDamage", ["OnDM"] = "OnDamage", ["Defense"] = "Defence",
-            ["Flydown"] = "FlyDown", ["Flystart"] = "FlyStart", ["Standup"] = "StandUP"
-        };
-        if (aliases.TryGetValue(manifest.ActionCode.Trim(), out var canonical) && string.Equals(canonical, action.Code, StringComparison.OrdinalIgnoreCase))
-            manifest.ActionCode = action.Code;
-    }
-
-    private SequenceFrameManifest CreateManifest(SequenceFrameAction action)
-    {
-        return new SequenceFrameManifest
-        {
-            ActionCode = action.Code,
-            Fps = DefaultFps
-        };
-    }
-
-    private void SaveManifest(CharacterCard character, SequenceFrameAction action, SequenceFrameManifest manifest)
-    {
-        manifest.SchemaVersion = 3;
-        manifest.ActionCode = action.Code;
-        manifest.Fps = Math.Clamp(manifest.Fps <= 0 ? DefaultFps : manifest.Fps, 1, 60);
-        manifest.Frames ??= [];
-        Directory.CreateDirectory(GetActionFolderPath(character, action));
-        Directory.CreateDirectory(GetFramesFolderPath(character, action));
-        var manifestPath = GetManifestPath(character, action);
-        var text = JsonSerializer.Serialize(manifest, ManifestJsonTypeInfo);
-        var current = File.Exists(manifestPath) ? File.ReadAllText(manifestPath, Encoding.UTF8) : string.Empty;
-        if (string.Equals(text, current, StringComparison.Ordinal))
-        {
-            return;
-        }
-
-        var tempPath = $"{manifestPath}.tmp";
-        File.WriteAllText(tempPath, text, Encoding.UTF8);
-        File.Move(tempPath, manifestPath, overwrite: true);
-    }
-
-    internal static void RemapVoiceReferences(
-        CharacterCard character,
-        IReadOnlyDictionary<string, string?> pathMappings)
-    {
-        if (pathMappings.Count == 0)
-        {
-            return;
-        }
-
-        var normalizedMappings = pathMappings.ToDictionary(
-            pair => Path.GetFullPath(pair.Key),
-            pair => string.IsNullOrWhiteSpace(pair.Value) ? null : Path.GetFullPath(pair.Value),
-            StringComparer.OrdinalIgnoreCase);
-        var materialFolderPath = Path.Combine(character.FolderPath, ZdMaterialFolderName);
-        if (!Directory.Exists(materialFolderPath))
-        {
-            return;
-        }
-
-        foreach (var manifestPath in Directory.EnumerateFiles(
-                     materialFolderPath,
-                     ManifestFileName,
-                     SearchOption.AllDirectories))
-        {
-            SequenceFrameManifest? manifest;
-            try
-            {
-                manifest = JsonSerializer.Deserialize(
-                    File.ReadAllText(manifestPath, Encoding.UTF8),
-                    ManifestJsonTypeInfo);
-            }
-            catch (JsonException)
-            {
-                continue;
-            }
-
-            if (manifest?.Frames is null)
-            {
-                continue;
-            }
-
-            var changed = false;
-            foreach (var entry in manifest.Frames)
-            {
-                if (string.IsNullOrWhiteSpace(entry.VoiceRelativePath))
-                {
-                    continue;
-                }
-
-                var currentPath = Path.GetFullPath(Path.Combine(
-                    character.FolderPath,
-                    NormalizeRelativePath(entry.VoiceRelativePath)));
-                if (!normalizedMappings.TryGetValue(currentPath, out var targetPath))
-                {
-                    continue;
-                }
-
-                entry.VoiceRelativePath = targetPath is null
-                    ? string.Empty
-                    : NormalizeRelativePath(Path.GetRelativePath(character.FolderPath, targetPath));
-                changed = true;
-            }
-
-            if (!changed)
-            {
-                continue;
-            }
-
-            var tempPath = $"{manifestPath}.tmp";
-            File.WriteAllText(
-                tempPath,
-                JsonSerializer.Serialize(manifest, ManifestJsonTypeInfo),
-                Encoding.UTF8);
-            File.Move(tempPath, manifestPath, overwrite: true);
-        }
-    }
-
-    private string ImportSourceIntoPool(CharacterCard character, SequenceFrameAction action, string sourcePath)
-    {
-        var sourceFullPath = Path.GetFullPath(sourcePath);
-        var referencedCharacterFrame = EnumerateReferencedFramePaths(character)
-            .FirstOrDefault(path => string.Equals(
-                Path.GetFullPath(path),
-                sourceFullPath,
-                StringComparison.OrdinalIgnoreCase));
-        if (referencedCharacterFrame is not null)
-        {
-            return NormalizeRelativePath(Path.GetRelativePath(
-                GetActionFolderPath(character, action),
-                sourceFullPath));
-        }
-
-        var framesFolderPath = GetFramesFolderPath(character, action);
-        Directory.CreateDirectory(framesFolderPath);
-        var hash = ComputeFileHash(sourceFullPath);
-        var fileName = $"{character.Code}-{action.Code}-{hash[..16]}.png";
-        var targetPath = Path.Combine(framesFolderPath, fileName);
-        if (!File.Exists(targetPath))
-        {
-            SaveAsPng(sourceFullPath, targetPath);
-        }
-
-        return NormalizeRelativePath(Path.Combine(FramesFolderName, fileName));
+        return SequenceManifestStore.LoadAndNormalize(character, action);
     }
 
     private int ResolveManifestIndex(SequenceFrameManifest manifest, SequenceFrameItem frame)
@@ -1187,29 +672,15 @@ internal sealed class SequenceFrameService
         return manifest.Frames
             .Select((entry, index) => new { entry, index })
             .FirstOrDefault(item => string.Equals(
-                NormalizeRelativePath(item.entry.RelativePath),
-                NormalizeRelativePath(ToPoolRelativePath(frame.FilePath)),
+                SequenceActionFolderLayout.NormalizeRelativePath(item.entry.RelativePath),
+                SequenceActionFolderLayout.NormalizeRelativePath(SequenceActionFolderLayout.ToPoolRelativePath(frame.FilePath)),
                 StringComparison.OrdinalIgnoreCase))
             ?.index ?? -1;
     }
 
-    private static SequenceFrameManifestEntry CloneEntry(
-        SequenceFrameManifestEntry entry,
-        bool preserveSyncId = true)
-    {
-        return new SequenceFrameManifestEntry
-        {
-            SyncId = preserveSyncId ? entry.SyncId : Guid.NewGuid().ToString("N"),
-            RelativePath = entry.RelativePath,
-            IsBlank = entry.IsBlank,
-            DurationFrames = entry.DurationFrames,
-            VoiceRelativePath = entry.VoiceRelativePath
-        };
-    }
-
     private static string ValidateVoicePath(CharacterCard character, string voiceFilePath)
     {
-        if (!VoiceMaterialService.IsWaveFile(voiceFilePath))
+        if (!WaveFileFormat.IsWaveFile(voiceFilePath))
         {
             throw new InvalidDataException("序列帧只能绑定当前角色已有的有效 WAV 语音。");
         }
@@ -1222,146 +693,6 @@ internal sealed class SequenceFrameService
         }
 
         return fullPath;
-    }
-
-    private static string ToCharacterRelativePath(CharacterCard character, string? filePath)
-    {
-        if (string.IsNullOrWhiteSpace(filePath))
-        {
-            return string.Empty;
-        }
-
-        return NormalizeRelativePath(Path.GetRelativePath(character.FolderPath, Path.GetFullPath(filePath)));
-    }
-
-    private static string ResolveVoicePath(CharacterCard character, string? relativePath)
-    {
-        return string.IsNullOrWhiteSpace(relativePath)
-            ? string.Empty
-            : Path.GetFullPath(Path.Combine(character.FolderPath, NormalizeRelativePath(relativePath)));
-    }
-
-    private static string ComputeFileHash(string sourcePath)
-    {
-        using var stream = File.OpenRead(sourcePath);
-        var hash = SHA256.HashData(stream);
-        return Convert.ToHexString(hash).ToLowerInvariant();
-    }
-
-    private void PruneUnreferencedFrameFiles(CharacterCard character, SequenceFrameAction action, SequenceFrameManifest manifest)
-    {
-        _ = manifest;
-        var referenced = EnumerateReferencedFramePaths(character)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var framesFolderPath = GetFramesFolderPath(character, action);
-        if (!Directory.Exists(framesFolderPath))
-        {
-            return;
-        }
-
-        foreach (var file in Directory.EnumerateFiles(framesFolderPath).Where(IsSupportedImage))
-        {
-            if (!referenced.Contains(Path.GetFullPath(file)))
-            {
-                File.Delete(file);
-            }
-        }
-    }
-
-    private IEnumerable<string> EnumerateReferencedFramePaths(CharacterCard character)
-    {
-        var materialFolderPath = Path.Combine(character.FolderPath, ZdMaterialFolderName);
-        if (!Directory.Exists(materialFolderPath))
-        {
-            yield break;
-        }
-
-        foreach (var manifestPath in Directory.EnumerateFiles(materialFolderPath, ManifestFileName, SearchOption.AllDirectories))
-        {
-            SequenceFrameManifest? manifest;
-            try
-            {
-                manifest = JsonSerializer.Deserialize(
-                    File.ReadAllText(manifestPath, Encoding.UTF8),
-                    AppJsonSerializerContext.Default.SequenceFrameManifest);
-            }
-            catch
-            {
-                continue;
-            }
-
-            if (manifest?.Frames is null)
-            {
-                continue;
-            }
-
-            var actionFolderPath = Path.GetDirectoryName(manifestPath);
-            if (string.IsNullOrWhiteSpace(actionFolderPath))
-            {
-                continue;
-            }
-
-            foreach (var entry in manifest.Frames)
-            {
-                if (entry is null || entry.IsBlank || string.IsNullOrWhiteSpace(entry.RelativePath))
-                {
-                    continue;
-                }
-
-                yield return Path.GetFullPath(Path.Combine(actionFolderPath, NormalizeRelativePath(entry.RelativePath)));
-            }
-        }
-    }
-
-    private string ToManifestRelativePath(CharacterCard character, SequenceFrameAction action, string filePath)
-    {
-        var actionFolderPath = Path.GetFullPath(GetActionFolderPath(character, action));
-        var fullPath = Path.GetFullPath(filePath);
-        if (fullPath.StartsWith(actionFolderPath, StringComparison.OrdinalIgnoreCase))
-        {
-            return NormalizeRelativePath(Path.GetRelativePath(actionFolderPath, fullPath));
-        }
-
-        return ImportSourceIntoPool(character, action, filePath);
-    }
-
-    private static string ToPoolRelativePath(string filePath)
-    {
-        var fileName = Path.GetFileName(filePath);
-        return NormalizeRelativePath(Path.Combine(FramesFolderName, fileName));
-    }
-
-    private string ResolveManifestPath(CharacterCard character, SequenceFrameAction action, string relativePath)
-    {
-        var normalized = NormalizeRelativePath(relativePath);
-        return Path.GetFullPath(Path.Combine(GetActionFolderPath(character, action), normalized));
-    }
-
-    private string GetFramesFolderPath(CharacterCard character, SequenceFrameAction action)
-    {
-        return Path.Combine(GetActionFolderPath(character, action), FramesFolderName);
-    }
-
-    private string GetManifestPath(CharacterCard character, SequenceFrameAction action)
-    {
-        return Path.Combine(GetActionFolderPath(character, action), ManifestFileName);
-    }
-
-    private static string NormalizeRelativePath(string value)
-    {
-        return value.Replace('\\', '/').TrimStart('/');
-    }
-
-    private static int ResolveIndex(string fileName)
-    {
-        var name = Path.GetFileNameWithoutExtension(fileName);
-        var tail = name.Split('-', '_').LastOrDefault();
-        return int.TryParse(tail, out var index) ? index : 0;
-    }
-
-    public static bool IsSupportedImage(string path)
-    {
-        return SupportedImageExtensions.Contains(Path.GetExtension(path), StringComparer.OrdinalIgnoreCase);
     }
 
     private static SequenceFramesData NormalizeData(SequenceFramesData? data)

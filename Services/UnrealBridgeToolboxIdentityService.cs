@@ -187,12 +187,9 @@ internal sealed class UnrealBridgeToolboxIdentityService
         map.ProtocolVersion = 1;
         var path = GetPath(character);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        var temporaryPath = path + ".tmp";
-        File.WriteAllText(
-            temporaryPath,
-            JsonSerializer.Serialize(map, AppJsonSerializerContext.Default.UnrealBridgeToolboxIdentityMap),
-            new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
-        File.Move(temporaryPath, path, overwrite: true);
+        AtomicFileWriter.WriteAllText(
+            path,
+            JsonSerializer.Serialize(map, AppJsonSerializerContext.Default.UnrealBridgeToolboxIdentityMap));
     }
 
     private static void UpdateEntry(UnrealBridgeToolboxIdentityEntry entry, Candidate candidate)

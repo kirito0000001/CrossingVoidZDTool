@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 using System.Linq;
 using System.Text.RegularExpressions;
 using CrossingVoidZDTool.ViewModels;
@@ -42,6 +43,10 @@ internal sealed class UnrealLightConfigurationRequest
     public string TalkConcurrencyObjectPath { get; set; } = string.Empty;
     public List<string> HurtVoiceObjectPaths { get; set; } = [];
     public List<string> TalkVoiceObjectPaths { get; set; } = [];
+    // 目前只序列化给 Python 读，没有 C# 读回路径。标上 Populate 是预防：
+    // 哪天加了读回，System.Text.Json 会新建一个默认比较器的集合再赋值，
+    // 声明处的 OrdinalIgnoreCase 就丢了，而这类丢失是静默的。
+    [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
     public HashSet<string> SelectedStableIds { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 

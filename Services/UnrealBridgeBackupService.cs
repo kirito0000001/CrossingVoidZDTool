@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Text;
 
 namespace CrossingVoidZDTool.Services;
 
@@ -89,6 +90,11 @@ internal sealed class UnrealBridgeBackupService
             CreateNoWindow = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            // UAT 是 .NET 程序，重定向时按 UTF-8 写；父进程不指定编码就按 OEM
+            // 代码页解（中文 Windows 是 936）。这段输出只在备份失败时才会给人看，
+            // 恰恰是最不能乱码的时候——工程路径里带中文时尤其如此。
+            StandardOutputEncoding = Encoding.UTF8,
+            StandardErrorEncoding = Encoding.UTF8,
             WorkingDirectory = engineFolder.FullName
         };
         startInfo.ArgumentList.Add("ZipProjectUp");
