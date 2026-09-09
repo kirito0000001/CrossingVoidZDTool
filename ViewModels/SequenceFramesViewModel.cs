@@ -1,6 +1,5 @@
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
-using CommunityToolkit.Mvvm.ComponentModel;
 using System;
 using System.Drawing;
 using System.Drawing.Imaging;
@@ -16,7 +15,7 @@ using Microsoft.UI.Xaml.Controls;
 
 namespace CrossingVoidZDTool.ViewModels;
 
-internal sealed partial class SequenceFramesViewModel : ObservableObject
+internal sealed class SequenceFramesViewModel : ObservableObject
 {
     private static readonly (string ActionCode, VoiceMaterialKind Kind)[] VoiceKindMappings =
     [
@@ -58,15 +57,6 @@ internal sealed partial class SequenceFramesViewModel : ObservableObject
     private bool _pauseEditorPreviewWhenVoiceEnds;
     private SequenceEditorPlaybackMode _editorPlaybackMode = SequenceEditorPlaybackMode.Loop;
     private bool _isReadOnly;
-    /// <summary>
-    /// 右侧预览器当前装着哪个动作。
-    ///
-    /// 这里以前是普通字段 + 只读表达式属性，四个赋值点没有任何一处通知，
-    /// 全文件 OnPropertyChanged(nameof(PreviewSection)) 出现 0 次。
-    /// 目前只被 code-behind 直读所以没暴露出来，谁在 XAML 里绑它就是个死值。
-    /// 改成源生成属性之后，赋值即通知，不再依赖谁记得补。
-    /// </summary>
-    [ObservableProperty]
     private SequenceFrameSection? _previewSection;
     private SequenceFrameSection? _selectedSection;
     private SequenceFrameItem? _selectedEditorFrame;
@@ -252,6 +242,19 @@ internal sealed partial class SequenceFramesViewModel : ObservableObject
 
     public bool HasSelectedSection => SelectedSection is not null;
 
+
+    /// <summary>
+    /// 右侧预览器当前装着哪个动作。
+    ///
+    /// 这里以前是普通字段 + 只读表达式属性，四个赋值点没有任何一处通知，
+    /// 全文件 OnPropertyChanged(nameof(PreviewSection)) 出现 0 次。
+    /// 当时只被 code-behind 直读所以没暴露，谁在 XAML 里绑它就是个死值。
+    /// </summary>
+    public SequenceFrameSection? PreviewSection
+    {
+        get => _previewSection;
+        private set => SetProperty(ref _previewSection, value);
+    }
 
     public SequenceFrameItem? SelectedEditorFrame
     {
@@ -602,7 +605,7 @@ internal sealed partial class SequenceFramesViewModel : ObservableObject
         }
 
         _previewIndex = 0;
-        _previewSection = section;
+        PreviewSection = section;
         PreviewTitle = $"{section.Action.DisplayName} / {section.Action.Code}";
         IsPreviewing = false;
         UpdateCurrentFrame(PreviewFrames.FirstOrDefault());
@@ -1111,12 +1114,12 @@ internal sealed partial class SequenceFramesViewModel : ObservableObject
 
     private void SaveSelectedSectionFps(int fps)
     {
-        if (_currentCharacter is null || _previewSection is null)
+        if (_currentCharacter is null || PreviewSection is null)
         {
             return;
         }
 
-        var actionCode = _previewSection.Action.Code;
+        var actionCode = PreviewSection.Action.Code;
         if (string.IsNullOrWhiteSpace(actionCode))
         {
             return;
@@ -1131,14 +1134,14 @@ internal sealed partial class SequenceFramesViewModel : ObservableObject
 
         settings.Fps = fps;
         _sequenceFrameService.SaveData(_currentCharacter, _data);
-        _sequenceFrameService.SetActionFps(_currentCharacter, _previewSection.Action, fps);
+        _sequenceFrameService.SetActionFps(_currentCharacter, PreviewSection.Action, fps);
         SequenceFramesSaved?.Invoke(this, EventArgs.Empty);
     }
 
     private void ClearPreview()
     {
         PreviewFrames.Clear();
-        _previewSection = null;
+        PreviewSection = null;
         PreviewTitle = "未选择动作";
         CurrentFrameUri = string.Empty;
         CurrentFrameFilePath = string.Empty;
@@ -1193,7 +1196,7 @@ internal sealed partial class SequenceFramesViewModel : ObservableObject
             ComboSections[comboIndex] = updatedSection;
         }
 
-        _previewSection = updatedSection;
+        PreviewSection = updatedSection;
         SelectedSection = updatedSection;
         SynchronizeFrameCollection(PreviewFrames, orderedFrames);
         SynchronizeFrameCollection(SelectedSectionFrames, orderedFrames);
@@ -1355,9 +1358,9 @@ internal sealed partial class SequenceFramesViewModel : ObservableObject
         var updatedSection = ApplyVoiceSyncAnalysis(SelectedSection);
         SelectedSection = updatedSection;
         SynchronizeFrameCollection(SelectedSectionFrames, updatedSection.Frames);
-        if (_previewSection?.Action.Code == updatedSection.Action.Code)
+        if (PreviewSection?.Action.Code == updatedSection.Action.Code)
         {
-            _previewSection = updatedSection;
+            PreviewSection = updatedSection;
             SynchronizeFrameCollection(PreviewFrames, updatedSection.Frames);
             _previewIndex = PreviewFrames.Count == 0
                 ? 0
@@ -1414,7 +1417,7 @@ internal sealed partial class SequenceFramesViewModel : ObservableObject
         var width = MaterialSequenceNaming.GetWidth(total);
         var frameIndexText = $"{frame.Index.ToString().PadLeft(width, '0')}/{total.ToString().PadLeft(width, '0')}";
         CurrentFrameText = $"{frameIndexText}  {frame.PlainFileName}  |  {frame.ActualWidth}x{frame.ActualHeight}";
-        if (SelectedSection?.Action.Code == _previewSection?.Action.Code &&
+        if (SelectedSection?.Action.Code == PreviewSection?.Action.Code &&
             !Equals(_selectedEditorFrame, frame))
         {
             SetProperty(ref _selectedEditorFrame, frame, nameof(SelectedEditorFrame));

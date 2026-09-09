@@ -6283,8 +6283,10 @@ static void CharacterOwnedPathsArePortableOnDisk()
 
         // 读回来必须还原成能直接喂给图片控件的绝对路径
         var reloaded = service.Load(character);
-        AssertEqual(iconPath, reloaded.Skills.FirstSkill[0].IconPath);
-        AssertEqual(iconPath, reloaded.Buffs.Buffs[0].IconPath);
+        AssertEqual(true, reloaded.Skills is not null);
+        AssertEqual(true, reloaded.Buffs is not null);
+        AssertEqual(iconPath, reloaded.Skills!.FirstSkill[0].IconPath);
+        AssertEqual(iconPath, reloaded.Buffs!.Buffs[0].IconPath);
         AssertEqual(true, File.Exists(reloaded.Buffs.Buffs[0].IconPath));
     }
     finally
@@ -6318,9 +6320,10 @@ static void PortablePathsSurviveCharacterFolderMove()
 
         var moved = CreateCharacter(completedFolder, "Misaka", "御坂美琴") with { IsCompleted = true };
         var reloaded = service.Load(moved);
+        AssertEqual(true, reloaded.Skills is not null);
         AssertEqual(
             Path.Combine(completedFolder, "AssetMaterial", "SkillIcon", "Misaka-1.png"),
-            reloaded.Skills.FirstSkill[0].IconPath);
+            reloaded.Skills!.FirstSkill[0].IconPath);
         AssertEqual(true, File.Exists(reloaded.Skills.FirstSkill[0].IconPath));
     }
     finally
