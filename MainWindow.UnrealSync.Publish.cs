@@ -553,19 +553,15 @@ namespace CrossingVoidZDTool
                     var line =
                         $"[Sync Execution Item] stableId={item.StableId} succeeded={item.Succeeded} " +
                         $"objectPath={FormatSyncLogValue(item.ObjectPath)} message={FormatSyncLogValue(item.Message)}";
-                    if (item.Succeeded)
-                    {
-                        AppendDiagnosticLog(LogKind.Info, line);
-                    }
-                    else
-                    {
-                        AppendLog(LogKind.Error, line);
-                    }
+                    // 成功项也进日志面板，和第五步保持一致：用户要能看到「这一条到底做了什么」，
+                    // 而不只是失败时才有交代。面板有 300 条上限，超出的会被挤掉，
+                    // 但完整明细同时也落在 runtime.log 里，回头查得到。
+                    AppendLog(item.Succeeded ? LogKind.Info : LogKind.Error, line);
                 }
 
                 if (result.Items.Count > 0)
                 {
-                    AppendLog(LogKind.Info, $"[Sync Execution] 共 {result.Items.Count} 条明细，已写入 runtime.log。");
+                    AppendLog(LogKind.Info, $"[Sync Execution] 共 {result.Items.Count} 条明细，完整记录见 runtime.log。");
                 }
 
                 UpdateGlobalProgress("阶段 4/5 · 正在复扫验证 Unreal 资产", 86, $"角色：{character.Code} · 等待 Unreal 导出结果", true);

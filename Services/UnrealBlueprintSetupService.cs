@@ -228,8 +228,8 @@ internal sealed class UnrealBlueprintSetupService
             payload.PointCosts.Add(ParseInt(entry.PtCost, location, "Pt消耗", failures));
             payload.AttackCapacities.Add(ParseInt(entry.AttackCapacity, location, "攻击容量", failures));
             payload.AutoPriorities.Add(ParseInt(entry.AutoPriority, location, "自动优先级", failures));
-            payload.SkillStates.Add(MapSkillStateToUnreal(entry.SkillState));
-            payload.PreformTypes.Add(MapGuardStateToUnreal(entry.GuardState));
+            payload.SkillStates.Add(MapSkillStateToUnreal(entry.SkillState, location, failures));
+            payload.PreformTypes.Add(MapGuardStateToUnreal(entry.GuardState, location, failures));
             payload.PreSkillValues.Add(ParseDouble(entry.GuardValue, location, "守备数值", failures));
             payload.SkillRates.Add(BuildSkillRate(entry.LevelMultipliers, location, failures));
         }
@@ -254,22 +254,53 @@ internal sealed class UnrealBlueprintSetupService
     }
 
     /// <summary>工具箱的中文选项 -> Unreal 的 E2DSkillType 名称。</summary>
-    public static string MapSkillStateToUnreal(string? value) => (value ?? string.Empty).Trim() switch
+    /// <summary>
+    /// 工具箱的中文选项 -> Unreal 的 E2DSkillState 名称。
+    ///
+    /// 「空」是合法取值（空中状态），没填也当空中——这两种都是正常的。
+    /// 但**认不出来的非空文本**以前也一起无声变成 Air：角色 JSON 被手改过、
+    /// 或从别处导入过来时，一个有意义的状态就这么被抹掉了，
+    /// 症状和「技能倍率被静默写成 0」是同一族。所以现在要记账。
+    /// </summary>
+    public static string MapSkillStateToUnreal(
+        string? value,
+        string? location = null,
+        SkillNumberParseFailures? failures = null)
     {
-        "常态" => "Normal",
-        "禁用" => "Disable",
-        "舍弃" => "Abandon",
-        _ => "Air",
-    };
+        var text = (value ?? string.Empty).Trim();
+        switch (text)
+        {
+            case "常态": return "Normal";
+            case "禁用": return "Disable";
+            case "舍弃": return "Abandon";
+            case "空":
+            case "": return "Air";
+            default:
+                failures?.Add(location ?? string.Empty, "技能状态", text, "可选的技能状态");
+                return "Air";
+        }
+    }
 
     /// <summary>工具箱的中文选项 -> Unreal 的 EPreformType 名称。</summary>
-    public static string MapGuardStateToUnreal(string? value) => (value ?? string.Empty).Trim() switch
+    /// <summary>工具箱的中文选项 -> Unreal 的 EPreformType 名称。理由同上。</summary>
+    public static string MapGuardStateToUnreal(
+        string? value,
+        string? location = null,
+        SkillNumberParseFailures? failures = null)
     {
-        "防御" => "Defense",
-        "反击" => "Attack",
-        "闪避" => "Dodge",
-        _ => "Air",
-    };
+        var text = (value ?? string.Empty).Trim();
+        switch (text)
+        {
+            case "防御": return "Defense";
+            case "反击": return "Attack";
+            case "闪避": return "Dodge";
+            case "空":
+            case "": return "Air";
+            default:
+                failures?.Add(location ?? string.Empty, "守备类型", text, "可选的守备类型");
+                return "Air";
+        }
+    }
 
     /// <summary>
     /// 数值一律按不变区域解析，和 <see cref="UnrealProjectSyncService"/> 把 Unreal 侧数值
@@ -327,7 +358,7 @@ internal sealed class UnrealBlueprintSetupService
     /// 而每跑一遍都要起一次 Unreal 编辑器，所以先把这一轮的问题攒齐再一次性报出来。
     /// 列举有上限是因为这条消息要塞进浮动提示，列一百行没人看得完。
     /// </summary>
-    private sealed class SkillNumberParseFailures(string characterCode)
+    internal sealed class SkillNumberParseFailures(string characterCode)
     {
         private const int MaxListedCount = 10;
 

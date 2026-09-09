@@ -135,6 +135,9 @@ var tests = new (string Name, Action Run)[]
     ("诊断条目不算成功的动作", DiagnosticItemsDoNotCountAsSucceededActions),
     ("技能数值解析不了要报错不要归零", UnparsableSkillNumbersAreReportedNotZeroed),
     ("技能数值在逗号小数点区域仍能往返", SkillNumbersSurviveCommaDecimalCulture),
+    ("多余图片可删但其他图片受保护", StaleImagesAreDeletableExceptUnclassified),
+    ("认不出的技能状态要报错不要吞成空中", UnknownSkillStatesAreReported),
+    ("序列反推得其他时按名字归类语音", VoiceBucketsFallBackToNameWhenSequenceSaysOther),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
@@ -5271,10 +5274,11 @@ static void TechnicalDebtRatchetOnlyGoesDown()
         .Select(path => File.ReadAllLines(path, Encoding.UTF8).Length)
         .DefaultIfEmpty(0)
         .Max();
-    // UnrealProjectSyncService 一个类干十件事，这个数字贴着上限。
-    // 下一步是把它里面 1130 行零 IO 的纯函数抽出去（预览投影 + 素材分类），
-    // 那两段没有任何外部调用方，抽出即降到约 2050——方案见 Plan/02-重构方案.md 的 P2。
-    Ratchet("Services 最大单文件行数", largestService, 3126);
+    // 3126 -> 2009：预览投影和素材分类那两段（合计约 1130 行零 IO 的纯函数、
+    // 没有任何外部调用方）已经抽成 UnrealCharacterPreviewFactory 和
+    // UnrealMaterialClassifier。剩下的还能再拆（写回工具箱、导出编排、清单解析），
+    // 见 Plan/02-重构方案.md 的 P2。
+    Ratchet("Services 最大单文件行数", largestService, 2009);
 
     // 5) 断言源码文本的用例数。这类断言查的是变量名和换行位置，
     //    改个命名就假报警，却拦不住逻辑写错——而且它们把反模式固化住了
@@ -5302,6 +5306,88 @@ static (CharacterCard Character, CharacterInfoData Info, CharacterSkillsData Ski
     var skills = new CharacterSkillsData();
     skills.FirstSkill.Add(new CharacterSkillEntry { TrueName = "超电磁炮" });
     return (character, info, skills);
+}
+
+static UnrealBridgeChange CreateImageDeleteChange(string kind, string assetName)
+{
+    // 语义快照把素材分类塞在 PayloadJson 的第一段，分隔符是 0x1F
+    var payload = string.Join('\u001f', kind, assetName);
+    var unrealItem = new UnrealBridgeSnapshotItem(
+        $"material:{assetName}", $"module:{UnrealBridgeModule.BaseMaterials}",
+        UnrealBridgeModule.BaseMaterials, assetName, "unreal-hash", payload, string.Empty,
+        SourceObjectPath: $"/Game/AssetMaterial/ImageS/CharaterS/Misaka/{assetName}.{assetName}",
+        NormalizedName: assetName);
+    return new UnrealBridgeChange(
+        $"material:{assetName}", UnrealBridgeModule.BaseMaterials, assetName,
+        UnrealBridgeChangeKind.DeleteCandidate, null, unrealItem, false);
+}
+
+static void StaleImagesAreDeletableExceptUnclassified()
+{
+    // 以前只有序列帧的待删除能执行，于是 Unreal 侧多出来的图片和语音只能一直
+    // 挂在差异列表里，第三步的差异永远归不了零。
+    // 但「其他图片」是有意停在那儿的东西（还没归类、或压根不归工具箱管），
+    // 不能因为工具箱这边没有同名文件就当成多余资产删掉。
+    AssertEqual(true, UnrealBridgePublishSupportPolicy.CanExecute(
+        CreateImageDeleteChange(nameof(BaseMaterialKind.SkillIcon), "Misaka-SkillIcon-9")));
+    AssertEqual(true, UnrealBridgePublishSupportPolicy.CanExecute(
+        CreateImageDeleteChange(nameof(BaseMaterialKind.BattleAvatar), "Misaka-Avatar-9")));
+
+    // 其他图片：不许删
+    AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(
+        CreateImageDeleteChange(nameof(BaseMaterialKind.OtherImage), "Misaka-随手放的图")));
+
+    // 分类读不出来时也不许删——拿不准就留着，删错的代价高得多
+    AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(
+        CreateImageDeleteChange(string.Empty, "Misaka-来路不明")));
+
+    // 不知道删哪一个（没有对象路径）同样不许执行
+    var noPath = CreateImageDeleteChange(nameof(BaseMaterialKind.SkillIcon), "Misaka-SkillIcon-8");
+    AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(
+        noPath with { UnrealItem = noPath.UnrealItem! with { SourceObjectPath = string.Empty } }));
+}
+
+static void UnknownSkillStatesAreReported()
+{
+    // 「空」是合法取值（空中状态），没填也当空中——这两种都正常。
+    // 但认不出来的非空文本以前也一起无声变成 Air：角色 JSON 被手改过、
+    // 或从别处导入时，一个有意义的状态就这么被抹掉了。
+    AssertEqual("Normal", UnrealBlueprintSetupService.MapSkillStateToUnreal("常态"));
+    AssertEqual("Air", UnrealBlueprintSetupService.MapSkillStateToUnreal("空"));
+    AssertEqual("Air", UnrealBlueprintSetupService.MapSkillStateToUnreal(string.Empty));
+    AssertEqual("Defense", UnrealBlueprintSetupService.MapGuardStateToUnreal("防御"));
+    AssertEqual("Air", UnrealBlueprintSetupService.MapGuardStateToUnreal("空"));
+
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var (character, info, skills) = BuildBlueprintSetupFixture(root);
+        skills.FirstSkill[0].SkillState = "常態";  // 繁体，认不出来
+        var service = new UnrealBlueprintSetupService();
+
+        var threw = false;
+        try
+        {
+            service.BuildRequest(character, info, skills, []);
+        }
+        catch (Exception error)
+        {
+            threw = true;
+            AssertEqual(true, error.Message.Contains("常態", StringComparison.Ordinal));
+            AssertEqual(true, error.Message.Contains("技能状态", StringComparison.Ordinal));
+        }
+
+        AssertEqual(true, threw);
+
+        // 合法取值不该报错
+        skills.FirstSkill[0].SkillState = "常态";
+        skills.FirstSkill[0].GuardState = "空";
+        service.BuildRequest(character, info, skills, []);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
 }
 
 static void UnparsableSkillNumbersAreReportedNotZeroed()
@@ -5371,7 +5457,7 @@ static void SkillNumbersSurviveCommaDecimalCulture()
 
         // 走完整往返：Unreal 侧的数值 -> 回填成文本 -> 存进角色数据 -> 第六步再解析回去。
         // 格式化用当前区域、解析用不变区域这个不对称，正是在这里断掉的。
-        var formatted = UnrealProjectSyncService.FormatDouble(1.5);
+        var formatted = UnrealCharacterPreviewFactory.FormatDouble(1.5);
         AssertEqual("1.5", formatted);
         skills.FirstSkill[0].GuardValue = formatted;
 
@@ -5474,14 +5560,14 @@ static void ProcessOrchestrationIsNotDuplicated()
     // 起进程、轮询、杀进程树这套编排原本在四个服务里各抄了一份，
     // 除了轮询间隔各不相同之外还共享同样的两个坑（取消杀不掉、读到上一轮结果）。
     // 收敛到 UnrealProcessRunner 之后，这条守卫挡住「下次又各自抄一份」。
-    string[] shouldNotOrchestrate =
-    [
-        Path.Combine("Services", "UnrealProjectSyncService.cs"),
-        Path.Combine("Services", "UnrealBlueprintSetupService.cs"),
-        Path.Combine("Services", "UnrealBridgeExecutorService.cs"),
-        Path.Combine("Services", "UnrealLightConfigurationService.cs"),
-        Path.Combine("Services", "UnrealAssetBrowseService.cs"),
-    ];
+    // 扫整个 Services（含子目录），而不是写死几个文件名——
+    // 拆分会不断往子目录里搬东西，写死清单必然留下盲区。
+    // 只放过 Runner 自己：编排就该在那一个地方。
+    var runnerFileName = "UnrealProcessRunner.cs";
+    var shouldNotOrchestrate = Directory
+        .EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories)
+        .Where(path => !string.Equals(Path.GetFileName(path), runnerFileName, StringComparison.OrdinalIgnoreCase))
+        .ToArray();
 
     foreach (var path in shouldNotOrchestrate)
     {
@@ -8254,8 +8340,66 @@ static void UnrealBridgeExporterProducesVoiceBuckets()
     AssertEqual(true, script.Contains("output_path = os.path.join(folder, \"{}.wav\"", StringComparison.Ordinal));
     AssertEqual(true, script.Contains("_export_sound_wave(asset, export_root)", StringComparison.Ordinal));
     AssertEqual(true, script.Contains("\"schemaVersion\": 2", StringComparison.Ordinal));
-    AssertEqual(true, service.Contains("BuildVoiceBuckets(zdAssets, sequencePreview)", StringComparison.Ordinal));
+
+    // 这里原本还有一条 service.Contains("BuildVoiceBuckets(zdAssets, sequencePreview)")，
+    // 断言的是「某个方法名出现在某个文件里」。方法被抽到 UnrealMaterialClassifier
+    // 之后它只因为限定前缀不影响子串匹配才没红——纯属侥幸，而且它本来也拦不住
+    // 分桶逻辑写错。真正该验的行为放在下面那条独立用例里。
 }
+
+static void VoiceBucketsFallBackToNameWhenSequenceSaysOther()
+{
+    // 第一批修的那条：一条失败语音只要被任何一个「不认识的动作」的 PlaySound
+    // 通知引用过，序列反推就返回 Other，而以前只要反推命中就直接采用、
+    // 绝不回退到按名字识别 —— 文件名里明写着 Defeat 也没用。
+    // 标准动作表有 19 个，反推只认得其中 9 个，所以这条触发得相当容易。
+    const string voicePath = "/Game/GameActor2D/Misaka/Sound/Defeat/Misaka-Defeat-1.Misaka-Defeat-1";
+
+    var asset = new UnrealProjectExportAsset
+    {
+        AssetName = "Misaka-Defeat-1",
+        AssetClass = "SoundWave",
+        PackagePath = "/Game/GameActor2D/Misaka/Sound/Defeat",
+        ObjectPath = voicePath,
+    };
+
+    // Dodge 是标准动作，但反推的 switch 不认得它 -> 返回 Other
+    var dodge = CreateVoiceCarryingAction("Dodge", voicePath);
+    var preview = new UnrealProjectSyncSequenceFramesPreview(
+        true, false, string.Empty, string.Empty, [dodge], [], [], [], []);
+
+    var buckets = UnrealMaterialClassifier.BuildVoiceBuckets([asset], preview);
+    var bucket = buckets.Single(item => item.Assets.Any(entry => entry.AssetName == "Misaka-Defeat-1"));
+    AssertEqual(VoiceMaterialKind.Defeat.ToString(), bucket.Kind);
+
+    // 反推认得的动作仍然以反推为准：这条语音名字里没有任何分类线索，
+    // 全靠 Click 这个动作定性。
+    var clickOnly = new UnrealProjectExportAsset
+    {
+        AssetName = "Misaka-Vo-7",
+        AssetClass = "SoundWave",
+        PackagePath = "/Game/GameActor2D/Misaka/Sound/Other",
+        ObjectPath = "/Game/GameActor2D/Misaka/Sound/Other/Misaka-Vo-7.Misaka-Vo-7",
+    };
+    var click = CreateVoiceCarryingAction("Click", clickOnly.ObjectPath);
+    var clickPreview = new UnrealProjectSyncSequenceFramesPreview(
+        true, false, string.Empty, string.Empty, [click], [], [], [], []);
+    var clickBuckets = UnrealMaterialClassifier.BuildVoiceBuckets([clickOnly], clickPreview);
+    AssertEqual(
+        VoiceMaterialKind.Click.ToString(),
+        clickBuckets.Single(item => item.Assets.Any(entry => entry.AssetName == "Misaka-Vo-7")).Kind);
+}
+
+static UnrealProjectSyncSequenceActionPreview CreateVoiceCarryingAction(string actionCode, string voiceObjectPath) =>
+    new(
+        actionCode, actionCode, string.Empty, "base", string.Empty, true,
+        [1], 1, 1, 0, 0, 0, 12, [], [],
+        SoundNotifies:
+        [
+            new UnrealProjectSyncSequenceSoundNotifyPreview(
+                0, 0, 0, voiceObjectPath, "Misaka-Defeat-1", "SoundWave", string.Empty,
+                IsCharacterVoice: true),
+        ]);
 
 static void UnrealBridgeSequenceVoiceNotificationsClassifyAndBindFrames()
 {
