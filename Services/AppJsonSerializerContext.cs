@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace CrossingVoidZDTool.Services;
@@ -42,9 +43,29 @@ namespace CrossingVoidZDTool.Services;
 [JsonSerializable(typeof(UnrealLightConfigurationResult))]
 [JsonSerializable(typeof(UnrealLightConfigurationResultItem))]
 [JsonSerializable(typeof(UnrealAssetBrowsePayload))]
+[JsonSerializable(typeof(ProjectSharedMaterialIndex))]
+[JsonSerializable(typeof(ProjectSharedMaterialItem))]
 [JsonSerializable(typeof(string[]))]
 internal sealed partial class AppJsonSerializerContext : JsonSerializerContext
 {
+    private static AppJsonSerializerContext? s_indented;
+
+    /// <summary>
+    /// 落盘要缩进（用户会直接打开看的文件）时用这一份，别自己 new 一个 JsonSerializerOptions 再喂给构造函数。
+    ///
+    /// <see cref="JsonSourceGenerationOptionsAttribute"/> 上写的 PropertyNameCaseInsensitive 只会烘进
+    /// <see cref="Default"/> 自带的那份 options；<c>new AppJsonSerializerContext(自己造的 options)</c>
+    /// 拿到的是一份干净默认值，大小写不敏感就悄悄没了——读一个属性名大小写不同的文件时字段被静默丢弃，
+    /// 既不报错也没有痕迹。
+    ///
+    /// 这里从 <c>Default.Options</c> 复制一份再只改 WriteIndented，所以将来往
+    /// <see cref="JsonSourceGenerationOptionsAttribute"/> 上加别的开关，这条路径也会自动跟上。
+    /// </summary>
+    public static AppJsonSerializerContext Indented =>
+        s_indented ??= new AppJsonSerializerContext(new JsonSerializerOptions(Default.Options)
+        {
+            WriteIndented = true
+        });
 }
 
 /// <summary>

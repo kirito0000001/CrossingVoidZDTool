@@ -223,6 +223,16 @@ internal sealed class UnrealBridgeSyncState
 
     public string TemplateCharacterCode { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 基线条目，键是 StableId。
+    ///
+    /// Populate 不能省：System.Text.Json 对有 setter 的集合属性默认是 Replace，
+    /// 会自己 new 一个默认比较器的字典填完再赋值，字段初始化器里的 OrdinalIgnoreCase 保不住。
+    /// 这张表是 UnrealBridgeDiffService 判「有没有变过」的唯一依据——
+    /// 比较器一退化成大小写敏感，同一个素材换个大小写就查不到基线，
+    /// 已经同步过的东西会被重新判成新增或冲突，第三步的差异永远归不了零。
+    /// </summary>
+    [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
     public Dictionary<string, UnrealBridgeSyncStateEntry> Entries { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 }
 
@@ -243,6 +253,11 @@ internal sealed class UnrealBridgeToolboxIdentityMap
 {
     public int ProtocolVersion { get; set; } = 1;
 
+    /// <summary>
+    /// 素材身份，键是 SyncId。同上，Populate 是为了让读回来的字典保留 OrdinalIgnoreCase——
+    /// <see cref="Services.UnrealBridgeToolboxIdentityService.TryResolveAssignedPath"/> 直接拿它 TryGetValue。
+    /// </summary>
+    [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
     public Dictionary<string, UnrealBridgeToolboxIdentityEntry> Entries { get; set; } =
         new(StringComparer.OrdinalIgnoreCase);
 }

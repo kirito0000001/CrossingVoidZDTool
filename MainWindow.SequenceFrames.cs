@@ -178,7 +178,7 @@ namespace CrossingVoidZDTool
             var paths = items
                 .OfType<StorageFile>()
                 .Select(file => file.Path)
-                .Where(SequenceFrameService.IsSupportedImage)
+                .Where(SequenceFramePool.IsSupportedImage)
                 .ToList();
             if (paths.Count == 0)
             {

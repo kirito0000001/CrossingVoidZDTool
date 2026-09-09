@@ -16,13 +16,12 @@ internal sealed class CharacterToolboxDataService
     private const string BackupFolderName = "ZDToolboxDataBackups";
     private static readonly ConcurrentDictionary<string, object> FileLocks = new(StringComparer.OrdinalIgnoreCase);
 
-    private static readonly JsonSerializerOptions JsonOptions = new()
-    {
-        WriteIndented = true
-    };
-
-    private static readonly AppJsonSerializerContext JsonContext = new(JsonOptions);
-    private static readonly JsonTypeInfo<CharacterToolboxData> ToolboxDataJsonTypeInfo = JsonContext.CharacterToolboxData;
+    // 角色数据是用户会直接打开看的，落盘要缩进；但缩进不能靠自己 new 一份 options 去构造上下文——
+    // 那样会把 [JsonSourceGenerationOptions] 里的 PropertyNameCaseInsensitive 一起丢掉，
+    // 于是同一个 ZDToolboxData.json，写用实例上下文、读用 .Default，两条路径对属性名大小写的宽容度不一样。
+    // AppJsonSerializerContext.Indented 是从 Default.Options 复制出来的，只多一个 WriteIndented。
+    private static readonly JsonTypeInfo<CharacterToolboxData> ToolboxDataJsonTypeInfo =
+        AppJsonSerializerContext.Indented.CharacterToolboxData;
 
     public CharacterToolboxData Load(CharacterCard character)
     {

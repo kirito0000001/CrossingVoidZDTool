@@ -29,6 +29,9 @@ internal static class CharacterFolderLayout
     public const string ReferenceImages = "ReferenceImages";
     public const string Frames = "Frames";
 
+    /// <summary>角色自己的 Zip 备份，放在 tool 下。</summary>
+    public const string CharacterBackups = "CharacterBackups";
+
     /// <summary>工作区根下的三个状态目录。</summary>
     public const string Draft = "Draft";
     public const string Completed = "Completed";

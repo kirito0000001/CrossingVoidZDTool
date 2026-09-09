@@ -112,7 +112,7 @@ internal sealed class VoiceMaterialService
             StringComparer.OrdinalIgnoreCase);
         if (remap.Count > 0)
         {
-            SequenceFrameService.RemapVoiceReferences(character, remap);
+            SequenceVoiceBindingService.RemapVoiceReferences(character, remap);
         }
 
         return imported;
@@ -150,7 +150,7 @@ internal sealed class VoiceMaterialService
         if (File.Exists(targetPath))
         {
             File.Delete(targetPath);
-            SequenceFrameService.RemapVoiceReferences(character, new Dictionary<string, string?>
+            SequenceVoiceBindingService.RemapVoiceReferences(character, new Dictionary<string, string?>
             {
                 [Path.GetFullPath(targetPath)] = null
             });
@@ -176,7 +176,7 @@ internal sealed class VoiceMaterialService
         if (File.Exists(filePath))
         {
             File.Delete(filePath);
-            SequenceFrameService.RemapVoiceReferences(character, new Dictionary<string, string?>
+            SequenceVoiceBindingService.RemapVoiceReferences(character, new Dictionary<string, string?>
             {
                 [filePath] = null
             });
@@ -220,7 +220,7 @@ internal sealed class VoiceMaterialService
             File.Delete(path);
         }
 
-        SequenceFrameService.RemapVoiceReferences(
+        SequenceVoiceBindingService.RemapVoiceReferences(
             character,
             deletedPaths.ToDictionary(
                 path => path,
@@ -283,7 +283,7 @@ internal sealed class VoiceMaterialService
             .ToArray();
         var appliedMoves = MaterialSequenceNaming.RenameFilesAtomically(moves);
         RemapToolboxIdentities(character, appliedMoves);
-        SequenceFrameService.RemapVoiceReferences(
+        SequenceVoiceBindingService.RemapVoiceReferences(
             character,
             appliedMoves.ToDictionary(
                 move => move.SourcePath,
@@ -418,37 +418,6 @@ internal sealed class VoiceMaterialService
         }
     }
 
-    public static bool IsWaveFile(string path)
-    {
-        if (!string.Equals(Path.GetExtension(path), ".wav", StringComparison.OrdinalIgnoreCase) ||
-            !File.Exists(path))
-        {
-            return false;
-        }
-
-        try
-        {
-            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            if (stream.Length < 12)
-            {
-                return false;
-            }
-
-            Span<byte> header = stackalloc byte[12];
-            return stream.Read(header) == header.Length &&
-                   header[..4].SequenceEqual(Encoding.ASCII.GetBytes("RIFF")) &&
-                   header[8..12].SequenceEqual(Encoding.ASCII.GetBytes("WAVE"));
-        }
-        catch (IOException)
-        {
-            return false;
-        }
-        catch (UnauthorizedAccessException)
-        {
-            return false;
-        }
-    }
-
     private static VoiceMaterialSection LoadSection(CharacterCard character, VoiceMaterialSpec spec)
     {
         var folderPath = Path.Combine(GetSoundFolderPath(character), spec.FolderName);
@@ -494,7 +463,7 @@ internal sealed class VoiceMaterialService
             : fileName.Equals(
                 BuildFileName(characterCode, spec, index, totalCount),
                 StringComparison.OrdinalIgnoreCase));
-        var isReady = validName && IsWaveFile(path);
+        var isReady = validName && WaveFileFormat.IsWaveFile(path);
         return new VoiceMaterialItem(
             spec.Kind,
             spec.DisplayName,
@@ -592,7 +561,7 @@ internal sealed class VoiceMaterialService
         if (appliedRenames.Count > 0)
         {
             RemapToolboxIdentities(character, appliedRenames);
-            SequenceFrameService.RemapVoiceReferences(
+            SequenceVoiceBindingService.RemapVoiceReferences(
                 character,
                 appliedRenames.ToDictionary(
                     rename => rename.SourcePath,
@@ -743,7 +712,7 @@ internal sealed class VoiceMaterialService
 
     private static void ValidateWaveFile(string path)
     {
-        if (!IsWaveFile(path))
+        if (!WaveFileFormat.IsWaveFile(path))
         {
             throw new InvalidDataException("仅支持具有有效 RIFF/WAVE 文件头的 .wav 文件。");
         }

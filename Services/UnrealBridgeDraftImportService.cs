@@ -14,17 +14,23 @@ internal sealed class UnrealBridgeDraftImportService
     // UnrealToolboxWriteBackService——本类只需要「写回」，不需要找引擎、跑 commandlet、读清单。
     private readonly UnrealToolboxWriteBackService _writeBackService;
 
+    // 导入失败要能整个退回去，所以还需要角色备份。它以前是从
+    // CharacterWorkspaceService 上顺手拿的，那个类因此一直背着备份职责。
+    private readonly CharacterBackupService _backupService;
+
     public UnrealBridgeDraftImportService()
-        : this(new CharacterWorkspaceService(), new UnrealToolboxWriteBackService())
+        : this(new CharacterWorkspaceService(), new UnrealToolboxWriteBackService(), new CharacterBackupService())
     {
     }
 
     internal UnrealBridgeDraftImportService(
         CharacterWorkspaceService workspaceService,
-        UnrealToolboxWriteBackService writeBackService)
+        UnrealToolboxWriteBackService writeBackService,
+        CharacterBackupService? backupService = null)
     {
         _workspaceService = workspaceService;
         _writeBackService = writeBackService;
+        _backupService = backupService ?? new CharacterBackupService();
     }
 
     public UnrealBridgeDraftImportResult Import(
@@ -68,7 +74,7 @@ internal sealed class UnrealBridgeDraftImportService
         CharacterBackupEntry? rollbackBackup = null;
         if (!ensureResult.CreatedNewFolder)
         {
-            rollbackBackup = _workspaceService.BackupCharacter(
+            rollbackBackup = _backupService.BackupCharacter(
                 character,
                 "从虚幻导入前自动保护",
                 CharacterBackupKinds.Automatic);
@@ -175,7 +181,7 @@ internal sealed class UnrealBridgeDraftImportService
                 throw new InvalidOperationException("已有 Draft 导入失败，但没有可用于自动恢复的备份。");
             }
 
-            _workspaceService.RestoreCharacterBackup(character, rollbackBackup);
+            _backupService.RestoreCharacterBackup(character, rollbackBackup);
             return;
         }
 

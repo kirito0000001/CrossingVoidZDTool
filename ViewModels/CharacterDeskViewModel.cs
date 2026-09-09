@@ -11,6 +11,12 @@ namespace CrossingVoidZDTool.ViewModels;
 internal sealed class CharacterDeskViewModel : ObservableObject
 {
     private readonly CharacterWorkspaceService _characterWorkspaceService;
+
+    // 备份、参考图、导出已经从工作区服务里拆出去了（见 Services/Workspace）。
+    // 这里直接 new，是为了不动构造函数签名——它同时被 ApplicationViewModel 和一堆回归用例调着。
+    private readonly CharacterBackupService _characterBackupService = new();
+    private readonly CharacterReferenceImageService _referenceImageService = new();
+    private readonly CharacterExportService _exportService = new();
     private string _projectRootPath = AppSettingsService.DefaultProjectRootPath;
     private CharacterCard? _currentCharacter;
     private CharacterCard? _lastEditedCharacter;
@@ -420,7 +426,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
 
         var character = CurrentCharacter;
         var images = await Task.Run(
-            () => _characterWorkspaceService.ImportReferenceImages(character, sourceFilePaths),
+            () => _referenceImageService.ImportReferenceImages(character, sourceFilePaths),
             cancellationToken);
         ReplaceReferenceImages(images);
         IsReferencePanelExpanded = true;
@@ -436,7 +442,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         }
 
         var character = CurrentCharacter;
-        var images = await Task.Run(() => _characterWorkspaceService.LoadReferenceImages(character, cancellationToken), cancellationToken);
+        var images = await Task.Run(() => _referenceImageService.LoadReferenceImages(character, cancellationToken), cancellationToken);
         ReplaceReferenceImages(images);
     }
 
@@ -448,7 +454,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         }
 
         var character = CurrentCharacter;
-        var images = await Task.Run(() => _characterWorkspaceService.RenameReferenceImage(character, image.FilePath, newFileName), cancellationToken);
+        var images = await Task.Run(() => _referenceImageService.RenameReferenceImage(character, image.FilePath, newFileName), cancellationToken);
         ReplaceReferenceImages(images);
         DraftSaveStatusText = "参考图已重命名。";
     }
@@ -461,7 +467,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         }
 
         var character = CurrentCharacter;
-        var images = await Task.Run(() => _characterWorkspaceService.DeleteReferenceImage(character, image.FilePath), cancellationToken);
+        var images = await Task.Run(() => _referenceImageService.DeleteReferenceImage(character, image.FilePath), cancellationToken);
         ReplaceReferenceImages(images);
         DraftSaveStatusText = "参考图已删除。";
     }
@@ -472,12 +478,12 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         IProgress<CharacterBackupProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
-        return Task.Run(() => _characterWorkspaceService.BackupCharacter(character, note, progress, cancellationToken), cancellationToken);
+        return Task.Run(() => _characterBackupService.BackupCharacter(character, note, progress, cancellationToken), cancellationToken);
     }
 
     public string GetDefaultExportRootPath(string projectRootPath)
     {
-        return _characterWorkspaceService.GetDefaultExportRootPath(projectRootPath);
+        return _exportService.GetDefaultExportRootPath(projectRootPath);
     }
 
     public Task<string> ExportCharacterFolderAsync(
@@ -488,7 +494,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         CancellationToken cancellationToken = default)
     {
         return Task.Run(
-            () => _characterWorkspaceService.ExportCharacterFolder(
+            () => _exportService.ExportCharacterFolder(
                 character,
                 exportRootPath,
                 overwrite,
@@ -501,7 +507,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         CharacterCard character,
         CancellationToken cancellationToken = default)
     {
-        return Task.Run(() => _characterWorkspaceService.LoadCharacterBackups(character), cancellationToken);
+        return Task.Run(() => _characterBackupService.LoadCharacterBackups(character), cancellationToken);
     }
 
     public async Task<CharacterCard> RestoreCharacterBackupAsync(
@@ -511,7 +517,7 @@ internal sealed class CharacterDeskViewModel : ObservableObject
         CancellationToken cancellationToken = default)
     {
         var restoredCharacter = await Task.Run(
-            () => _characterWorkspaceService.RestoreCharacterBackup(character, backup, progress, cancellationToken),
+            () => _characterBackupService.RestoreCharacterBackup(character, backup, progress, cancellationToken),
             cancellationToken);
         ReplaceCharacter(restoredCharacter, character.Code);
         return restoredCharacter;

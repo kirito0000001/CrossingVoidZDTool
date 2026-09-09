@@ -141,6 +141,11 @@ var tests = new (string Name, Action Run)[]
     ("序列反推得其他时按名字归类语音", VoiceBucketsFallBackToNameWhenSequenceSaysOther),
     ("每个全屏遮罩层都关得掉", EveryOverlayCanBeDismissed),
     ("写回工具箱的技能身份和快照对得上", WriteBackSkillIdentityMatchesSnapshot),
+    ("重命名中途失败要全部回滚", FailedBatchRenameRollsEverythingBack),
+    ("外部取消不算命令执行失败", ExternalCancellationIsNotReportedAsFailure),
+    ("手动备份和自动备份分开计数", ManualAndAutomaticBackupsAreCappedSeparately),
+    ("会话缓存读回后仍按大小写不敏感查表", SessionCacheKeepsCaseInsensitiveLookupAfterRoundTrip),
+    ("语音与序列帧不再互相依赖", VoiceAndSequenceServicesDoNotDependOnEachOther),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
@@ -1678,13 +1683,14 @@ static void ExportCharacterCopiesWholeFolderAndRequiresOverwrite()
     try
     {
         var service = new CharacterWorkspaceService();
+        var exportService = new CharacterExportService();
         var character = service.EnsureCharacterByCode(root, "Misaka", "御坂美琴").Character;
         var nestedSource = Path.Combine(character.FolderPath, "tool", "CharacterBackups", "history.zip");
         Directory.CreateDirectory(Path.GetDirectoryName(nestedSource)!);
         File.WriteAllText(nestedSource, "backup");
-        var exportRoot = service.GetDefaultExportRootPath(root);
+        var exportRoot = exportService.GetDefaultExportRootPath(root);
 
-        var exportedPath = service.ExportCharacterFolder(character, exportRoot, overwrite: false);
+        var exportedPath = exportService.ExportCharacterFolder(character, exportRoot, overwrite: false);
 
         AssertEqual(Path.GetFullPath(Path.Combine(root, "Export", "Misaka")), Path.GetFullPath(exportedPath));
         AssertEqual("backup", File.ReadAllText(Path.Combine(exportedPath, "tool", "CharacterBackups", "history.zip")));
@@ -1694,7 +1700,7 @@ static void ExportCharacterCopiesWholeFolderAndRequiresOverwrite()
         var refused = false;
         try
         {
-            service.ExportCharacterFolder(character, exportRoot, overwrite: false);
+            exportService.ExportCharacterFolder(character, exportRoot, overwrite: false);
         }
         catch (IOException)
         {
@@ -1702,7 +1708,7 @@ static void ExportCharacterCopiesWholeFolderAndRequiresOverwrite()
         }
 
         AssertEqual(true, refused);
-        service.ExportCharacterFolder(character, exportRoot, overwrite: true);
+        exportService.ExportCharacterFolder(character, exportRoot, overwrite: true);
         AssertEqual(false, File.Exists(Path.Combine(exportedPath, "stale.txt")));
         AssertEqual(true, File.Exists(nestedSource));
     }
@@ -5263,7 +5269,7 @@ static void TechnicalDebtRatchetOnlyGoesDown()
             .Count(line => line.Trim() == "catch");
     }
 
-    Ratchet("Services 层裸 catch", bareCatches, 20);
+    Ratchet("Services 层裸 catch", bareCatches, 19);
 
     // 2) MainWindow 分部的体量。规约明写着「别把项目养成一个超大的 MainWindow」，
     //    但没有任何机制拦住它长大。
@@ -5281,11 +5287,13 @@ static void TechnicalDebtRatchetOnlyGoesDown()
         .Select(path => File.ReadAllLines(path, Encoding.UTF8).Length)
         .DefaultIfEmpty(0)
         .Max();
-    // 3126 -> 2009：预览投影和素材分类那两段（合计约 1130 行零 IO 的纯函数、
-    // 没有任何外部调用方）已经抽成 UnrealCharacterPreviewFactory 和
-    // UnrealMaterialClassifier。剩下的还能再拆（写回工具箱、导出编排、清单解析），
-    // 见 Plan/02-重构方案.md 的 P2。
-    Ratchet("Services 最大单文件行数", largestService, 1493);
+    // 这个数字换过两次主了。三个 God Class 各拆过一轮：
+    //   UnrealProjectSyncService  3186 -> 896   （预览投影 / 素材分类 / 写回工具箱 / 清单解析）
+    //   CharacterWorkspaceService 1493 -> 1049  （Zip 备份 / 参考图 / 导出打包）
+    //   SequenceFrameService      1420 -> 714   （清单读写 / 帧池 / 目录布局 / 快照 / 分节构建）
+    // 现在最大的仍是 CharacterWorkspaceService，它还剩「工作区扫描 + 角色增删改名 +
+    // 元数据持久化 + 草稿读写」四件事，还能继续切，但边际收益已经明显下降了。
+    Ratchet("Services 最大单文件行数", largestService, 1049);
 
     // 5) 断言源码文本的用例数。这类断言查的是变量名和换行位置，
     //    改个命名就假报警，却拦不住逻辑写错——而且它们把反模式固化住了
@@ -5296,7 +5304,7 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // 搜索串拆开拼，免得这一行把自己也算进去
     var marker = "File.ReadAllText(Path.Combine(Directory." + "GetCurrentDirectory()";
     var sourceTextAssertions = ownSource.Split(marker).Length - 1;
-    Ratchet("断言源码文本的用例", sourceTextAssertions, 50);
+    Ratchet("断言源码文本的用例", sourceTextAssertions, 49);
 
     if (violations.Count > 0)
     {
@@ -8352,6 +8360,201 @@ static void UnrealBridgeExporterProducesVoiceBuckets()
     // 断言的是「某个方法名出现在某个文件里」。方法被抽到 UnrealMaterialClassifier
     // 之后它只因为限定前缀不影响子串匹配才没红——纯属侥幸，而且它本来也拦不住
     // 分桶逻辑写错。真正该验的行为放在下面那条独立用例里。
+}
+
+static void FailedBatchRenameRollsEverythingBack()
+{
+    // 批量重命名分两段：先全部改成临时名，再逐个落到目标名。
+    // 第二段中途失败时，前面几个已经落到目标名了——回滚以前只还原「还停在临时名」的，
+    // 于是一半改了名一半没改，编号从此对不上，而函数名叫 Atomic。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var first = Path.Combine(root, "a.png");
+        var second = Path.Combine(root, "b.png");
+        var third = Path.Combine(root, "c.png");
+        foreach (var path in new[] { first, second, third })
+        {
+            File.WriteAllText(path, Path.GetFileName(path));
+        }
+
+        // 让第三个的目标名落不下去：那儿摆一个同名目录。
+        // 前置检查看的是 File.Exists，目录不会被它拦住，所以能走到第二段才炸。
+        var blocked = Path.Combine(root, "3.png");
+        Directory.CreateDirectory(blocked);
+
+        var threw = false;
+        try
+        {
+            MaterialSequenceNaming.RenameFilesAtomically(
+            [
+                new MaterialPathRename(first, Path.Combine(root, "1.png")),
+                new MaterialPathRename(second, Path.Combine(root, "2.png")),
+                new MaterialPathRename(third, blocked),
+            ]);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            threw = true;
+        }
+
+        AssertEqual(true, threw);
+
+        // 三个源文件必须原封不动地回到原位，内容也不能串
+        AssertEqual(true, File.Exists(first));
+        AssertEqual(true, File.Exists(second));
+        AssertEqual(true, File.Exists(third));
+        AssertEqual("a.png", File.ReadAllText(first));
+        AssertEqual("b.png", File.ReadAllText(second));
+        AssertEqual("c.png", File.ReadAllText(third));
+
+        // 不许留下改了一半的目标名，也不许留下临时文件
+        AssertEqual(false, File.Exists(Path.Combine(root, "1.png")));
+        AssertEqual(false, File.Exists(Path.Combine(root, "2.png")));
+        AssertEqual(0, Directory.GetFiles(root, ".material-rename-*").Length);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void ManualAndAutomaticBackupsAreCappedSeparately()
+{
+    // 手动备份和自动备份各留 3 份，分开计数。这是有意为之：
+    // 导入失败时会自动打一份备份，如果和手动备份挤在同一个额度里，
+    // 连着几次导入失败就能把用户自己存的存档全顶掉。
+    // 但在此之前没有任何用例拦着有人把两个计数合并。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var workspace = new CharacterWorkspaceService();
+        var character = workspace.EnsureCharacterByCode(root, "Misaka", "御坂美琴").Character;
+        var backups = new CharacterBackupService();
+
+        for (var i = 0; i < 5; i++)
+        {
+            backups.BackupCharacter(character, $"手动 {i}");
+        }
+
+        var afterManual = backups.LoadCharacterBackups(character);
+        AssertEqual(3, afterManual.Count(entry => !entry.IsAutomatic));
+
+        for (var i = 0; i < 5; i++)
+        {
+            backups.BackupCharacter(character, $"自动 {i}", CharacterBackupKinds.Automatic);
+        }
+
+        var afterAutomatic = backups.LoadCharacterBackups(character);
+        // 自动的也是 3 份，而且手动那 3 份一份不能少
+        AssertEqual(3, afterAutomatic.Count(entry => entry.IsAutomatic));
+        AssertEqual(3, afterAutomatic.Count(entry => !entry.IsAutomatic));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SessionCacheKeepsCaseInsensitiveLookupAfterRoundTrip()
+{
+    // System.Text.Json 对「有 setter 的集合属性」默认新建一个默认比较器的实例再赋值，
+    // 声明处的 OrdinalIgnoreCase 就丢了——而这类丢失是静默的：
+    // 基线查不到就把已同步的素材判成新增/冲突，第三步差异永远归不了零。
+    // 声明处标了 [JsonObjectCreationHandling(Populate)] 才保得住，这条用例是它的回归网。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var projectPath = Path.Combine(root, "CrossingVoid.uproject");
+        File.WriteAllText(projectPath, "{}");
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴") with { IsCompleted = true };
+        Directory.CreateDirectory(character.ToolFolderPath);
+
+        var service = new UnrealSyncSessionCacheService();
+        var cache = new UnrealSyncSessionCache
+        {
+            ProtocolVersion = 3,
+            ProjectPath = projectPath,
+            SelectedCharacterCode = character.Code,
+            WorkflowStep = 3,
+        };
+        cache.NormalizationDecisions["aBcDeF"] = "redirect";
+        cache.SelectedStableIds.Add("aBcDeF");
+        AssertEqual(true, service.Write(character, projectPath, cache));
+
+        var loaded = service.LoadStep(character, projectPath, character.Code, 3);
+        AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, loaded.Status);
+        // 大小写不同也要查得到——落盘再读回之后比较器不能退化
+        AssertEqual(true, loaded.Cache!.NormalizationDecisions.ContainsKey("ABCDEF"));
+        AssertEqual(true, loaded.Cache.SelectedStableIds.Contains("ABCDEF"));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void VoiceAndSequenceServicesDoNotDependOnEachOther()
+{
+    // 这两个服务曾经互相引用，是全仓唯一的循环依赖：
+    // 序列帧那边要判断文件是不是 wav，语音那边要在重编号后回写序列帧绑定。
+    // 现在中间隔着 WaveFileFormat 和 SequenceVoiceBindingService，
+    // 这条守卫挡住「下次图省事又直接引回去」。
+    static string StripComments(string source) => string.Join(
+        Environment.NewLine,
+        source.Split('\n').Where(line => !line.TrimStart().StartsWith("//", StringComparison.Ordinal)));
+
+    var voice = StripComments(File.ReadAllText(
+        Path.Combine("Services", "VoiceMaterialService.cs"), Encoding.UTF8));
+    if (voice.Contains("SequenceFrameService", StringComparison.Ordinal))
+    {
+        throw new InvalidOperationException(
+            "VoiceMaterialService 又直接引用 SequenceFrameService 了，请走 SequenceVoiceBindingService。");
+    }
+
+    var sequenceFiles = new List<string> { Path.Combine("Services", "SequenceFrameService.cs") };
+    if (Directory.Exists(Path.Combine("Services", "SequenceFrames")))
+    {
+        sequenceFiles.AddRange(Directory.EnumerateFiles(
+            Path.Combine("Services", "SequenceFrames"), "*.cs", SearchOption.AllDirectories));
+    }
+
+    foreach (var path in sequenceFiles)
+    {
+        var source = StripComments(File.ReadAllText(path, Encoding.UTF8));
+        if (source.Contains("VoiceMaterialService", StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException(
+                $"{path} 又直接引用 VoiceMaterialService 了，请走 WaveFileFormat 或 SequenceVoiceBindingService。");
+        }
+    }
+}
+
+static void ExternalCancellationIsNotReportedAsFailure()
+{
+    // 取消不是失败。判定以前带着「而且必须是本命令自己的取消源」这个条件，
+    // 于是任务内部响应别处传进来的 token（全局进度条上的取消、窗口关闭时的联动取消）
+    // 时，会掉到通用的 Exception 分支，被当成执行失败弹给用户。
+    using var external = new CancellationTokenSource();
+    var failures = new List<Exception>();
+
+    var command = new AsyncRelayCommand(async () =>
+    {
+        await external.CancelAsync();
+        external.Token.ThrowIfCancellationRequested();
+    });
+    command.ExecutionFailed += (_, error) => failures.Add(error);
+
+    command.ExecuteAsync().GetAwaiter().GetResult();
+    AssertEqual(0, failures.Count);
+
+    // 真正的异常仍然要报出来，别把这条路修成什么都吞
+    var realFailures = new List<Exception>();
+    var failing = new AsyncRelayCommand(() => throw new InvalidOperationException("真的炸了"));
+    failing.ExecutionFailed += (_, error) => realFailures.Add(error);
+    failing.ExecuteAsync().GetAwaiter().GetResult();
+    AssertEqual(1, realFailures.Count);
+    AssertEqual("真的炸了", realFailures[0].Message);
 }
 
 static void WriteBackSkillIdentityMatchesSnapshot()
