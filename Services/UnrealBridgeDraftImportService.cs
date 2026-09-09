@@ -9,19 +9,22 @@ namespace CrossingVoidZDTool.Services;
 internal sealed class UnrealBridgeDraftImportService
 {
     private readonly CharacterWorkspaceService _workspaceService;
-    private readonly UnrealProjectSyncService _semanticImportService;
+
+    // 写回工具箱那一段原本长在 UnrealProjectSyncService 上，这里注入的是从它里面抽出来的
+    // UnrealToolboxWriteBackService——本类只需要「写回」，不需要找引擎、跑 commandlet、读清单。
+    private readonly UnrealToolboxWriteBackService _writeBackService;
 
     public UnrealBridgeDraftImportService()
-        : this(new CharacterWorkspaceService(), new UnrealProjectSyncService())
+        : this(new CharacterWorkspaceService(), new UnrealToolboxWriteBackService())
     {
     }
 
     internal UnrealBridgeDraftImportService(
         CharacterWorkspaceService workspaceService,
-        UnrealProjectSyncService semanticImportService)
+        UnrealToolboxWriteBackService writeBackService)
     {
         _workspaceService = workspaceService;
-        _semanticImportService = semanticImportService;
+        _writeBackService = writeBackService;
     }
 
     public UnrealBridgeDraftImportResult Import(
@@ -76,7 +79,7 @@ internal sealed class UnrealBridgeDraftImportService
             var importedModules = new List<UnrealBridgeModule>();
             if (selectedStableIds.Contains("character:info") && candidate.CharacterInfo.HasItemData)
             {
-                _semanticImportService.SyncCharacterInfoToToolbox(character, candidate);
+                _writeBackService.SyncCharacterInfoToToolbox(character, candidate);
                 importedModules.Add(UnrealBridgeModule.CharacterInfo);
             }
 
@@ -109,7 +112,7 @@ internal sealed class UnrealBridgeDraftImportService
             {
                 foreach (var action in selectedActions)
                 {
-                    _semanticImportService.SyncSequenceActionToToolbox(character, action);
+                    _writeBackService.SyncSequenceActionToToolbox(character, action);
                 }
 
                 AssignImportedSequenceIdentities(character, candidate, selectedStableIds);
@@ -124,7 +127,7 @@ internal sealed class UnrealBridgeDraftImportService
             {
                 foreach (var buff in selectedBuffs)
                 {
-                    _semanticImportService.SyncBuffToToolbox(character, buff);
+                    _writeBackService.SyncBuffToToolbox(character, buff);
                 }
 
                 AssignImportedBuffIdentities(character, candidate, selectedStableIds);
@@ -324,7 +327,7 @@ internal sealed class UnrealBridgeDraftImportService
             {
                 if (selectedStableIds.Contains(GetSkillStableId(candidate.Code, slot.SlotKey, suffix, stageIndex)))
                 {
-                    importedCount += _semanticImportService.SyncSkillStageToToolbox(
+                    importedCount += _writeBackService.SyncSkillStageToToolbox(
                         character, candidate, slot, stageIndex, suffix);
                 }
             }
@@ -337,7 +340,7 @@ internal sealed class UnrealBridgeDraftImportService
             if (link.SkillSlot.Stages.Count > 0 &&
                 selectedStableIds.Contains(GetSkillStableId(candidate.Code, link.SkillSlot.SlotKey, suffix, 0)))
             {
-                importedCount += _semanticImportService.SyncLinkSkillToToolbox(character, candidate, link, suffix);
+                importedCount += _writeBackService.SyncLinkSkillToToolbox(character, candidate, link, suffix);
             }
         }
 

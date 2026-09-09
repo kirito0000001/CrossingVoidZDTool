@@ -11,6 +11,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Linq;
 using CrossingVoidZDTool;
+using CrossingVoidZDTool.Controls;
 using CrossingVoidZDTool.Services;
 using CrossingVoidZDTool.ViewModels;
 using Microsoft.UI.Xaml;
@@ -138,6 +139,8 @@ var tests = new (string Name, Action Run)[]
     ("多余图片可删但其他图片受保护", StaleImagesAreDeletableExceptUnclassified),
     ("认不出的技能状态要报错不要吞成空中", UnknownSkillStatesAreReported),
     ("序列反推得其他时按名字归类语音", VoiceBucketsFallBackToNameWhenSequenceSaysOther),
+    ("每个全屏遮罩层都关得掉", EveryOverlayCanBeDismissed),
+    ("写回工具箱的技能身份和快照对得上", WriteBackSkillIdentityMatchesSnapshot),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
@@ -4035,10 +4038,14 @@ static void UnrealProjectCharacterReadsChineseNameFromItemAsset()
 
 static void UnrealProjectCharacterRefreshUsesOfflineItemScan()
 {
-    var service = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "Services", "UnrealProjectSyncService.cs"));
     var window = ReadUnrealSyncWindowSource();
 
-    AssertEqual(true, service.Contains("ReadCharacterItemDisplayNames", StringComparison.Ordinal));
+    // 这里原本还断言 UnrealProjectSyncService.cs 里出现过 ReadCharacterItemDisplayNames
+    // ——查的是「某个方法名在某个文件里」，方法搬进 UnrealExportManifestReader 就红了，
+    // 而功能一点没变。它想证明的行为，紧邻上一条用例
+    // UnrealProjectCharacterReadsChineseNameFromItemAsset 已经在行为层面盖住了：
+    // 造一个只有 Content 目录、没有清单也没有引擎的临时工程，调 Check() 之后
+    // 断言角色名是从 Item_*.uasset 里读出来的。
     AssertEqual(true, window.Contains("_applicationViewModel.UnrealProjectSync.Detect();", StringComparison.Ordinal));
     var handlerStart = window.IndexOf("GetUnrealProjectCharactersButton_Click", StringComparison.Ordinal);
     var handlerEnd = window.IndexOf("ImportSelectedUnrealCharacterToDraftButton_Click", handlerStart, StringComparison.Ordinal);
@@ -5278,7 +5285,7 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // 没有任何外部调用方）已经抽成 UnrealCharacterPreviewFactory 和
     // UnrealMaterialClassifier。剩下的还能再拆（写回工具箱、导出编排、清单解析），
     // 见 Plan/02-重构方案.md 的 P2。
-    Ratchet("Services 最大单文件行数", largestService, 2009);
+    Ratchet("Services 最大单文件行数", largestService, 1493);
 
     // 5) 断言源码文本的用例数。这类断言查的是变量名和换行位置，
     //    改个命名就假报警，却拦不住逻辑写错——而且它们把反模式固化住了
@@ -8345,6 +8352,127 @@ static void UnrealBridgeExporterProducesVoiceBuckets()
     // 断言的是「某个方法名出现在某个文件里」。方法被抽到 UnrealMaterialClassifier
     // 之后它只因为限定前缀不影响子串匹配才没红——纯属侥幸，而且它本来也拦不住
     // 分桶逻辑写错。真正该验的行为放在下面那条独立用例里。
+}
+
+static void WriteBackSkillIdentityMatchesSnapshot()
+{
+    // 技能的稳定身份由三处各自拼一遍：语义快照、导入时的选中判定、写回工具箱。
+    // 三边必须逐字一致——曾经有两边把 suffix 和 slotKey 写反了，
+    // 结果「从虚幻导入角色时技能一条都进不来」，而且不报任何错。
+    //
+    // 这条用例真的跑一遍写回、再和快照比对，而不是去数源码里的字符串。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var workspace = new CharacterWorkspaceService();
+        var character = workspace.EnsureCharacterByCode(root, "Misaka", "御坂美琴").Character;
+
+        var stage = new UnrealProjectSyncSkillStagePreview(
+            1, "一技能", "超电磁炮", "介绍", "3", "2", "1", "常态", "空", "0",
+            string.Empty, string.Empty, string.Empty, []);
+        var coreSlot = new UnrealProjectSyncSkillSlotPreview(
+            "SkillSlot1", "一技能", true, true, string.Empty, [stage]);
+        var supportSlot = new UnrealProjectSyncSkillSlotPreview(
+            "SkillSlot4", "护援技", true, false, "未读取", []);
+        var skills = new UnrealProjectSyncSkillsPreview(
+            true, string.Empty, string.Empty, string.Empty, [coreSlot], supportSlot, []);
+
+        var candidate = new UnrealProjectSyncCharacterCandidate(
+            "Misaka", "御坂美琴", string.Empty, string.Empty, 1, 0,
+            new UnrealProjectSyncCharacterInfoPreview(
+                string.Empty, string.Empty, false, string.Empty, string.Empty, string.Empty,
+                [], [], 1, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+            skills,
+            new UnrealProjectSyncSequenceFramesPreview(false, false, string.Empty, string.Empty, [], [], [], [], []),
+            new UnrealProjectSyncBuffsPreview(false, string.Empty, []),
+            [],
+            hasLatestData: true);
+
+        // 写回：第一个核心槽的后缀是 core:0
+        var written = new UnrealToolboxWriteBackService()
+            .SyncSkillStageToToolbox(character, candidate, coreSlot, 0, "core:0");
+        AssertEqual(1, written);
+
+        var syncId = new CharacterSkillsService().Load(character).FirstSkill[0].SyncId;
+        AssertEqual(false, string.IsNullOrWhiteSpace(syncId));
+
+        // 快照侧对同一个槽位算出来的身份必须一模一样
+        var snapshot = new UnrealBridgeSemanticSnapshotService().Build(candidate);
+        var skillItem = snapshot.Items.Single(item => item.Module == UnrealBridgeModule.Skills);
+        AssertEqual($"skill:{syncId}", skillItem.StableId);
+
+        // 顺带钉住字段顺序：suffix 必须排在 slotKey 之前。
+        // 写反了上面那条也会红，但那时只知道「对不上」，不知道错在哪。
+        AssertEqual(
+            $"skill:{UnrealBridgeSemanticSnapshotService.CreateOriginIdentity("Misaka|skill|core:0|SkillSlot1|0")}",
+            skillItem.StableId);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void EveryOverlayCanBeDismissed()
+{
+    // 这些遮罩层不是 ContentDialog，而是铺满窗口的 Grid，关闭手势得自己接。
+    // 新增一个却忘了接，用户就只能重启程序——而这种事没人会去逐个点一遍。
+    //
+    // 这条用例只管「有没有关法」，不管是哪种：各遮罩层的手势本来就不一样
+    // （草稿层点外面只吞不关、裁切器只认右键、序列帧管理器只认左键），
+    // 那些差异是有道理的，不该被强行统一。
+    var xamlPath = Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml");
+    var document = XDocument.Load(xamlPath);
+    XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+
+    var named = document.Descendants()
+        .Where(element => element.Attribute(x + "Name") is not null)
+        .ToDictionary(
+            element => element.Attribute(x + "Name")!.Value,
+            element => element,
+            StringComparer.Ordinal);
+
+    foreach (var overlayName in OverlayDismiss.DismissibleOverlayNames)
+    {
+        if (!named.TryGetValue(overlayName, out var overlay))
+        {
+            throw new InvalidOperationException(
+                $"清单里的遮罩层 {overlayName} 在 MainWindow.xaml 里找不到了——" +
+                "要么改名了，要么删了，请同步更新 OverlayDismiss.DismissibleOverlayNames。");
+        }
+
+        var gestures = new[] { "Tapped", "RightTapped", "KeyDown" }
+            .Where(attribute => !string.IsNullOrWhiteSpace(overlay.Attribute(attribute)?.Value))
+            .ToArray();
+        if (gestures.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"遮罩层 {overlayName} 一个关闭手势都没接，打开之后关不掉。");
+        }
+    }
+
+    // 反过来也要盯：XAML 里新出现的全屏遮罩层必须进清单，
+    // 否则这条护栏会随着新增遮罩层慢慢失效。
+    // 判据用「盖满整个窗口 + 有独立层级」，这正是自建遮罩层的形态。
+    var known = new HashSet<string>(OverlayDismiss.DismissibleOverlayNames, StringComparer.Ordinal);
+    foreach (var pair in OverlayDismiss.NonDismissibleOverlays)
+    {
+        known.Add(pair.Key);
+    }
+
+    XNamespace canvas = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+    foreach (var (name, element) in named)
+    {
+        var spansAllRows = string.Equals(
+            element.Attribute("Grid.RowSpan")?.Value, "2", StringComparison.Ordinal);
+        var hasLayer = !string.IsNullOrWhiteSpace(element.Attribute("Canvas.ZIndex")?.Value);
+        if (spansAllRows && hasLayer && !known.Contains(name))
+        {
+            throw new InvalidOperationException(
+                $"MainWindow.xaml 里新增了全屏遮罩层 {name}，但它不在 OverlayDismiss 的清单里。" +
+                "请把它加进 DismissibleOverlayNames，或者说明它为什么不需要关闭手势。");
+        }
+    }
 }
 
 static void VoiceBucketsFallBackToNameWhenSequenceSaysOther()
