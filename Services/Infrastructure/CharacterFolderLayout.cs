@@ -32,6 +32,14 @@ internal static class CharacterFolderLayout
     /// <summary>角色自己的 Zip 备份，放在 tool 下。</summary>
     public const string CharacterBackups = "CharacterBackups";
 
+    /// <summary>
+    /// 图集临时缓存，放在 <c>tool/</c> 下，一次性、可删。
+    ///
+    /// 放在 <c>tool/</c> 之下是有意的：导出与备份逻辑都会碰角色目录，
+    /// 缓存必须待在一个「不会被当成素材交付出去」的地方，<c>tool/</c> 正好是那个语义。
+    /// </summary>
+    public const string AtlasCache = "AtlasCache";
+
     /// <summary>工作区根下的三个状态目录。</summary>
     public const string Draft = "Draft";
     public const string Completed = "Completed";

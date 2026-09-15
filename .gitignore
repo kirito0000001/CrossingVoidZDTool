@@ -23,3 +23,14 @@ __pycache__/
 # Local publish artifacts
 publish/
 artifacts/
+
+# 图集工具的 Node 依赖（可 npm install 重装，不进仓库）
+Tools/Atlas/node_modules/
+
+# 图集工具的临时产物（自检会往这里写）
+Tools/Atlas/demo/out*/
+Tools/Atlas/demo/*.tmp
+
+# ⚠️ Tools/Atlas/python/ 不在这里排除——内置解释器必须进仓库。
+# 它是「程序的一部分」，打包脚本（Pakout.ps1）要把它带到发布目录。
+# 见 Plan/07-图集工具嵌入方案.md §5.4。

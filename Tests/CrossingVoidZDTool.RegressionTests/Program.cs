@@ -13,6 +13,7 @@ using System.Xml.Linq;
 using CrossingVoidZDTool;
 using CrossingVoidZDTool.Controls;
 using CrossingVoidZDTool.Services;
+using CrossingVoidZDTool.Services.Atlas;
 using CrossingVoidZDTool.ViewModels;
 using Microsoft.UI.Xaml;
 
@@ -309,7 +310,15 @@ var tests = new (string Name, Action Run)[]
     ("特效素材按目录优先分类且名字兜底认 FX", EffectMaterialClassifiesFromFolderAndName),
     ("特效素材落 ExAsset 目录且不产生待删除", EffectMaterialTargetsExAssetFolderAndStaysAdditiveOnly),
     ("其他图片特效和待分配语音只显示新增", AdditiveCategoriesOnlyShowAdditionsNotDeletions),
-    ("ExAsset 特效贴图进入素材桶", ExAssetEffectTexturesEnterMaterialBuckets)
+    ("ExAsset 特效贴图进入素材桶", ExAssetEffectTexturesEnterMaterialBuckets),
+    ("图集清单逐帧一条且精灵名对齐虚幻侧", AtlasManifestMatchesUnrealSpriteNaming),
+    ("图集清单的空白帧占序号位但不出图", AtlasManifestKeepsOrdinalAcrossBlankFrames),
+    ("图集清单的复用帧每个位置各出一条", AtlasManifestEmitsOneEntryPerReusedPosition),
+    ("图集清单在素材缺失或全空时报错", AtlasManifestRejectsIncompleteOrEmptyActions),
+    ("图集 report 按新鲜度和 ok 判定成败", AtlasReportVerdictRequiresFreshOkResult),
+    ("图集落点在导出区或一次性缓存", AtlasDestinationResolvesToExportOrCacheFolder),
+    ("图集 Python 定位按设置内置系统依次回退", AtlasPythonLocatorFallsBackInOrder),
+    ("内置 Python 能导入 Pillow 跑通自检", BundledAtlasPythonRunsTheToolSelfCheck)
 };
 
 var failed = 0;
@@ -9442,6 +9451,69 @@ static string CreateTemporaryTestFolder()
     return root;
 }
 
+/// <summary>
+/// 找 ZDBridge 插件的 C++ 源码。
+///
+/// 以前这里写死了 <c>I:\UnrealProject_Moon\SRC_REPO\CrossingVoid\...</c>，
+/// 而游戏工程已经搬到 <c>C:\CrossingVoid</c>。写死的后果不是「测试失败得响亮」，
+/// 而是**这个用例自那一刻起就再也没真正跑过**——它每次都抛
+/// DirectoryNotFoundException，看起来像环境问题，于是被当成噪声忽略掉。
+/// 一条不再执行的守卫比没有守卫更糟：它给人「这里有人看着」的错觉。
+///
+/// 现在按候选位置找，找不到才报错，并且把找过的地方列出来。
+/// </summary>
+static string ResolveZdBridgeSourcePath()
+{
+    const string relative = @"Plugins\ZDBridge\Source\ZDBridge\Private\ZDBridgeLibrary.cpp";
+    var candidates = new[]
+    {
+        @"C:\CrossingVoid",
+        @"I:\UnrealProject_Moon\SRC_REPO\CrossingVoid",
+        @"D:\CrossingVoid",
+    };
+
+    var tried = new List<string>();
+    foreach (var root in candidates)
+    {
+        var path = Path.Combine(root, relative);
+        tried.Add(path);
+        if (File.Exists(path))
+        {
+            return path;
+        }
+    }
+
+    // 再退一步：从工具箱设置里读虚幻工程路径。工程搬到哪儿都跟得上。
+    try
+    {
+        var settingsPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+            "CrossingVoidZDTool", "settings.json");
+        if (File.Exists(settingsPath))
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(settingsPath, Encoding.UTF8));
+            if (document.RootElement.TryGetProperty("UnrealProjectPath", out var value) &&
+                value.GetString() is { Length: > 0 } projectPath)
+            {
+                var path = Path.Combine(projectPath, relative);
+                tried.Add(path);
+                if (File.Exists(path))
+                {
+                    return path;
+                }
+            }
+        }
+    }
+    catch (Exception error) when (error is JsonException or IOException or UnauthorizedAccessException)
+    {
+        // 设置读不出来不影响后面报错——tried 里已经有找过的地方了。
+    }
+
+    throw new FileNotFoundException(
+        "找不到 ZDBridge 的 C++ 源码，用例无法验证「解绑不删资产」这些约定。" +
+        "已经找过这些位置：" + string.Join("；", tried));
+}
+
 static void WriteImage(string path)
 {
     using var image = new Bitmap(566, 325);
@@ -10662,9 +10734,7 @@ static void ExportedFrameListIsOneEntryPerKeyframe()
     }
 
     // C++ 侧必须真正做到这几件脚本做不到的事。
-    var bridge = File.ReadAllText(
-        @"I:\UnrealProject_Moon\SRC_REPO\CrossingVoid\Plugins\ZDBridge\Source\ZDBridge\Private\ZDBridgeLibrary.cpp",
-        Encoding.UTF8);
+    var bridge = File.ReadAllText(ResolveZdBridgeSourcePath(), Encoding.UTF8);
     AssertEqual(true, bridge.Contains("UZDBridgeLibrary::PurgeAssets"));
     // 区分硬/软引用，这是 Python 问不出来的。
     AssertEqual(true, bridge.Contains("EDependencyQuery::Hard"));
@@ -10993,9 +11063,7 @@ static void OrphanSequencesAreDetachedNotDeleted()
     AssertEqual(true, exportScript.Contains("orphanSequences"));
 
     // C++ 侧解绑不能顺手删资产。
-    var bridge = File.ReadAllText(
-        @"I:\UnrealProject_Moon\SRC_REPO\CrossingVoid\Plugins\ZDBridge\Source\ZDBridge\Private\ZDBridgeLibrary.cpp",
-        Encoding.UTF8);
+    var bridge = File.ReadAllText(ResolveZdBridgeSourcePath(), Encoding.UTF8);
     var detachStart = bridge.IndexOf("UZDBridgeLibrary::DetachSequencesFromAnimationSource", StringComparison.Ordinal);
     AssertEqual(true, detachStart > 0);
     var detachBody = bridge[detachStart..];
@@ -11343,6 +11411,434 @@ static int RunPortablePathMigration(string[] args)
 
         return count;
     }
+}
+
+// ---------------------------------------------------------------------------
+// 图集工具嵌入（Plan/07）。八个用例，钉住的都是「错了要到 Unreal 里才发现」的地方。
+// ---------------------------------------------------------------------------
+
+static void AtlasManifestMatchesUnrealSpriteNaming()
+{
+    // 精灵名必须和 SequenceActionCatalog 算出来的一模一样：图集产出的
+    // _sequence.json 是给 Unreal 建 Flipbook 用的，名字差一个字符就会被当成
+    // 「新增 sprite」再插一份，于是同一个位置有了两张资产。
+    // 所以这里**直接和命名函数对比，不硬编码字面量** —— 硬编码的话，
+    // 命名规则一改，测试和实现一起错，什么都拦不住。
+    var actionFolder = CreateTemporaryTestFolder();
+    try
+    {
+        var definition = SequenceActionCatalog.Resolve("Sk2", out var formIndex);
+
+        // 用 23 帧，和实机 Sk2 一致 —— 这样才能同时钉住「位宽 = 总帧数的位数」。
+        // 位宽是**跟随总帧数**的，不是固定两位：Idle 只有 8 帧，实机资产叫
+        // Idle_Frame0_Sprite（一位）；Sk2 有 23 帧，叫 Sk2_Frame00_Sprite（两位）。
+        // 拿 3 帧去断言两位会得到 Frame0，那是测试写错了，不是实现错了。
+        var manifest = BuildAtlasTestManifest(actionFolder, 23, blankIndices: []);
+
+        var result = AtlasManifestWriter.Build(
+            "Misaka", actionFolder, definition, formIndex, manifest);
+
+        AssertEqual("Misaka_Sk2", result.Atlas);
+        AssertEqual("pack", result.Mode);
+        AssertEqual(23, result.Frames.Count);
+
+        for (var ordinal = 0; ordinal < 23; ordinal++)
+        {
+            AssertEqual(
+                SequenceActionCatalog.GetFrameSpriteName(definition, formIndex, ordinal, 23),
+                result.Frames[ordinal].Name);
+            AssertEqual(ordinal + 1, result.Frames[ordinal].Index);
+        }
+
+        // 需要记住的两件事，这个断言就是给它们的备忘：
+        // ① **精灵名里没有角色代号**。角色代号只出现在图集名（Misaka_Sk2）里，
+        //    sprite 名是 Sk2_Frame00_Sprite —— 实机资产就是这么叫的
+        //    （C:\CrossingVoid\...\Misaka\Material\Sk2\Sk2_Frame00_Sprite.uasset）。
+        // ② **帧序号从 00 起**（Unreal 侧从 0 起），而清单接口的 index 从 1 起。
+        //    两种序号同时存在于一条链路上，这个偏移是这条链路最容易搞错的地方。
+        AssertEqual("Sk2_Frame00_Sprite", result.Frames[0].Name);
+        AssertEqual(1, result.Frames[0].Index);
+        AssertEqual("Sk2_Frame22_Sprite", result.Frames[^1].Name);
+
+        // 位宽跟总帧数走，不是固定两位 —— Idle 只有 8 帧，实机就叫 Idle_Frame0_Sprite。
+        // 这条单独写是因为它踩过：拿 3 帧去断言两位会得到 Frame0，
+        // 那是测试写错了。位宽变化点是 10 / 100 / 1000 帧。
+        var idleFolder = Path.Combine(actionFolder, "idle");
+        var idle = AtlasManifestWriter.Build(
+            "Misaka",
+            idleFolder,
+            SequenceActionCatalog.Resolve("Idle", out var idleForm),
+            idleForm,
+            BuildAtlasTestManifest(idleFolder, 8, blankIndices: []));
+        AssertEqual("Idle_Frame0_Sprite", idle.Frames[0].Name);
+        AssertEqual("Idle_Frame7_Sprite", idle.Frames[^1].Name);
+
+        // 过 10 帧就该变两位
+        var tenFolder = Path.Combine(actionFolder, "ten");
+        var ten = AtlasManifestWriter.Build(
+            "Misaka",
+            tenFolder,
+            SequenceActionCatalog.Resolve("Death", out var deathForm),
+            deathForm,
+            BuildAtlasTestManifest(tenFolder, 10, blankIndices: []));
+        AssertEqual("Death_Frame00_Sprite", ten.Frames[0].Name);
+        AssertEqual("Death_Frame09_Sprite", ten.Frames[^1].Name);
+    }
+    finally
+    {
+        Directory.Delete(actionFolder, recursive: true);
+    }
+}
+
+static void AtlasManifestKeepsOrdinalAcrossBlankFrames()
+{
+    // 空白帧占序号位但不出图。这里最容易错的写法是「先把空白帧过滤掉再数号」，
+    // 那样第 5 帧会被叫成第 4 帧——而空白帧在第 3 位，它后面的全错。
+    var actionFolder = CreateTemporaryTestFolder();
+    try
+    {
+        var definition = SequenceActionCatalog.Resolve("Idle", out var formIndex);
+        var manifest = BuildAtlasTestManifest(actionFolder, 5, blankIndices: [1, 3]);
+
+        var result = AtlasManifestWriter.Build(
+            "Misaka", actionFolder, definition, formIndex, manifest);
+
+        // 5 帧里 2 帧是空白 -> 出图 3 条
+        AssertEqual(3, result.Frames.Count);
+
+        // 但序号必须是 1 / 3 / 5（原始下标 0 / 2 / 4 加一），不是 1 / 2 / 3
+        AssertSequence(
+            [1, 3, 5],
+            result.Frames.Select(frame => frame.Index).ToArray());
+
+        // 精灵名同样按**原始下标**算，所以是 Frame0 / Frame2 / Frame4。
+        // 注意这里是位宽 1（总帧数 5 是一位数），和上一个用例的两位形成对照——
+        // 空白帧被跳过时，位宽**不能**改用「出图条数」去算（那样还是 1，巧合而已），
+        // 也不能改用「下标最大值」（那样也是 1）。真正钉住实现的是下面这条：
+        // 位置 2 的帧仍然叫 Frame2，没被上一帧的跳过挤成 Frame1。
+        AssertSequence(
+            ["Idle_Frame0_Sprite", "Idle_Frame2_Sprite", "Idle_Frame4_Sprite"],
+            result.Frames.Select(frame => frame.Name).ToArray());
+    }
+    finally
+    {
+        Directory.Delete(actionFolder, recursive: true);
+    }
+}
+
+static void AtlasManifestEmitsOneEntryPerReusedPosition()
+{
+    // 复用帧（同一张图出现在多个位置）**每个位置都要出一条**：
+    // Sk2_Frame05_Sprite 和 Sk2_Frame17_Sprite 是两张独立资产（实机验证过，
+    // 见 Plan/07 §4.2）。合并成一条会让 Flipbook 少帧。
+    // 真正要防的是**同名**，不是同图。
+    var actionFolder = CreateTemporaryTestFolder();
+    try
+    {
+        var definition = SequenceActionCatalog.Resolve("Sk2", out var formIndex);
+        var manifest = new SequenceFrameManifest { ActionCode = "Sk2", Fps = 12 };
+        var shared = WriteAtlasTestImage(actionFolder, "shared.png");
+        var other = WriteAtlasTestImage(actionFolder, "other.png");
+
+        // 位置 0 和位置 2 指向同一个文件——这就是复用。
+        manifest.Frames.Add(new SequenceFrameManifestEntry { RelativePath = "shared.png" });
+        manifest.Frames.Add(new SequenceFrameManifestEntry { RelativePath = "other.png" });
+        manifest.Frames.Add(new SequenceFrameManifestEntry { RelativePath = "shared.png" });
+
+        var result = AtlasManifestWriter.Build(
+            "Misaka", actionFolder, definition, formIndex, manifest);
+
+        // 三条一条不少，尽管只有两张不同的图
+        AssertEqual(3, result.Frames.Count);
+        AssertEqual(2, result.Frames.Select(frame => frame.File).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+
+        // 名字两两不同（同名才是真问题：UE 里同名 sprite 会互相覆盖）
+        AssertEqual(3, result.Frames.Select(frame => frame.Name).Distinct(StringComparer.Ordinal).Count());
+        AssertEqual(
+            SequenceActionCatalog.GetFrameSpriteName(definition, formIndex, 0, 3),
+            result.Frames[0].Name);
+        AssertEqual(
+            SequenceActionCatalog.GetFrameSpriteName(definition, formIndex, 2, 3),
+            result.Frames[2].Name);
+        AssertEqual(true, !string.Equals(result.Frames[0].Name, result.Frames[2].Name, StringComparison.Ordinal));
+        _ = shared;
+        _ = other;
+    }
+    finally
+    {
+        Directory.Delete(actionFolder, recursive: true);
+    }
+}
+
+static void AtlasManifestRejectsIncompleteOrEmptyActions()
+{
+    // 空图集是没意义的产物，缺图则会做出「和 Flipbook 对不上序号」的图集——
+    // 两种都必须**当场报错**，不能产出一张空图或者少一帧的图当成功。
+    var actionFolder = CreateTemporaryTestFolder();
+    try
+    {
+        var definition = SequenceActionCatalog.Resolve("Click", out var formIndex);
+
+        // 1) 一帧都没有
+        var empty = new SequenceFrameManifest { ActionCode = "Click" };
+        AssertThrows(() => AtlasManifestWriter.Build("Misaka", actionFolder, definition, formIndex, empty));
+
+        // 2) 全是空白帧
+        var allBlank = new SequenceFrameManifest { ActionCode = "Click" };
+        allBlank.Frames.Add(new SequenceFrameManifestEntry { IsBlank = true });
+        allBlank.Frames.Add(new SequenceFrameManifestEntry { IsBlank = true });
+        AssertThrows(() => AtlasManifestWriter.Build("Misaka", actionFolder, definition, formIndex, allBlank));
+
+        // 3) 图片文件不存在（清单说有，磁盘上没有）
+        var missing = new SequenceFrameManifest { ActionCode = "Click" };
+        missing.Frames.Add(new SequenceFrameManifestEntry { RelativePath = "not-there.png" });
+        AssertThrows(() => AtlasManifestWriter.Build("Misaka", actionFolder, definition, formIndex, missing));
+
+        // 4) 相对路径为空
+        var noPath = new SequenceFrameManifest { ActionCode = "Click" };
+        noPath.Frames.Add(new SequenceFrameManifestEntry { RelativePath = "  " });
+        AssertThrows(() => AtlasManifestWriter.Build("Misaka", actionFolder, definition, formIndex, noPath));
+
+        // 报错文案要能让人知道是哪个动作出的问题，否则多动作批量打图集时无从下手
+        try
+        {
+            AtlasManifestWriter.Build("Misaka", actionFolder, definition, formIndex, missing);
+        }
+        catch (InvalidOperationException error)
+        {
+            AssertEqual(true, error.Message.Contains("Click", StringComparison.Ordinal));
+        }
+    }
+    finally
+    {
+        Directory.Delete(actionFolder, recursive: true);
+    }
+}
+
+static void AtlasReportVerdictRequiresFreshOkResult()
+{
+    // 判成败只看 report 文件的三个条件：存在、新鲜、ok 为真。
+    // 不看退出码——和 Unreal 侧同一个道理（CONTEXT.md 里写着）。
+    var folder = CreateTemporaryTestFolder();
+    try
+    {
+        var reportPath = Path.Combine(folder, "report.json");
+        var startedAt = DateTime.UtcNow;
+        Thread.Sleep(20);
+
+        // 1) 文件不存在
+        AssertThrows(() => AtlasPackService.ReadReport(reportPath, startedAt, "Misaka_Sk2"));
+
+        // 2) 过期：文件早于本轮开始时刻。这条是防「拿到上一轮的结果当成功」的关键。
+        File.WriteAllText(reportPath, """{"ok":true,"size":{"w":100,"h":50}}""");
+        File.SetLastWriteTimeUtc(reportPath, startedAt.AddMinutes(-5));
+        AssertThrows(() => AtlasPackService.ReadReport(reportPath, startedAt, "Misaka_Sk2"));
+
+        // 3) 新鲜但 ok:false
+        WriteAtlasTestReport(reportPath, """{"ok":false,"error":"帧尺寸不统一"}""");
+        var failure = AssertThrows(() => AtlasPackService.ReadReport(reportPath, startedAt, "Misaka_Sk2"));
+        AssertEqual(true, failure.Message.Contains("帧尺寸不统一", StringComparison.Ordinal));
+
+        // 4) 新鲜、ok:true、但没给尺寸 —— 也该算失败，否则会拿 0×0 当结果往界面上写
+        WriteAtlasTestReport(reportPath, """{"ok":true}""");
+        AssertThrows(() => AtlasPackService.ReadReport(reportPath, startedAt, "Misaka_Sk2"));
+
+        // 5) 正常的一份
+        WriteAtlasTestReport(
+            reportPath,
+            """{"ok":true,"atlas":"Misaka_Sk2","image":"Misaka_Sk2.png","size":{"w":1115,"h":1019},"frameCount":23}""");
+        var report = AtlasPackService.ReadReport(reportPath, startedAt, "Misaka_Sk2");
+        AssertEqual(true, report.Ok);
+        AssertEqual(1115, report.Size!.W);
+        AssertEqual(1019, report.Size!.H);
+        AssertEqual(23, report.FrameCount);
+        AssertEqual("Misaka_Sk2.png", report.Image);
+
+        // 6) warnings 是**数组**（实测 report.json 的字段名和形状就是这样）。
+        //    这条是防自己「照着文档猜成单数字符串」——猜错的话这里永远是 null，
+        //    而「源帧尺寸不统一，锚点会抖」正是最该被看见的那条警告。
+        WriteAtlasTestReport(
+            reportPath,
+            """{"ok":true,"size":{"w":10,"h":10},"warnings":["源帧尺寸不统一，锚点会抖","第二条第警告"]}""");
+        var withWarnings = AtlasPackService.ReadReport(reportPath, startedAt, "Misaka_Sk2");
+        AssertEqual(2, withWarnings.Warnings!.Count);
+        AssertEqual(true, withWarnings.WarningText!.Contains("锚点会抖", StringComparison.Ordinal));
+        AssertEqual(true, withWarnings.WarningText!.Contains("第二条第警告", StringComparison.Ordinal));
+
+        // 没有警告时不该冒出一个空串（否则日志里会刷「警告：」这种没内容的行）
+        WriteAtlasTestReport(reportPath, """{"ok":true,"size":{"w":10,"h":10},"warnings":[]}""");
+        AssertEqual(null, AtlasPackService.ReadReport(reportPath, startedAt, "Misaka_Sk2").WarningText);
+    }
+    finally
+    {
+        Directory.Delete(folder, recursive: true);
+    }
+}
+
+static void AtlasDestinationResolvesToExportOrCacheFolder()
+{
+    // 两个落点的寿命完全不同：导出区是交付物（用户会拿走，不自动清理），
+    // 缓存是一次性的。路径拼错就会把一次性缓存放进用户要交出去的地方。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var characterFolder = Path.Combine(root, "Draft", "Misaka");
+
+        var exportDirectory = AtlasPackService.ResolveOutputDirectory(
+            AtlasDestination.Export, root, characterFolder, "Misaka", "Sk2");
+        AssertEqual(
+            Path.Combine(root, "Export", "Misaka", "Atlas", "Sk2"),
+            exportDirectory);
+
+        var cacheDirectory = AtlasPackService.ResolveOutputDirectory(
+            AtlasDestination.Cache, root, characterFolder, "Misaka", "Sk2");
+
+        // 缓存必须在角色自己的 tool/ 下：那里不会被当成素材交付出去
+        AssertEqual(
+            Path.Combine(characterFolder, CharacterFolderLayout.Tool, CharacterFolderLayout.AtlasCache, "Sk2"),
+            cacheDirectory);
+        AssertEqual(true, cacheDirectory.StartsWith(characterFolder, StringComparison.OrdinalIgnoreCase));
+        AssertEqual(true, cacheDirectory.Contains("AtlasCache", StringComparison.Ordinal));
+
+        // 清缓存只清文件，目录本身留着（下一轮直接用）
+        Directory.CreateDirectory(cacheDirectory);
+        File.WriteAllText(Path.Combine(cacheDirectory, "Misaka_Sk2.png"), "x");
+        File.WriteAllText(Path.Combine(cacheDirectory, "_atlas_report.json"), "{}");
+        AtlasPackService.ClearCache(cacheDirectory);
+        AssertEqual(0, Directory.GetFiles(cacheDirectory).Length);
+        AssertEqual(true, Directory.Exists(cacheDirectory));
+
+        // 清一个不存在的目录不能抛
+        AtlasPackService.ClearCache(Path.Combine(root, "nope"));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void AtlasPythonLocatorFallsBackInOrder()
+{
+    // 探测链：设置项 -> 内置 -> 系统 PATH。抽成 EnumerateCandidates 就是为了
+    // 能在不起进程的情况下断言顺序——真跑进程的测试会很慢而且依赖机器状态。
+    var bundled = AtlasPythonLocator.BundledPath;
+
+    // 1) 设置项有值 -> 排第一
+    var withSetting = AtlasPythonLocator.EnumerateCandidates(@"C:\my\python.exe").ToList();
+    AssertEqual(@"C:\my\python.exe", withSetting[0].FilePath);
+    AssertEqual(true, withSetting[0].Source.Contains("设置", StringComparison.Ordinal));
+
+    // 2) 设置项为空 -> 第一个候选就是内置的
+    var withoutSetting = AtlasPythonLocator.EnumerateCandidates(null).ToList();
+    AssertEqual(true, withoutSetting.Count > 0);
+    AssertEqual(bundled, withoutSetting[0].FilePath);
+    AssertEqual(true, withoutSetting[0].Source.Contains("内置", StringComparison.Ordinal));
+
+    // 3) 设置项给的是目录 -> 自动拼上 python.exe
+    var asDirectory = AtlasPythonLocator.EnumerateCandidates(@"C:\Windows").ToList();
+    AssertEqual(true, asDirectory[0].FilePath.EndsWith("python.exe", StringComparison.OrdinalIgnoreCase));
+
+    // 4) 内置的排在任何系统 Python 前面 —— 这是「内置优先」的落点，
+    //    写反了就会在装了系统 Python 的机器上悄悄跑另一份，行为不可复现。
+    var bundledIndex = withoutSetting.FindIndex(item =>
+        string.Equals(item.FilePath, bundled, StringComparison.OrdinalIgnoreCase));
+    var systemIndex = withoutSetting.FindIndex(item =>
+        item.Source.Contains("系统 PATH", StringComparison.Ordinal));
+    AssertEqual(0, bundledIndex);
+    AssertEqual(true, systemIndex < 0 || systemIndex > bundledIndex);
+
+    // 5) 内置解释器的路径是相对可执行文件目录的，不是相对源码目录。
+    //    这条写错的话本地跑得好好的，打出来的包一导出就报「找不到 Python」。
+    AssertEqual(true, bundled.StartsWith(AppContext.BaseDirectory, StringComparison.OrdinalIgnoreCase));
+    AssertEqual(true, bundled.Contains(Path.Combine("Tools", "Atlas", "python"), StringComparison.OrdinalIgnoreCase));
+}
+
+static void BundledAtlasPythonRunsTheToolSelfCheck()
+{
+    // 这条是**唯一能在打包前发现「内置 Python 装歪了」的地方**：
+    // python313._pth 少写一行 Lib/site-packages 就正好是「解压看起来正常、
+    // 一 import 就 ModuleNotFoundError」的症状，只看 File.Exists 拦不住。
+    var bundled = AtlasPythonLocator.BundledPath;
+    if (!File.Exists(bundled))
+    {
+        throw new InvalidOperationException(
+            $"内置 Python 不在预期位置，安装不完整：{bundled}");
+    }
+
+    // 1) 探针：真的 import 一下 Pillow
+    var ok = AtlasPythonLocator.Probe(bundled, out var version, out var reason);
+    AssertEqual(true, ok);
+    AssertEqual(true, version.Length > 0);
+    AssertEqual(true, reason.Length == 0);
+
+    // 2) 图集脚本的路径也相对可执行文件目录
+    var script = Path.Combine(AppContext.BaseDirectory, "Tools", "Atlas", "ue_atlas.py");
+    AssertEqual(true, File.Exists(script));
+
+    // 3) 自检脚本也要在。它是 55 项行为断言，比任何手写抽查都靠得住。
+    var selfCheck = Path.Combine(AppContext.BaseDirectory, "Tools", "Atlas", "tests", "check_atlas.py");
+    AssertEqual(true, File.Exists(selfCheck));
+}
+
+/// <summary>造一个「帧数和磁盘上的 PNG 都对得上」的清单。</summary>
+static SequenceFrameManifest BuildAtlasTestManifest(
+    string actionFolder,
+    int frameCount,
+    int[] blankIndices)
+{
+    var manifest = new SequenceFrameManifest { ActionCode = "Test", Fps = 12 };
+    for (var ordinal = 0; ordinal < frameCount; ordinal++)
+    {
+        if (blankIndices.Contains(ordinal))
+        {
+            manifest.Frames.Add(new SequenceFrameManifestEntry { IsBlank = true });
+            continue;
+        }
+
+        var fileName = $"frame_{ordinal:00}.png";
+        WriteAtlasTestImage(actionFolder, fileName);
+        manifest.Frames.Add(new SequenceFrameManifestEntry { RelativePath = fileName });
+    }
+
+    return manifest;
+}
+
+/// <summary>写一张真实的小 PNG。图集工具要真的读它，所以不能只写个空文件。</summary>
+static string WriteAtlasTestImage(string folder, string fileName)
+{
+    Directory.CreateDirectory(folder);
+    var path = Path.Combine(folder, fileName);
+    using var image = new Bitmap(32, 32, System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+    using (var graphics = Graphics.FromImage(image))
+    {
+        graphics.Clear(Color.Transparent);
+        graphics.FillRectangle(Brushes.DeepPink, 4, 4, 20, 20);
+    }
+
+    image.Save(path, ImageFormat.Png);
+    return path;
+}
+
+/// <summary>写一份 report 并把它标成「刚刚写的」，好让新鲜度校验过。</summary>
+static void WriteAtlasTestReport(string path, string json)
+{
+    File.WriteAllText(path, json, new UTF8Encoding(false));
+    File.SetLastWriteTimeUtc(path, DateTime.UtcNow);
+}
+
+/// <summary>跑一段必然抛异常的代码，把异常带回来给调用方接着断言。</summary>
+static Exception AssertThrows(Action action)
+{
+    try
+    {
+        action();
+    }
+    catch (Exception error)
+    {
+        return error;
+    }
+
+    throw new InvalidOperationException("期望抛出异常，实际正常返回了。");
 }
 
 

@@ -124,6 +124,10 @@ function Copy-SourceToWorkFolder {
         $DestinationRoot,
         "/E",
         "/XD", ".git", ".vs", ".idea", "bin", "obj",
+        # 图集工具的 Node 依赖（61MB）靠 npm install 重装，不进包。
+        # Tools\Atlas\python\ 则**必须跟着走** —— 那是内置解释器，
+        # 少了它本地跑得好好的、打出来的包一导出就报「找不到 Python」。
+        "/XD", "Tools\Atlas\node_modules",
         "/XF", "*.user",
         "/NFL", "/NDL", "/NJH", "/NJS", "/NP"
     )
@@ -229,7 +233,14 @@ $requiredPaths = @(
     (Join-Path $programDir "App.xbf"),
     (Join-Path $programDir "MainWindow.xbf"),
     (Join-Path $programDir "Assets\DefaultBuffIcon.png"),
-    (Join-Path $programDir "Tools\Unreal\export_zd_assets.py")
+    (Join-Path $programDir "Tools\Unreal\export_zd_assets.py"),
+    # 图集链路。内置解释器和它唯一的第三方依赖（Pillow）都要在包里，
+    # 且**必须在这里挡住** —— 少了它们不会在打包时报错，只在用户点导出时才炸。
+    (Join-Path $programDir "Tools\Atlas\ue_atlas.py"),
+    (Join-Path $programDir "Tools\Atlas\python\python.exe"),
+    (Join-Path $programDir "Tools\Atlas\python\Lib\site-packages\PIL\Image.py"),
+    (Join-Path $programDir "Tools\Atlas\python\python313._pth"),
+    (Join-Path $programDir "Tools\Atlas\tests\check_atlas.py")
 )
 
 foreach ($requiredPath in $requiredPaths) {
