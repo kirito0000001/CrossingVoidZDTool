@@ -70,6 +70,12 @@ internal sealed class SettingsViewModel : ObservableObject
 
     public string UnrealProjectPath => _settings.UnrealProjectPath ?? string.Empty;
 
+    /// <summary>
+    /// 图集打包用的 Python 解释器路径。**留空即用工具箱内置的那个**，
+    /// 所以这里不做成可写设置——想换就填，填了才生效。
+    /// </summary>
+    public string? AtlasPythonPath => _settings.AtlasPythonPath;
+
     public bool BackupBeforeUnrealSync
     {
         get => _backupBeforeUnrealSync;

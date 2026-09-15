@@ -4596,6 +4596,7 @@
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
                                 <Button Click="PreviousSequenceFrameButton_Click" Style="{StaticResource IconToolButtonStyle}" ToolTipService.ToolTip="上一帧">
@@ -4631,7 +4632,17 @@
                                     IsOn="{Binding SequenceFrames.PauseEditorPreviewWhenVoiceEnds, Mode=TwoWay}"
                                     OffContent="语音结束继续"
                                     OnContent="语音结束暂停" />
-                                <Grid Grid.Column="7" HorizontalAlignment="Right" VerticalAlignment="Center">
+                                <Button
+                                    x:Name="SequenceEditorExportAtlasButton"
+                                    Grid.Column="7"
+                                    VerticalAlignment="Center"
+                                    Click="SequenceEditorExportAtlasButton_Click"
+                                    Style="{StaticResource PrimaryToolButtonStyle}" ToolTipService.ToolTip="把当前动作的序列帧打成一张图集（含坐标 json），落到 Export 目录">
+                                    <StackPanel Orientation="Horizontal" Spacing="6">
+                                        <FontIcon FontSize="14" Glyph="&#xE8B7;" />
+                                        <TextBlock Text="导出图集" /></StackPanel>
+                                </Button>
+                                <Grid Grid.Column="8" HorizontalAlignment="Right" VerticalAlignment="Center">
                                     <TextBlock
                                         x:Name="SequenceEditorSingleFrameText"
                                         Width="88"

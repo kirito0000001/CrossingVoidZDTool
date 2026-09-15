@@ -240,7 +240,8 @@ $requiredPaths = @(
     (Join-Path $programDir "Tools\Atlas\python\python.exe"),
     (Join-Path $programDir "Tools\Atlas\python\Lib\site-packages\PIL\Image.py"),
     (Join-Path $programDir "Tools\Atlas\python\python313._pth"),
-    (Join-Path $programDir "Tools\Atlas\tests\check_atlas.py")
+    (Join-Path $programDir "Tools\Atlas\tests\check_atlas.py"),
+    (Join-Path $programDir "Tools\Atlas\tests\verify_sk2_against_material_folder.py")
 )
 
 foreach ($requiredPath in $requiredPaths) {

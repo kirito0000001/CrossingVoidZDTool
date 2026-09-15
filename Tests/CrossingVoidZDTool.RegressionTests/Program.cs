@@ -311,10 +311,10 @@ var tests = new (string Name, Action Run)[]
     ("特效素材落 ExAsset 目录且不产生待删除", EffectMaterialTargetsExAssetFolderAndStaysAdditiveOnly),
     ("其他图片特效和待分配语音只显示新增", AdditiveCategoriesOnlyShowAdditionsNotDeletions),
     ("ExAsset 特效贴图进入素材桶", ExAssetEffectTexturesEnterMaterialBuckets),
-    ("图集清单逐帧一条且精灵名对齐虚幻侧", AtlasManifestMatchesUnrealSpriteNaming),
-    ("图集清单的空白帧占序号位但不出图", AtlasManifestKeepsOrdinalAcrossBlankFrames),
-    ("图集清单的复用帧每个位置各出一条", AtlasManifestEmitsOneEntryPerReusedPosition),
-    ("图集清单在素材缺失或全空时报错", AtlasManifestRejectsIncompleteOrEmptyActions),
+    ("图集清单按素材目录出图且精灵名对齐虚幻侧", AtlasManifestMatchesUnrealSpriteNaming),
+    ("图集清单以素材目录为准而非序列清单", AtlasManifestFollowsMaterialFolderNotSequence),
+    ("图集只扫 PNG 且不递归子目录", AtlasSourceScanTakesPngOnlyAndStaysFlat),
+    ("图集清单在素材为空时报错", AtlasManifestRejectsIncompleteOrEmptyActions),
     ("图集 report 按新鲜度和 ok 判定成败", AtlasReportVerdictRequiresFreshOkResult),
     ("图集落点在导出区或一次性缓存", AtlasDestinationResolvesToExportOrCacheFolder),
     ("图集 Python 定位按设置内置系统依次回退", AtlasPythonLocatorFallsBackInOrder),
@@ -5294,7 +5294,13 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     Ratchet("MainWindow 最大分部行数", largestPartial, 2335);
 
     // 3) 单文件 XAML。九个页面加十二个自建遮罩层全挤在这一个文件里。
-    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5522);
+    //
+    // 5522 -> 5533：为「导出图集」按钮在 St5 序列编辑器的工具栏上加了一格
+    // （Grid.Column="7"，紧挨「语音结束继续」开关右侧，并把右侧的帧位置文本挪到第 8 列）。
+    // 这是一次**实打实的功能新增**，不是文件在悄悄变胖，所以上限跟着抬一格。
+    // 下一次再有改动，请优先按 Plan/02 里那条「把十二个遮罩层抽成 Controls/*.xaml」去砍，
+    // 那个能把整份 XAML 压到约 3300 行，比抠按钮的换行划算得多。
+    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5533);
 
     // 4) Services 最大单文件。
     var largestService = Directory.EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories)
@@ -11429,14 +11435,13 @@ static void AtlasManifestMatchesUnrealSpriteNaming()
     {
         var definition = SequenceActionCatalog.Resolve("Sk2", out var formIndex);
 
-        // 用 23 帧，和实机 Sk2 一致 —— 这样才能同时钉住「位宽 = 总帧数的位数」。
-        // 位宽是**跟随总帧数**的，不是固定两位：Idle 只有 8 帧，实机资产叫
-        // Idle_Frame0_Sprite（一位）；Sk2 有 23 帧，叫 Sk2_Frame00_Sprite（两位）。
-        // 拿 3 帧去断言两位会得到 Frame0，那是测试写错了，不是实现错了。
-        var manifest = BuildAtlasTestManifest(actionFolder, 23, blankIndices: []);
+        // 用 23 张图，和实机 Sk2 的**出图数量**对齐，这样能钉住「位宽 = 总张数的位数」。
+        // 位宽是**跟随总张数**的，不是固定两位：Idle 只有 8 张，实机资产叫
+        // Idle_Frame0_Sprite（一位）；23 张才叫 Sk2_Frame00_Sprite（两位）。
+        // 拿 3 张去断言两位会得到 Frame0，那是测试写错了，不是实现错了。
+        var images = WriteAtlasTestImages(actionFolder, 23);
 
-        var result = AtlasManifestWriter.Build(
-            "Misaka", actionFolder, definition, formIndex, manifest);
+        var result = AtlasManifestWriter.Build("Misaka", definition, formIndex, images);
 
         AssertEqual("Misaka_Sk2", result.Atlas);
         AssertEqual("pack", result.Mode);
@@ -11460,27 +11465,25 @@ static void AtlasManifestMatchesUnrealSpriteNaming()
         AssertEqual(1, result.Frames[0].Index);
         AssertEqual("Sk2_Frame22_Sprite", result.Frames[^1].Name);
 
-        // 位宽跟总帧数走，不是固定两位 —— Idle 只有 8 帧，实机就叫 Idle_Frame0_Sprite。
-        // 这条单独写是因为它踩过：拿 3 帧去断言两位会得到 Frame0，
-        // 那是测试写错了。位宽变化点是 10 / 100 / 1000 帧。
+        // 位宽跟总张数走，不是固定两位 —— Idle 只有 8 张，实机就叫 Idle_Frame0_Sprite。
+        // 这条单独写是因为它踩过：拿 3 张去断言两位会得到 Frame0，
+        // 那是测试写错了。位宽变化点是 10 / 100 / 1000 张。
         var idleFolder = Path.Combine(actionFolder, "idle");
         var idle = AtlasManifestWriter.Build(
             "Misaka",
-            idleFolder,
             SequenceActionCatalog.Resolve("Idle", out var idleForm),
             idleForm,
-            BuildAtlasTestManifest(idleFolder, 8, blankIndices: []));
+            WriteAtlasTestImages(idleFolder, 8));
         AssertEqual("Idle_Frame0_Sprite", idle.Frames[0].Name);
         AssertEqual("Idle_Frame7_Sprite", idle.Frames[^1].Name);
 
-        // 过 10 帧就该变两位
+        // 过 10 张就该变两位
         var tenFolder = Path.Combine(actionFolder, "ten");
         var ten = AtlasManifestWriter.Build(
             "Misaka",
-            tenFolder,
             SequenceActionCatalog.Resolve("Death", out var deathForm),
             deathForm,
-            BuildAtlasTestManifest(tenFolder, 10, blankIndices: []));
+            WriteAtlasTestImages(tenFolder, 10));
         AssertEqual("Death_Frame00_Sprite", ten.Frames[0].Name);
         AssertEqual("Death_Frame09_Sprite", ten.Frames[^1].Name);
     }
@@ -11490,35 +11493,46 @@ static void AtlasManifestMatchesUnrealSpriteNaming()
     }
 }
 
-static void AtlasManifestKeepsOrdinalAcrossBlankFrames()
+static void AtlasManifestFollowsMaterialFolderNotSequence()
 {
-    // 空白帧占序号位但不出图。这里最容易错的写法是「先把空白帧过滤掉再数号」，
-    // 那样第 5 帧会被叫成第 4 帧——而空白帧在第 3 位，它后面的全错。
+    // **这是这条链路曾经做错的地方，用例就是钉住它别再退回去。**
+    //
+    // 早期版本从序列清单（sequence.json）推导帧列表，于是：
+    //   Sk2 的序列有 23 条（位置 6~11 和 18~23 复用同一批图），
+    //   但素材目录里其实只有 17 张 PNG。
+    //   结果图集打出 23 个格子 —— 6 张图白占地方，还让 Unreal 侧多建了 6 对资产。
+    //
+    // 正确规则：**素材目录里有几张 PNG，就打几个格子。**
+    // 序列怎么排、谁复用谁，是同步序列那一步的事，图集不掺和。
+    // 这样做还有个好处：**零判断**。不去猜哪个是复用、要不要合并，
+    // 也就没有判断失误的余地 —— 而按清单推算，一旦清单漏引用了某张图就会漏打。
     var actionFolder = CreateTemporaryTestFolder();
     try
     {
-        var definition = SequenceActionCatalog.Resolve("Idle", out var formIndex);
-        var manifest = BuildAtlasTestManifest(actionFolder, 5, blankIndices: [1, 3]);
+        var definition = SequenceActionCatalog.Resolve("Sk2", out var formIndex);
 
-        var result = AtlasManifestWriter.Build(
-            "Misaka", actionFolder, definition, formIndex, manifest);
+        // 目录里放 3 张图
+        var images = WriteAtlasTestImages(actionFolder, 3);
 
-        // 5 帧里 2 帧是空白 -> 出图 3 条
+        var result = AtlasManifestWriter.Build("Misaka", definition, formIndex, images);
+
+        // 就出 3 条 —— 不看序列有几帧。即便序列说的是 23 帧（这里根本没读序列），
+        // 素材目录说了算。
         AssertEqual(3, result.Frames.Count);
-
-        // 但序号必须是 1 / 3 / 5（原始下标 0 / 2 / 4 加一），不是 1 / 2 / 3
         AssertSequence(
-            [1, 3, 5],
+            [1, 2, 3],
             result.Frames.Select(frame => frame.Index).ToArray());
 
-        // 精灵名同样按**原始下标**算，所以是 Frame0 / Frame2 / Frame4。
-        // 注意这里是位宽 1（总帧数 5 是一位数），和上一个用例的两位形成对照——
-        // 空白帧被跳过时，位宽**不能**改用「出图条数」去算（那样还是 1，巧合而已），
-        // 也不能改用「下标最大值」（那样也是 1）。真正钉住实现的是下面这条：
-        // 位置 2 的帧仍然叫 Frame2，没被上一帧的跳过挤成 Frame1。
-        AssertSequence(
-            ["Idle_Frame0_Sprite", "Idle_Frame2_Sprite", "Idle_Frame4_Sprite"],
-            result.Frames.Select(frame => frame.Name).ToArray());
+        // 每条都指向一个**不同的文件**：同源图不会再被拆成多条。
+        AssertEqual(
+            3,
+            result.Frames.Select(frame => frame.File).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+
+        // 名字仍走命名函数，两两不同（同名才是真问题：UE 里同名 sprite 会互相覆盖）
+        AssertEqual(3, result.Frames.Select(frame => frame.Name).Distinct(StringComparer.Ordinal).Count());
+        AssertEqual(
+            SequenceActionCatalog.GetFrameSpriteName(definition, formIndex, 0, 3),
+            result.Frames[0].Name);
     }
     finally
     {
@@ -11526,88 +11540,84 @@ static void AtlasManifestKeepsOrdinalAcrossBlankFrames()
     }
 }
 
-static void AtlasManifestEmitsOneEntryPerReusedPosition()
+static void AtlasSourceScanTakesPngOnlyAndStaysFlat()
 {
-    // 复用帧（同一张图出现在多个位置）**每个位置都要出一条**：
-    // Sk2_Frame05_Sprite 和 Sk2_Frame17_Sprite 是两张独立资产（实机验证过，
-    // 见 Plan/07 §4.2）。合并成一条会让 Flipbook 少帧。
-    // 真正要防的是**同名**，不是同图。
-    var actionFolder = CreateTemporaryTestFolder();
+    // 素材目录的扫描规则，三件事一起钉：
+    // ① **只认 PNG** —— 素材池那边允许 jpg/webp/bmp，但图集要进 UE 当贴图，
+    //    混进有损格式是「本地看着没事、进引擎才发现边缘脏」，所以这里是窄的。
+    // ② **不递归子目录** —— 素材目录的约定是平铺的，跑进子目录会把别的东西扫进来。
+    // ③ **按文件名升序** —— 顺序对图集无意义（决定播放顺序的是同步阶段的索引），
+    //    但要一个**稳定**顺序，否则同一批图两次导出可能排出不同结果，diff 里全是噪声。
+    var folder = CreateTemporaryTestFolder();
     try
     {
-        var definition = SequenceActionCatalog.Resolve("Sk2", out var formIndex);
-        var manifest = new SequenceFrameManifest { ActionCode = "Sk2", Fps = 12 };
-        var shared = WriteAtlasTestImage(actionFolder, "shared.png");
-        var other = WriteAtlasTestImage(actionFolder, "other.png");
+        WriteAtlasTestImage(folder, "b.png");
+        WriteAtlasTestImage(folder, "a.png");
+        WriteAtlasTestImage(folder, "c.png");
 
-        // 位置 0 和位置 2 指向同一个文件——这就是复用。
-        manifest.Frames.Add(new SequenceFrameManifestEntry { RelativePath = "shared.png" });
-        manifest.Frames.Add(new SequenceFrameManifestEntry { RelativePath = "other.png" });
-        manifest.Frames.Add(new SequenceFrameManifestEntry { RelativePath = "shared.png" });
+        // 干扰项 1：非 PNG。素材池认它，图集不认。
+        File.WriteAllBytes(Path.Combine(folder, "junk.jpg"), [0xFF, 0xD8, 0xFF, 0xE0]);
+        // 干扰项 2：连扩展名都不对
+        File.WriteAllText(Path.Combine(folder, "readme.txt"), "not an image");
+        // 干扰项 3：子目录里也有图，但**不该被扫进来**
+        var nested = Path.Combine(folder, "nested");
+        Directory.CreateDirectory(nested);
+        WriteAtlasTestImage(nested, "deep.png");
 
-        var result = AtlasManifestWriter.Build(
-            "Misaka", actionFolder, definition, formIndex, manifest);
+        var scanned = AtlasManifestWriter.EnumerateSourceImages(folder);
 
-        // 三条一条不少，尽管只有两张不同的图
-        AssertEqual(3, result.Frames.Count);
-        AssertEqual(2, result.Frames.Select(frame => frame.File).Distinct(StringComparer.OrdinalIgnoreCase).Count());
+        AssertEqual(3, scanned.Count);
+        AssertSequence(
+            ["a.png", "b.png", "c.png"],
+            scanned.Select(Path.GetFileName).ToArray());
 
-        // 名字两两不同（同名才是真问题：UE 里同名 sprite 会互相覆盖）
-        AssertEqual(3, result.Frames.Select(frame => frame.Name).Distinct(StringComparer.Ordinal).Count());
-        AssertEqual(
-            SequenceActionCatalog.GetFrameSpriteName(definition, formIndex, 0, 3),
-            result.Frames[0].Name);
-        AssertEqual(
-            SequenceActionCatalog.GetFrameSpriteName(definition, formIndex, 2, 3),
-            result.Frames[2].Name);
-        AssertEqual(true, !string.Equals(result.Frames[0].Name, result.Frames[2].Name, StringComparison.Ordinal));
-        _ = shared;
-        _ = other;
+        // 大小写也要认（Windows 上 .PNG 和 .png 都可能有）
+        WriteAtlasTestImage(folder, "D.PNG");
+        AssertEqual(4, AtlasManifestWriter.EnumerateSourceImages(folder).Count);
     }
     finally
     {
-        Directory.Delete(actionFolder, recursive: true);
+        Directory.Delete(folder, recursive: true);
     }
 }
 
 static void AtlasManifestRejectsIncompleteOrEmptyActions()
 {
-    // 空图集是没意义的产物，缺图则会做出「和 Flipbook 对不上序号」的图集——
-    // 两种都必须**当场报错**，不能产出一张空图或者少一帧的图当成功。
+    // 空图集是没意义的产物，必须**当场报错**，不能产出一张空图当成功。
+    //
+    // 这里只剩「一张图都没有」一种情形了：数据源改成素材目录之后，
+    // 「清单说有、磁盘上没有」和「清单里路径为空」这两类**结构上不可能再发生** ——
+    // 帧列表就是从目录里扫出来的，扫到什么就是什么。
+    // 保留一条「枚举后文件被移走」的兜底校验（见实现里的 missing 分支），
+    // 那是枚举完到读之间文件被删的竞态，只有那条还需要测。
     var actionFolder = CreateTemporaryTestFolder();
+    var definition = SequenceActionCatalog.Resolve("Click", out var formIndex);
     try
     {
-        var definition = SequenceActionCatalog.Resolve("Click", out var formIndex);
+        // 1) 目录不存在 —— 应视作「一张图都没有」
+        var notThere = Path.Combine(actionFolder, "not-there");
+        AssertEqual(0, AtlasManifestWriter.EnumerateSourceImages(notThere).Count);
+        AssertThrows(() => AtlasManifestWriter.Build("Misaka", definition, formIndex, []));
 
-        // 1) 一帧都没有
-        var empty = new SequenceFrameManifest { ActionCode = "Click" };
-        AssertThrows(() => AtlasManifestWriter.Build("Misaka", actionFolder, definition, formIndex, empty));
+        // 2) 目录存在但没有 PNG（只有个 txt）—— 同样该报错。
+        //    注意：**这里必须报错**，不能「扫出来 0 张就当成功」。
+        Directory.CreateDirectory(actionFolder);
+        File.WriteAllText(Path.Combine(actionFolder, "readme.txt"), "no images here");
+        var scanned = AtlasManifestWriter.EnumerateSourceImages(actionFolder);
+        AssertEqual(0, scanned.Count);
+        AssertThrows(() => AtlasManifestWriter.Build("Misaka", definition, formIndex, scanned));
 
-        // 2) 全是空白帧
-        var allBlank = new SequenceFrameManifest { ActionCode = "Click" };
-        allBlank.Frames.Add(new SequenceFrameManifestEntry { IsBlank = true });
-        allBlank.Frames.Add(new SequenceFrameManifestEntry { IsBlank = true });
-        AssertThrows(() => AtlasManifestWriter.Build("Misaka", actionFolder, definition, formIndex, allBlank));
+        // 3) 报错文案要能让人知道是哪个动作出的问题，否则多动作批量打图集时无从下手
+        var failure = AssertThrows(() => AtlasManifestWriter.Build("Misaka", definition, formIndex, []));
+        AssertEqual(true, failure.Message.Contains("Click", StringComparison.Ordinal));
 
-        // 3) 图片文件不存在（清单说有，磁盘上没有）
-        var missing = new SequenceFrameManifest { ActionCode = "Click" };
-        missing.Frames.Add(new SequenceFrameManifestEntry { RelativePath = "not-there.png" });
-        AssertThrows(() => AtlasManifestWriter.Build("Misaka", actionFolder, definition, formIndex, missing));
+        // 4) 空清单也要点名动作，文案不能是一句无从下手的「失败」
+        AssertEqual(true, failure.Message.Contains("PNG", StringComparison.Ordinal));
 
-        // 4) 相对路径为空
-        var noPath = new SequenceFrameManifest { ActionCode = "Click" };
-        noPath.Frames.Add(new SequenceFrameManifestEntry { RelativePath = "  " });
-        AssertThrows(() => AtlasManifestWriter.Build("Misaka", actionFolder, definition, formIndex, noPath));
-
-        // 报错文案要能让人知道是哪个动作出的问题，否则多动作批量打图集时无从下手
-        try
-        {
-            AtlasManifestWriter.Build("Misaka", actionFolder, definition, formIndex, missing);
-        }
-        catch (InvalidOperationException error)
-        {
-            AssertEqual(true, error.Message.Contains("Click", StringComparison.Ordinal));
-        }
+        // 5) 兜底：清单里有路径、但文件已经不在（模拟枚举后被人删掉）
+        var ghost = WriteAtlasTestImage(actionFolder, "ghost.png");
+        File.Delete(ghost);
+        AssertThrows(() => AtlasManifestWriter.Build("Misaka", definition, formIndex, [ghost]));
     }
     finally
     {
@@ -11780,27 +11790,21 @@ static void BundledAtlasPythonRunsTheToolSelfCheck()
     AssertEqual(true, File.Exists(selfCheck));
 }
 
-/// <summary>造一个「帧数和磁盘上的 PNG 都对得上」的清单。</summary>
-static SequenceFrameManifest BuildAtlasTestManifest(
-    string actionFolder,
-    int frameCount,
-    int[] blankIndices)
+/// <summary>
+/// 在目录里造 <paramref name="count"/> 张真实 PNG，返回按文件名升序的路径列表。
+///
+/// **返回的就是 <c>EnumerateSourceImages</c> 会扫出来的那批**，
+/// 所以用例可以直接把它喂给 <c>Build</c>，不用再去拼清单对象 ——
+/// 图集的数据源是素材目录，测试也照这个模型来。
+/// </summary>
+static IReadOnlyList<string> WriteAtlasTestImages(string folder, int count)
 {
-    var manifest = new SequenceFrameManifest { ActionCode = "Test", Fps = 12 };
-    for (var ordinal = 0; ordinal < frameCount; ordinal++)
+    for (var ordinal = 0; ordinal < count; ordinal++)
     {
-        if (blankIndices.Contains(ordinal))
-        {
-            manifest.Frames.Add(new SequenceFrameManifestEntry { IsBlank = true });
-            continue;
-        }
-
-        var fileName = $"frame_{ordinal:00}.png";
-        WriteAtlasTestImage(actionFolder, fileName);
-        manifest.Frames.Add(new SequenceFrameManifestEntry { RelativePath = fileName });
+        WriteAtlasTestImage(folder, $"frame_{ordinal:00}.png");
     }
 
-    return manifest;
+    return AtlasManifestWriter.EnumerateSourceImages(folder);
 }
 
 /// <summary>写一张真实的小 PNG。图集工具要真的读它，所以不能只写个空文件。</summary>
