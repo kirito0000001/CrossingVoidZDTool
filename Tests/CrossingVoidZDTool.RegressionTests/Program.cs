@@ -304,7 +304,12 @@ var tests = new (string Name, Action Run)[]
     ("空白帧的删除项可以执行", BlankFrameDeletionIsExecutable),
     ("两侧一致就不是冲突", MatchingSidesAreNotConflicts),
     ("非规范序列只解绑不删资产", OrphanSequencesAreDetachedNotDeleted),
-    ("同步完成后仍有可见反馈", SyncCompletionLeavesVisibleFeedback)
+    ("同步完成后仍有可见反馈", SyncCompletionLeavesVisibleFeedback),
+    ("特效素材规格可留空且用 FX 后缀", EffectSpecIsAdditiveOnlyAndUsesFxSuffix),
+    ("特效素材按目录优先分类且名字兜底认 FX", EffectMaterialClassifiesFromFolderAndName),
+    ("特效素材落 ExAsset 目录且不产生待删除", EffectMaterialTargetsExAssetFolderAndStaysAdditiveOnly),
+    ("其他图片特效和待分配语音只显示新增", AdditiveCategoriesOnlyShowAdditionsNotDeletions),
+    ("ExAsset 特效贴图进入素材桶", ExAssetEffectTexturesEnterMaterialBuckets)
 };
 
 var failed = 0;
@@ -11367,6 +11372,217 @@ static string ReadAllProjectXaml()
     }
 
     return string.Join(Environment.NewLine, files.Select(path => File.ReadAllText(path, Encoding.UTF8)));
+}
+
+static void EffectSpecIsAdditiveOnlyAndUsesFxSuffix()
+{
+    // 特效素材是可留空、可多张的分类：特效图集尺寸本来就不统一，不设校验；
+    // 也不强制必须有一张——没有特效的角色照样是完整角色。
+    // 它还是唯一一个 FileSuffix 和 FolderName 不一致的基础素材规格（目录 Effect、文件名 -FX-）。
+    // 这两个值分别被导出脚本和差异服务读，改错一个就会静默地永远同步不上。
+    var spec = BaseMaterialService.GetSpec(BaseMaterialKind.Effect);
+    AssertEqual("特效素材", spec.DisplayName);
+    AssertEqual("Effect", spec.FolderName);
+    AssertEqual("FX", spec.FileSuffix);
+    AssertEqual(0, spec.MinimumCount);
+    AssertEqual(false, spec.HasFixedSize);
+    AssertEqual(false, spec.IsSingle);
+    AssertEqual("可留空", spec.CountRequirementText);
+    // 这句话不能带「单张图」三个字——特效素材是可以放多张的
+    AssertEqual("保留原尺寸", spec.TargetText);
+
+    WithCharacterWorkspace((service, character, root) =>
+    {
+        var sourcePath = Path.Combine(root, "source.png");
+        WriteImage(sourcePath);
+        var item = service.ImportAndCrop(character, BaseMaterialKind.Effect, sourcePath);
+        AssertEqual($"{character.Code}-FX-1.png", item.FileName);
+        AssertEqual(
+            Path.Combine(root, "AssetMaterial", "Effect"),
+            Path.GetDirectoryName(item.FilePath));
+        // 不校验尺寸的规格一律合规，进来什么尺寸就留什么尺寸（WriteImage 写的是 566x325）
+        AssertEqual(BaseMaterialStatus.Ready, item.Status);
+        AssertEqual(566, item.ActualWidth);
+        AssertEqual(325, item.ActualHeight);
+    });
+}
+
+static void EffectMaterialClassifiesFromFolderAndName()
+{
+    // 特效素材有专属目录 /Game/GameActor2D/<角色>/ExAsset/Effect，目录比名字可靠得多：
+    // 手工放进那个目录的图可能叫 Effect_Fire，也可能叫 AtkSlash_01 这种完全不带类型词的名字。
+    // 只按名字判会漏进「其他图片」，而分错桶不报错，素材只是静默换个位置待着。
+    AssertEqual("Effect", ClassifyMaterialAt("/Game/GameActor2D/Misaka/ExAsset/Effect", "AtkSlash_01").Key);
+    // 再分一层子目录（按技能或动作分图集）同样要认
+    AssertEqual("Effect", ClassifyMaterialAt("/Game/GameActor2D/Misaka/ExAsset/Effect/Skill1", "AtkSlash_02").Key);
+    // 导出的 packagePath 可能是 Windows 分隔符
+    AssertEqual(true, UnrealMaterialClassifier.IsEffectMaterialPath(@"\Game\GameActor2D\Misaka\ExAsset\Effect"));
+    // 目录判断不能误伤同名前缀
+    AssertEqual(false, UnrealMaterialClassifier.IsEffectMaterialPath(
+        "/Game/GameActor2D/Misaka/ExAsset/EffectMesh"));
+    // 别的基础素材目录不会因为名字里有 Effect 就被吸进特效
+    AssertEqual(false, UnrealMaterialClassifier.IsEffectMaterialPath(
+        "/Game/AssetMaterial/ImageS/CharaterS/Misaka/Effect"));
+
+    // 没有专属目录时退回按名字：标准后缀 FX 走标准命名那条路
+    AssertEqual("Effect", UnrealMaterialClassifier.ClassifyMaterial("Misaka-FX-1").Key);
+    // 手工资产未必守规矩，兜底也认 effect / fx 两个词
+    AssertEqual("Effect", UnrealMaterialClassifier.ClassifyMaterial("Effect_Fire").Key);
+    AssertEqual("Effect", UnrealMaterialClassifier.ClassifyMaterial("Misaka_Effect01").Key);
+    // effect/fx 挡在 icon 这些泛词之前：名字里同时出现「特效」和「图标」时按特效算
+    AssertEqual("Effect", UnrealMaterialClassifier.ClassifyMaterial("FX_Icon_Slash").Key);
+    // 其他图片不受影响
+    AssertEqual("OtherImage", UnrealMaterialClassifier.ClassifyMaterial("Misaka-OtherImage-1").Key);
+
+    static (string Key, string DisplayName) ClassifyMaterialAt(string packagePath, string assetName) =>
+        UnrealMaterialClassifier.ClassifyMaterial(new UnrealProjectExportAsset
+        {
+            AssetName = assetName,
+            AssetClass = "Texture2D",
+            PackagePath = packagePath,
+            ObjectPath = $"{packagePath}/{assetName}.{assetName}",
+        });
+}
+
+static void EffectMaterialTargetsExAssetFolderAndStaysAdditiveOnly()
+{
+    // 特效素材是唯一一个「本地在 AssetMaterial/Effect、Unreal 落在角色根下」的基础素材分类。
+    // 目标路径算错的后果是每次检测都判成新增、同步完还是新增，界面上却毫无提示。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var sourcePath = Path.Combine(root, "Misaka-FX-1.png");
+        WriteImage(sourcePath);
+        var toolboxItem = new UnrealBridgeSnapshotItem(
+            "material:fx-1",
+            "module:BaseMaterials",
+            UnrealBridgeModule.BaseMaterials,
+            "特效素材 #1",
+            "toolbox-hash",
+            "{\"kind\":\"Effect\",\"index\":\"1\"}",
+            sourcePath,
+            ToolboxRelativePath: "AssetMaterial/Effect/Misaka-FX-1.png",
+            NormalizedName: "Misaka-FX-1");
+        var change = new UnrealBridgeChange(
+            toolboxItem.StableId, toolboxItem.Module, toolboxItem.DisplayName,
+            UnrealBridgeChangeKind.Added, toolboxItem, null, true);
+
+        var operation = new UnrealBridgeExecutionPlanService().Build(
+            UnrealBridgeDirection.PublishToUnreal,
+            "Misaka",
+            Path.Combine(root, "CrossingVoid.uproject"),
+            [change],
+            deletionsConfirmed: false,
+            isFirstPublish: false,
+            templateCharacterCode: string.Empty).Operations.Single();
+
+        AssertEqual(
+            "/Game/GameActor2D/Misaka/ExAsset/Effect/Misaka-FX-1.Misaka-FX-1",
+            operation.TargetObjectPath);
+
+        // 「Unreal 多出来的特效」不该进差异列表；万一漏过来一条，执行层这道保险也要拦下来。
+        AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(
+            CreateImageDeleteChange(nameof(BaseMaterialKind.Effect), "Misaka-FX-9")));
+        AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(
+            CreateImageDeleteChange(nameof(BaseMaterialKind.OtherImage), "Misaka-随手放的图")));
+        // 归了类却对不上的仍然要清得掉，否则第三步的差异归不了零
+        AssertEqual(true, UnrealBridgePublishSupportPolicy.CanExecute(
+            CreateImageDeleteChange(nameof(BaseMaterialKind.SkillIcon), "Misaka-SkillIcon-9")));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void AdditiveCategoriesOnlyShowAdditionsNotDeletions()
+{
+    // 特效素材、其他图片、其他语音（待分配）都不要求两侧一一对应：
+    // Unreal 工程里本来就可能存着工具箱不认识的东西——手工丢进去的备用图、
+    // 还没归类的语音、早先在工程里直接做的特效。
+    // 这些「Unreal 多出来」的项如果照常列成待删除，第三步的差异永远归不了零，
+    // 而唯一的出路是删掉，那是删用户的素材。
+    var addedEffect = new UnrealBridgeSnapshotItem(
+        "material:fx-1",
+        "module:BaseMaterials",
+        UnrealBridgeModule.BaseMaterials,
+        "特效素材 #1",
+        "toolbox-hash",
+        "{\"kind\":\"Effect\",\"index\":\"1\"}",
+        @"D:\Project\Misaka\AssetMaterial\Effect\Misaka-FX-1.png",
+        ToolboxRelativePath: "AssetMaterial/Effect/Misaka-FX-1.png",
+        NormalizedName: "Misaka-FX-1");
+    var unrealItems = new[]
+    {
+        CreateImageDeleteChange(nameof(BaseMaterialKind.OtherImage), "Misaka-随手放的图").UnrealItem!,
+        CreateImageDeleteChange(nameof(BaseMaterialKind.Effect), "Misaka-FX-9").UnrealItem!,
+        CreateImageDeleteChange(nameof(BaseMaterialKind.SkillIcon), "Misaka-SkillIcon-9").UnrealItem!,
+        CreateVoiceDeleteItem(nameof(VoiceMaterialKind.Other), "Misaka-Vo-9", "Other"),
+        CreateVoiceDeleteItem(nameof(VoiceMaterialKind.Formation), "Misaka-Formation-9", "Formation")
+    };
+
+    var changes = new UnrealBridgeDiffService().Compare(
+        new UnrealBridgeSnapshot("Misaka", [addedEffect]),
+        new UnrealBridgeSnapshot("Misaka", unrealItems),
+        UnrealBridgeDirection.PublishToUnreal,
+        null);
+
+    // 新增方向不受影响：工具箱里有、Unreal 里没有的照常出现
+    AssertEqual(
+        UnrealBridgeChangeKind.Added,
+        changes.Single(change => change.StableId == addedEffect.StableId).Kind);
+
+    // 归了类却对不上的仍然要清——这些是真该清理的不合格素材
+    AssertEqual(true, changes.Any(change => change.StableId == "material:Misaka-SkillIcon-9"));
+    AssertEqual(true, changes.Any(change => change.StableId == "voice:Misaka-Formation-9"));
+
+    // 只增不删的三类一条都不留
+    AssertEqual(false, changes.Any(change => change.StableId == "material:Misaka-随手放的图"));
+    AssertEqual(false, changes.Any(change => change.StableId == "material:Misaka-FX-9"));
+    AssertEqual(false, changes.Any(change => change.StableId == "voice:Misaka-Vo-9"));
+}
+
+static UnrealBridgeSnapshotItem CreateVoiceDeleteItem(string kind, string assetName, string folder)
+{
+    // 语音语义快照的载荷是 JSON 格式，kind 取 VoiceMaterialKind 的名字。
+    // 差异服务两种载荷格式都认：Unreal 侧是 0x1F 分隔串，第一段同样是分类。
+    return new UnrealBridgeSnapshotItem(
+        $"voice:{assetName}",
+        "module:Voices",
+        UnrealBridgeModule.Voices,
+        assetName,
+        "unreal-hash",
+        $"{{\"kind\":\"{kind}\"}}",
+        string.Empty,
+        SourceObjectPath: $"/Game/GameActor2D/Misaka/Sound/{folder}/{assetName}.{assetName}",
+        NormalizedName: assetName);
+}
+
+static void ExAssetEffectTexturesEnterMaterialBuckets()
+{
+    // 特效贴图必须能归到自己的桶里。归错的后果和分错桶同一个性质：不报错，
+    // 素材只是静默落进「其他图片」，得靠人自己发现。
+    var effectTexture = new UnrealProjectExportAsset
+    {
+        AssetName = "AtkSlash_01",
+        AssetClass = "Texture2D",
+        PackagePath = "/Game/GameActor2D/Misaka/ExAsset/Effect",
+        ObjectPath = "/Game/GameActor2D/Misaka/ExAsset/Effect/AtkSlash_01.AtkSlash_01",
+    };
+    // 重定向器是改名过程留下的空壳，不进桶
+    var redirector = new UnrealProjectExportAsset
+    {
+        AssetName = "AtkSlash_Old",
+        AssetClass = "ObjectRedirector",
+        PackagePath = "/Game/GameActor2D/Misaka/ExAsset/Effect",
+        ObjectPath = "/Game/GameActor2D/Misaka/ExAsset/Effect/AtkSlash_Old.AtkSlash_Old",
+    };
+
+    var bucket = UnrealMaterialClassifier.BuildMaterialBuckets([effectTexture, redirector]).Single();
+    AssertEqual("Effect", bucket.Kind);
+    AssertEqual("特效素材", bucket.DisplayName);
+    AssertEqual(1, bucket.Count);
+    AssertEqual("AtkSlash_01", bucket.Assets.Single().AssetName);
 }
 
 sealed class FakeWorkflowHost : IUnrealSyncWorkflowHost

@@ -174,6 +174,10 @@ def _material_scope_kind(package_path, asset_name, asset_class, selected_codes):
         if normalized_package == actor_root + "/buff" or normalized_package.startswith(actor_root + "/buff/"):
             if "texture" in normalized_class or "objectredirector" in normalized_class:
                 return "buff"
+        if (normalized_package == actor_root + "/exasset/effect" or
+                normalized_package.startswith(actor_root + "/exasset/effect/")):
+            if "texture" in normalized_class or "objectredirector" in normalized_class:
+                return "effect"
         if normalized_package == actor_root and normalized_name in (
                 code.lower(),
                 "{}_animbp".format(code).lower(),
@@ -194,7 +198,7 @@ def _include_material_scope_asset(asset, selected_codes):
         selected_codes)
     if not kind or "objectredirector" in asset_class.lower():
         return False
-    if kind in ("base", "buff"):
+    if kind in ("base", "buff", "effect"):
         return "texture" in asset_class.lower()
     if kind == "sound":
         return any(value in asset_class.lower() for value in (
@@ -398,6 +402,12 @@ def _export_texture_png(asset_data, export_root):
     elif _path_starts_with(package_path, CHARACTER_ACTOR_ROOT + "/") and "/buff" in lowered_package:
         source_root = CHARACTER_ACTOR_ROOT
         output_root_name = "BuffIcons"
+    elif _path_starts_with(package_path, CHARACTER_ACTOR_ROOT + "/") and "/exasset/effect" in lowered_package:
+        # 特效素材。和 BUFF 图标一样挂在角色根下、不归 Images，
+        # 所以必须在这里单独认一次：漏掉的话这个分支返回空串，
+        # exportedFilePath 为空，差异比对就没了依据（素材静默变成待处理）。
+        source_root = CHARACTER_ACTOR_ROOT
+        output_root_name = "Effects"
     else:
         return ""
     if not _is_texture_asset(asset_data):
@@ -3514,6 +3524,7 @@ def _export():
                 ("{}/{}".format(BASE_MATERIAL_ROOT, code), True),
                 (actor_root + "/Sound", True),
                 (actor_root + "/BUFF", True),
+                (actor_root + "/ExAsset/Effect", True),
                 (actor_root, False),
             ])
         asset_scan_entries.append((CHAR_ITEM_ROOT, False))

@@ -103,7 +103,7 @@ Controls/     可复用控件
 Styles/       共享样式
 Tools/        在 Unreal 进程内运行的 Python 脚本
 Tests/        回归测试（控制台程序 + 手写 runner）
-Plan/         重构方案与缺陷清单
+Plan/         重构方案、缺陷清单与落地记录（01–05 是重构前快照，06 是实际落地）
 Docs/         历史设计文档
 ```
 

@@ -451,11 +451,15 @@ internal static class UnrealExportManifestReader
                 var baseAssets = baseGroups.TryGetValue(code, out var matchedBaseAssets) ? matchedBaseAssets : [];
                 var zdAssets = zdGroups.TryGetValue(code, out var matchedZdAssets) ? matchedZdAssets : [];
                 var personalBuffRoot = $"{UnrealProjectSyncService.TargetZdContentPath}/{code}/BUFF";
+                var personalEffectRoot = $"{UnrealProjectSyncService.TargetZdContentPath}/{code}/ExAsset/Effect";
+                // 基础素材目录之外，角色根下只有两处贴图算「基础素材」：
+                // 个人 BUFF 图标，和 ExAsset/Effect 下的特效素材。以前只列了前者，
+                // 特效素材会被整条筛掉——它落在 Unreal 里、第三步却完全看不见。
                 var materialAssets = baseAssets
                     .Concat(zdAssets.Where(asset =>
                         IsTextureAsset(asset) &&
-                        (string.Equals(asset.PackagePath, personalBuffRoot, StringComparison.OrdinalIgnoreCase) ||
-                         asset.PackagePath.StartsWith(personalBuffRoot + "/", StringComparison.OrdinalIgnoreCase))))
+                        (IsUnderFolder(asset.PackagePath, personalBuffRoot) ||
+                         IsUnderFolder(asset.PackagePath, personalEffectRoot))))
                     .ToArray();
                 var zdMaterialTextureCount = CountZdMaterialTextures(zdAssets, code);
                 var characterItem = ResolveCharacterItem(code, baseAssets, zdAssets, manifest.CharacterItems);
@@ -654,6 +658,15 @@ internal static class UnrealExportManifestReader
     private static bool IsTextureAsset(UnrealProjectExportAsset asset)
     {
         return asset.AssetClass.Contains("Texture", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// 包路径是否就落在某个目录里（含子目录）。大小写不敏感——Unreal 的包路径本来就不敏感。
+    /// </summary>
+    private static bool IsUnderFolder(string packagePath, string root)
+    {
+        return string.Equals(packagePath, root, StringComparison.OrdinalIgnoreCase) ||
+            packagePath.StartsWith(root + "/", StringComparison.OrdinalIgnoreCase);
     }
 
     private static Dictionary<string, List<UnrealProjectExportAsset>> GroupByCharacterFolder(

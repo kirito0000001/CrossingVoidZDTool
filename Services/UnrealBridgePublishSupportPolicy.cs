@@ -37,9 +37,9 @@ internal static class UnrealBridgePublishSupportPolicy
                 }
 
                 // 「其他图片」是有意停在那儿的东西（还没归类、或压根不归工具箱管），
-                // 不能因为工具箱这边没有同名文件就当成多余资产删掉。
-                // 归了类却对不上的，才是真该清理的不合格素材。
-                return !IsUnclassifiedImage(change);
+                // 「特效素材」也允许工程里先有一份。这两类不能因为工具箱这边没有同名文件
+                // 就当成多余资产删掉。归了类却对不上的，才是真该清理的不合格素材。
+                return !IsAdditiveOnlyImage(change);
             }
 
             // 空白帧在 Unreal 里没有对应资产（Flipbook 里 sprite 为 null 的关键帧），
@@ -78,14 +78,17 @@ internal static class UnrealBridgePublishSupportPolicy
     }
 
     /// <summary>
-    /// 这条 Unreal 侧素材是不是「其他图片」。
+    /// 这条 Unreal 侧素材是不是「不要求两侧一一对应」的那一类。
     ///
     /// 语义快照把素材分类塞在 PayloadJson 的第一段（分隔符 0x1F），
-    /// 取值就是 BaseMaterialKind 的名字。这里只认 OtherImage 这一档——
-    /// 读不出来时按「不是其他图片」处理会让它变成可删，风险太大，所以反过来：
-    /// 拿不准就当成其他图片，宁可留着。
+    /// 取值就是 BaseMaterialKind 的名字。其他图片是还没归类（或压根不归工具箱管）的，
+    /// 特效素材是允许工程里先有一份的——差异服务本来就不会为它们列出待删除，
+    /// 这里是执行层的最后一道保险：万一漏过来一条，也不能真去删。
+    ///
+    /// 只认 OtherImage 和 Effect 这两档——读不出来时按「不是这一类」处理会让它变成可删，
+    /// 风险太大，所以反过来：拿不准就当成这一类，宁可留着。
     /// </summary>
-    private static bool IsUnclassifiedImage(UnrealBridgeChange change)
+    private static bool IsAdditiveOnlyImage(UnrealBridgeChange change)
     {
         if (change.Module != UnrealBridgeModule.BaseMaterials)
         {
@@ -100,6 +103,7 @@ internal static class UnrealBridgePublishSupportPolicy
 
         var kind = payload.Split('\u001f', 2)[0].Trim();
         return string.IsNullOrEmpty(kind)
-            || string.Equals(kind, nameof(BaseMaterialKind.OtherImage), StringComparison.OrdinalIgnoreCase);
+            || string.Equals(kind, nameof(BaseMaterialKind.OtherImage), StringComparison.OrdinalIgnoreCase)
+            || string.Equals(kind, nameof(BaseMaterialKind.Effect), StringComparison.OrdinalIgnoreCase);
     }
 }

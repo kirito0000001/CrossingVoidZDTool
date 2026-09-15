@@ -140,6 +140,15 @@ check("全大写 MATERIAL 也要导出",
 check("BUFF 图标仍走 BuffIcons",
       "BuffIcons/Misaka/BUFF/Icon0.png",
       exported_relative("/Game/GameActor2D/Misaka/BUFF", "Icon0"))
+check("特效素材走 Effects",
+      "Effects/Misaka/ExAsset/Effect/Misaka-FX-1.png",
+      exported_relative("/Game/GameActor2D/Misaka/ExAsset/Effect", "Misaka-FX-1"))
+check("exasset/effect 大小写不齐也要导出",
+      "Effects/Misaka/exasset/effect/Misaka-FX-2.png",
+      exported_relative("/Game/GameActor2D/Misaka/exasset/effect", "Misaka-FX-2"))
+check("特效素材目录里的非贴图照旧不导", "",
+      exported_relative("/Game/GameActor2D/Misaka/ExAsset/Effect", "Misaka-FX-3",
+                        "PaperFlipbook"))
 check("共享素材根仍走 Images",
       "Images/Misaka/Misaka-SkillIcon-1.png",
       exported_relative("/Game/AssetMaterial/ImageS/CharaterS/Misaka",
@@ -222,6 +231,29 @@ check("包路径形式也要认", True,
 check("真的是别的资产就不认", False,
       module._asset_path_matches(asset, "/Game/GameActor2D/Misaka/Material/Click/Frame1.Frame1"))
 check("空值不认", False, module._asset_path_matches(asset, ""))
+
+print("6) 素材范围：ExAsset/Effect 要进 material_scope，且只认贴图")
+
+
+def scope_kind(package_path, asset_name, asset_class):
+    return module._material_scope_kind(package_path, asset_name, asset_class, ["Misaka"])
+
+
+def scope_included(package_path, asset_name, asset_class):
+    return module._include_material_scope_asset(
+        _FakeAssetData(package_path, asset_name, asset_class), ["Misaka"])
+
+
+check("特效素材目录算 effect",
+      "effect", scope_kind("/Game/GameActor2D/Misaka/ExAsset/Effect", "Misaka-FX-1", "Texture2D"))
+check("大小写不齐也认",
+      "effect", scope_kind("/Game/GameActor2D/Misaka/exasset/effect", "Misaka-FX-1", "Texture2D"))
+check("特效素材目录里的贴图收进来", True,
+      scope_included("/Game/GameActor2D/Misaka/ExAsset/Effect", "Misaka-FX-1", "Texture2D"))
+check("特效素材目录里的蓝图不收（只收贴图，不碰别的资产）", False,
+      scope_included("/Game/GameActor2D/Misaka/ExAsset/Effect", "Misaka-FX-1", "Blueprint"))
+check("Sound 目录仍只收声音", False,
+      scope_included("/Game/GameActor2D/Misaka/Sound", "Vo_Tone1", "Texture2D"))
 
 print()
 print("全部通过。" if not failed else "失败 %d 项：%s" % (len(failed), failed))

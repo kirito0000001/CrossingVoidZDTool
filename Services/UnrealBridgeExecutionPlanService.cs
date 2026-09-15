@@ -220,6 +220,17 @@ internal sealed class UnrealBridgeExecutionPlanService
                 return $"{UnrealProjectSyncService.TargetZdContentPath}/{buffCharacterFolder}/BUFF/{fileName}.{fileName}";
             }
 
+            // 特效素材不跟着其他基础素材走 AssetMaterial/ImageS/CharaterS，
+            // 它落角色根下的 ExAsset/Effect/，和 BUFF 图标一样是「角色战斗素材」那一侧。
+            if (string.Equals(materialKind, BaseMaterialKind.Effect.ToString(), StringComparison.OrdinalIgnoreCase))
+            {
+                var effectCharacterFolder = ResolveCharacterFolderName(
+                    UnrealProjectSyncService.TargetZdContentPath,
+                    characterCode,
+                    baseline);
+                return $"{UnrealProjectSyncService.TargetZdContentPath}/{effectCharacterFolder}/ExAsset/Effect/{fileName}.{fileName}";
+            }
+
             var materialCharacterFolder = ResolveCharacterFolderName(
                 UnrealProjectSyncService.TargetBaseMaterialContentPath,
                 characterCode,

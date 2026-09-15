@@ -52,10 +52,85 @@ internal sealed class UnrealBridgeDiffService
                     NeedsCanonicalSequenceRename(renameToolboxItem, renameUnrealItem, canonicalSequenceTexturePaths)))
             .SelectMany(ExpandSequenceChange)
             .Where(change => !IsCanonicalOwnedSequenceAsset(change, canonicalSequenceAssetPaths))
+            .Where(change => !IsAdditiveOnlyDeleteCandidate(change))
             .OrderBy(change => change.Module)
             .ThenBy(change => change.StableId, StringComparer.OrdinalIgnoreCase)
             .ToArray();
         return changes;
+    }
+
+    /// <summary>
+    /// 只做增量的分类：其他图片、其他语音（待分配）、特效素材。
+    ///
+    /// 这三类在 Unreal 侧本来就可能存着工具箱不认识的东西——手工丢进工程的备用图、
+    /// 还没归类的语音、早先在工程里直接做的特效。它们**不要求两侧一一对应**，
+    /// 所以「Unreal 多出来」的那些不进差异列表：留着的话列表永远归不了零，
+    /// 而且真正的出路只有删掉，那是删用户的素材。
+    ///
+    /// 新增方向不受影响——工具箱里有、Unreal 没有的，照常出现。
+    /// </summary>
+    private static bool IsAdditiveOnlyDeleteCandidate(UnrealBridgeChange change)
+    {
+        if (change.Kind != UnrealBridgeChangeKind.DeleteCandidate)
+        {
+            return false;
+        }
+
+        return change.Module switch
+        {
+            UnrealBridgeModule.BaseMaterials => IsAdditiveOnlyMaterialKind(ReadChangeKind(change)),
+            UnrealBridgeModule.Voices => string.Equals(
+                ReadChangeKind(change),
+                nameof(VoiceMaterialKind.Other),
+                StringComparison.OrdinalIgnoreCase),
+            _ => false
+        };
+    }
+
+    /// <summary>
+    /// 读不出来的素材分类一律按「其他图片」算——和
+    /// <see cref="UnrealBridgePublishSupportPolicy"/> 里那条注释同一个理由：
+    /// 拿不准的时候宁可留着，不要判成可删、更不要凭空列一条待删除出来。
+    /// </summary>
+    private static bool IsAdditiveOnlyMaterialKind(string kind) =>
+        string.IsNullOrWhiteSpace(kind) ||
+        string.Equals(kind, nameof(BaseMaterialKind.OtherImage), StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(kind, nameof(BaseMaterialKind.Effect), StringComparison.OrdinalIgnoreCase);
+
+    private static string ReadChangeKind(UnrealBridgeChange change)
+    {
+        // 两侧载荷格式不一样：Unreal 语义快照是 0x1F 分隔的字段串（分类在第一段），
+        // 工具箱快照是 JSON（分类在 "kind" 字段）。删除候选通常只在 Unreal 那边存在，
+        // 所以先读 Unreal 侧，读不出来再退到工具箱侧。
+        var unrealKind = ReadPayloadKind(change.UnrealItem?.PayloadJson);
+        return string.IsNullOrWhiteSpace(unrealKind)
+            ? ReadPayloadKind(change.ToolboxItem?.PayloadJson)
+            : unrealKind;
+    }
+
+    private static string ReadPayloadKind(string? payload)
+    {
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            return string.Empty;
+        }
+
+        if (payload.Contains(SemanticPayloadSeparator))
+        {
+            return payload.Split(SemanticPayloadSeparator, 2)[0].Trim();
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(payload);
+            return document.RootElement.TryGetProperty("kind", out var value)
+                ? value.GetString()?.Trim() ?? string.Empty
+                : string.Empty;
+        }
+        catch (JsonException)
+        {
+            return string.Empty;
+        }
     }
 
     /// <summary>
@@ -302,6 +377,15 @@ internal sealed class UnrealBridgeDiffService
             return $"/Game/GameActor2D/{characterCode}/BUFF/{fileName}.{fileName}";
         }
 
+        // 特效素材是唯一一个「本地在 AssetMaterial 下、Unreal 落在角色根下」的基础素材分类。
+        // 漏掉这一支它会掉进下面那条通用 AssetMaterial 规则，算出一个不存在的目标路径，
+        // 于是每次检测都判成新增、同步完还是新增。
+        if (toolboxItem.Module == UnrealBridgeModule.BaseMaterials &&
+            relative.StartsWith("AssetMaterial/Effect/", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"/Game/GameActor2D/{characterCode}/ExAsset/Effect/{fileName}.{fileName}";
+        }
+
         if (toolboxItem.Module == UnrealBridgeModule.BaseMaterials &&
             relative.StartsWith("AssetMaterial/", StringComparison.OrdinalIgnoreCase))
         {
@@ -346,6 +430,12 @@ internal sealed class UnrealBridgeDiffService
             relative.StartsWith("AssetMaterial/BuffIcon/", StringComparison.OrdinalIgnoreCase))
         {
             return $"/Game/GameActor2D/{characterCode}/BUFF";
+        }
+
+        if (toolboxItem.Module == UnrealBridgeModule.BaseMaterials &&
+            relative.StartsWith("AssetMaterial/Effect/", StringComparison.OrdinalIgnoreCase))
+        {
+            return $"/Game/GameActor2D/{characterCode}/ExAsset/Effect";
         }
 
         if (toolboxItem.Module == UnrealBridgeModule.BaseMaterials &&

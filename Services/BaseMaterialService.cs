@@ -32,6 +32,10 @@ internal sealed class BaseMaterialService
         new(BaseMaterialKind.FullMorphPortrait, "幻形完整立绘", "FullMorphPortrait", "FullMorphPortrait", 1200, 1023, 2),
         new(BaseMaterialKind.Background, "背景图", "Background", "Background", 1920, 1080, 1, true),
         new(BaseMaterialKind.SupportCutIn, "护援特写", "SupportCutIn", "SupportCutIn", 382, 80),
+        // 特效素材：尺寸不设限（特效图集本来就不统一），也不强制数量。
+        // 它的 Unreal 落点和别的基础素材不一样，在 /Game/GameActor2D/<角色>/ExAsset/Effect/，
+        // 见 UnrealBridgeExecutionPlanService.ResolveAddedTargetObjectPath。
+        new(BaseMaterialKind.Effect, "特效素材", "Effect", "FX", 0, 0, 0),
         new(BaseMaterialKind.OtherImage, "其他图片", "OtherImage", "OtherImage", 0, 0, 0)
     ];
 

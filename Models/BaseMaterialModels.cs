@@ -15,6 +15,7 @@ internal enum BaseMaterialKind
     FullMorphPortrait,
     Background,
     SupportCutIn,
+    Effect,
     OtherImage
 }
 
@@ -37,7 +38,13 @@ internal sealed record BaseMaterialSpec(
 {
     public bool HasFixedSize => Width > 0 && Height > 0;
 
-    public string TargetText => HasFixedSize ? $"目标尺寸 {Width}x{Height}" : "单张图，保留原尺寸";
+    // 「单张图」这句只对 IsSingle 的规格成立。其他图片和特效素材都是可以放多张的，
+    // 一律套这句话会让用户以为只能传一张。
+    public string TargetText => HasFixedSize
+        ? $"目标尺寸 {Width}x{Height}"
+        : IsSingle
+            ? "单张图，保留原尺寸"
+            : "保留原尺寸";
 
     public string CountRequirementText => MinimumCount > 0 ? $"至少 {MinimumCount} 张" : "可留空";
 }

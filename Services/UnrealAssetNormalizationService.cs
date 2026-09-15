@@ -124,6 +124,11 @@ internal sealed class UnrealAssetNormalizationService
                 return $"{UnrealProjectSyncService.TargetZdContentPath}/{safeCode}/BUFF/{safeName}.{safeName}";
             }
 
+            if (string.Equals(ReadCategory(item.PayloadJson), BaseMaterialKind.Effect.ToString(), StringComparison.OrdinalIgnoreCase))
+            {
+                return $"{UnrealProjectSyncService.TargetZdContentPath}/{safeCode}/ExAsset/Effect/{safeName}.{safeName}";
+            }
+
             return $"{UnrealProjectSyncService.TargetBaseMaterialContentPath}/{safeCode}/{safeName}.{safeName}";
         }
 

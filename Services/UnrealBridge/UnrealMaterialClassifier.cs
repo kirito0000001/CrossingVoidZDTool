@@ -22,7 +22,7 @@ internal static class UnrealMaterialClassifier
     {
         return assets
             .Where(asset => !IsObjectRedirector(asset))
-            .Select(asset => (Kind: ClassifyMaterial(asset.AssetName), Asset: asset))
+            .Select(asset => (Kind: ClassifyMaterial(asset), Asset: asset))
             .GroupBy(item => item.Kind.Key, StringComparer.OrdinalIgnoreCase)
             .OrderBy(group => group.Key == "OtherImage" ? 1 : 0)
             .ThenBy(group => group.First().Kind.DisplayName, StringComparer.OrdinalIgnoreCase)
@@ -105,6 +105,30 @@ internal static class UnrealMaterialClassifier
     internal static bool IsObjectRedirector(UnrealProjectExportAsset asset) =>
         asset.AssetClass.Contains("ObjectRedirector", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// 素材归类的入口：先看目录，再看名字。
+    ///
+    /// 特效素材有专属目录（<c>/Game/GameActor2D/&lt;角色&gt;/ExAsset/Effect</c>），
+    /// 路径比名字可靠得多——手工放进那个目录的图可能叫 <c>Effect_Fire</c>，也可能叫
+    /// <c>AtkSlash_01</c> 这种完全不带类型词的名字，只按名字判会漏进「其他图片」，
+    /// 而分错桶不报错，素材只是静默换个位置待着。
+    /// 其余分类维持原样：只看名字。
+    /// </summary>
+    internal static (string Key, string DisplayName) ClassifyMaterial(UnrealProjectExportAsset asset)
+    {
+        return IsEffectMaterialPath(asset.PackagePath)
+            ? ("Effect", "特效素材")
+            : ClassifyMaterial(asset.AssetName);
+    }
+
+    internal static bool IsEffectMaterialPath(string packagePath)
+    {
+        var normalized = (packagePath ?? string.Empty).Replace('\\', '/').TrimEnd('/');
+        const string marker = "/ExAsset/Effect";
+        return normalized.EndsWith(marker, StringComparison.OrdinalIgnoreCase) ||
+            normalized.Contains(marker + "/", StringComparison.OrdinalIgnoreCase);
+    }
+
     internal static (string Key, string DisplayName) ClassifyMaterial(string assetName)
     {
         if (TryClassifyStandardMaterialName(assetName, out var standardKind, out var isStandardName))
@@ -147,6 +171,15 @@ internal static class UnrealMaterialClassifier
         if (name.Contains("supportcutin", StringComparison.OrdinalIgnoreCase))
         {
             return ("SupportCutIn", "护援特写");
+        }
+
+        // 特效素材的标准后缀是 FX，但 Unreal 里手工放的图未必守规矩（Effect_Fire、Misaka_Effect01），
+        // 所以兜底也认 effect/fx 两个词。放在 item/skill/icon 这些泛词前面：
+        // 「特效图标」这类名字的意图是特效，不该被 icon 抢走。
+        if (name.Contains("effect", StringComparison.OrdinalIgnoreCase) ||
+            name.Contains("fx", StringComparison.OrdinalIgnoreCase))
+        {
+            return ("Effect", "特效素材");
         }
 
         if (name.Contains("item", StringComparison.OrdinalIgnoreCase))
@@ -237,6 +270,7 @@ internal static class UnrealMaterialClassifier
             "morphportrait" => ("MorphPortrait", "幻形立绘"),
             "background" => ("Background", "背景图"),
             "supportcutin" => ("SupportCutIn", "护援特写"),
+            "fx" => ("Effect", "特效素材"),
             "icon" => ("Icon", "头像"),
             "otherimage" => ("OtherImage", "其他图片"),
             _ => default
