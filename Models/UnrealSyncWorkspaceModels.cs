@@ -350,11 +350,47 @@ internal static class UnrealSyncSelectionTreeBuilder
                     ? $"sequence:{NormalizeActionCode(group.Key)}"
                     : group.First().change.SequenceGroupKey;
             }, StringComparer.OrdinalIgnoreCase);
+        // 每个动作的现状摘要：工具箱那边有多少张素材、占多少帧位，Unreal 那边现在多少帧位。
+        // 只报「删除 N 项 / 新增 N 项」看不出这是什么 —— 是图、是精灵、还是帧位？
+        // 把三个数摆在一起，17 张素材和 23 个帧位的关系才讲得清。
+        // 帧位数从**动作节点**的载荷里读，不从差异条目数。
+        // 缓存恢复出来的是一份待办清单，两侧已一致的帧（Unchanged）被剔掉了 ——
+        // 拿它去数「Unreal 现有多少帧位」永远是 0。动作节点自己不会被剔，
+        // 载荷里带着两侧各自的帧位数。
+        var actionFacts = new Dictionary<string, (int SourceImages, int ToolboxSlots, int UnrealSlots)>(
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var change in allChanges.Where(change => SequenceFrameIdentity.IsActionStableId(change.StableId)))
+        {
+            var key = ResolveSequenceGroupKey(change, actionNameToKey, actionCodeToKey);
+            SequenceFrameIdentity.TryReadActionPayload(change.ToolboxItem?.PayloadJson, out _, out var toolboxSlots, out _);
+            SequenceFrameIdentity.TryReadActionPayload(change.UnrealItem?.PayloadJson, out _, out var unrealSlots, out _);
+            actionFacts[key] = (0, Math.Max(0, toolboxSlots), Math.Max(0, unrealSlots));
+        }
+
+        // 素材张数按「新增条目」去重后数：图集改造后新增是按素材发的，复用位置不重复发。
+        foreach (var group in allChanges
+            .Where(change => SequenceFrameIdentity.IsFrameStableId(change.StableId) &&
+                change.Kind == UnrealBridgeChangeKind.Added &&
+                change.ToolboxItem is not null)
+            .GroupBy(change => ResolveSequenceGroupKey(change, actionNameToKey, actionCodeToKey)))
+        {
+            var sourceImages = group
+                .Select(change => change.ToolboxItem!.AssetPath)
+                .Where(path => !string.IsNullOrWhiteSpace(path))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count();
+            if (actionFacts.TryGetValue(group.Key, out var existing))
+            {
+                actionFacts[group.Key] = existing with { SourceImages = sourceImages };
+            }
+        }
         return allChanges
             // 除了帧，动作占用的历史资产（断了引用的旧 Sprite、旧 Flipbook）也要列成删除项，
             // 否则素材目录里多出来的文件永远不会被提示清理。
             .Where(change => (SequenceFrameIdentity.IsFrameStableId(change.StableId) ||
                     SequenceFrameIdentity.IsOwnedAssetStableId(change.StableId) ||
+                    // 图集贴图也是这一轮要新增的资产，漏掉它新增数会少一张。
+                    SequenceFrameIdentity.IsAtlasStableId(change.StableId) ||
                     // 非规范序列同样要能被勾选，否则它只体现在计数里、列表却是空的。
                     SequenceFrameIdentity.IsOrphanSequenceStableId(change.StableId)) &&
                 change.Kind != UnrealBridgeChangeKind.Unchanged &&
@@ -376,10 +412,13 @@ internal static class UnrealSyncSelectionTreeBuilder
                 var displayName = parentNames.TryGetValue(parentKey, out var parentName)
                     ? parentName
                     : ResolveSequenceGroupDisplayName(parentKey, representative);
+                var detail = actionFacts.TryGetValue(group.Key, out var facts) && facts.ToolboxSlots + facts.UnrealSlots > 0
+                    ? $"工具箱 {facts.SourceImages} 张素材 · {facts.ToolboxSlots} 个帧位　|　Unreal 现有 {facts.UnrealSlots} 个帧位"
+                    : string.Empty;
                 return new UnrealSyncSelectionTreeItem(
                     group.Key,
                     displayName,
-                    string.Empty,
+                    detail,
                     "待同步",
                     false,
                     false,

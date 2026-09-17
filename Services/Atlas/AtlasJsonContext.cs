@@ -24,6 +24,9 @@ namespace CrossingVoidZDTool.Services.Atlas;
 [JsonSerializable(typeof(AtlasManifestFrame))]
 [JsonSerializable(typeof(AtlasReport))]
 [JsonSerializable(typeof(AtlasReportSize))]
+[JsonSerializable(typeof(AtlasSequenceManifest))]
+[JsonSerializable(typeof(AtlasSequenceFrame))]
+[JsonSerializable(typeof(AtlasRect))]
 internal sealed partial class AtlasJsonContext : JsonSerializerContext
 {
     private static AtlasJsonContext? s_indented;

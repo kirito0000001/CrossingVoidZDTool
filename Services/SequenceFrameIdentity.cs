@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using CrossingVoidZDTool.Services.Atlas;
 
 namespace CrossingVoidZDTool.Services;
 
@@ -25,6 +27,25 @@ internal static class SequenceFrameIdentity
 
     /// <summary>挂在角色动画源上、却不属于任何规范动作的序列。</summary>
     public const string OrphanSequencePrefix = "sequence-orphan:";
+
+    /// <summary>
+    /// 图集贴图这个条目。它在检测阶段还不存在（打包发生在同步时），没有对应的帧节点，
+    /// 所以是单独合成的一条；单列一个前缀，是为了让中栏的子项过滤器认得它 ——
+    /// 借帧或占用资产的前缀会让它被当成别的东西。
+    /// </summary>
+    public const string AtlasPrefix = "sequence-atlas:";
+
+    public static bool IsAtlasStableId(string? stableId) =>
+        (stableId ?? string.Empty).StartsWith(AtlasPrefix, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>由动作稳定 ID 推出它那条图集条目的稳定 ID。</summary>
+    public static string BuildAtlasStableId(string? actionStableId)
+    {
+        var value = actionStableId ?? string.Empty;
+        return AtlasPrefix + (value.StartsWith(ActionPrefix, StringComparison.OrdinalIgnoreCase)
+            ? value[ActionPrefix.Length..]
+            : value);
+    }
 
     /// <summary>孤儿序列没有归属动作，全部挂在这一个分组下。</summary>
     public const string OrphanGroupStableId = "sequence:__orphan__";
@@ -162,14 +183,20 @@ internal static class SequenceFrameIdentity
     }
 
     /// <summary>
-    /// 该动作同步之后应当存在的全部资产包路径（序列、Flipbook、逐帧贴图与 Sprite）。
+    /// 该动作同步之后应当存在的全部资产包路径（序列、Flipbook、图集贴图，以及每个素材一个的 Sprite）。
     /// 必须按完整路径比较：旧 Flipbook 在 Material 目录下也可能叫 Sk1，
     /// 只比资产名会把它误认成 AnimSequences 里的规范序列而漏掉清理。
+    ///
+    /// 换成图集之后，逐帧贴图**不在**这份名单里了 —— 这正是关键：工程里那批
+    /// 按帧命名的旧贴图和旧精灵因此不再是「规范资产」，会被正常列进删除候选。
+    /// 名单留在旧口径的话，旧贴图会被当成「应该存在」而过滤掉，界面上就只剩帧位数可数，
+    /// 看着像「删除 23 项」，实际那 23 条跟工程里的文件对不上。
     /// </summary>
+    /// <param name="sourceImageCount">素材张数（去重后的原图数），不是序列帧位数。</param>
     public static IReadOnlyCollection<string> BuildCanonicalAssetPackagePaths(
         string characterCode,
         string? actionCode,
-        int totalFrameCount)
+        int sourceImageCount)
     {
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (string.IsNullOrWhiteSpace(characterCode) ||
@@ -180,14 +207,15 @@ internal static class SequenceFrameIdentity
 
         var root = $"/Game/GameActor2D/{characterCode}";
         var materialFolder = $"{root}/Material/{SequenceActionCatalog.GetMaterialFolderName(definition, formIndex)}";
+        var variantCode = SequenceActionCatalog.GetVariantCode(definition, formIndex);
         paths.Add(NormalizePackagePath($"{root}/AnimSequences/{SequenceActionCatalog.GetAnimSequenceName(definition, formIndex)}"));
         paths.Add(NormalizePackagePath($"{materialFolder}/{SequenceActionCatalog.GetFlipbookName(definition, formIndex)}"));
-        for (var ordinal = 0; ordinal < totalFrameCount; ordinal++)
+        paths.Add(NormalizePackagePath(
+            $"{materialFolder}/{AtlasManifestWriter.BuildAtlasName(characterCode, variantCode)}"));
+        for (var ordinal = 0; ordinal < sourceImageCount; ordinal++)
         {
             paths.Add(NormalizePackagePath(
-                $"{materialFolder}/{SequenceActionCatalog.GetFrameTextureName(definition, formIndex, ordinal, totalFrameCount)}"));
-            paths.Add(NormalizePackagePath(
-                $"{materialFolder}/{SequenceActionCatalog.GetFrameSpriteName(definition, formIndex, ordinal, totalFrameCount)}"));
+                $"{materialFolder}/{SequenceActionCatalog.GetFrameSpriteName(definition, formIndex, ordinal, sourceImageCount)}"));
         }
 
         return paths;
@@ -195,9 +223,19 @@ internal static class SequenceFrameIdentity
 
     /// <summary>
     /// 动作节点的比较载荷。两侧必须逐字节一致，否则每个动作都会被永久判成冲突，
-    /// 第五步也就永远报不出「已无差异」。这里只放真正可同步的动作级属性：规范代号和帧率。
+    /// 第五步也就永远报不出「已无差异」。
+    ///
+    /// 除了规范代号和帧率，还带上两样：
+    /// <list type="bullet">
+    /// <item><c>layout</c> —— 图集布局写 <c>atlas:&lt;图集名&gt;</c>，还是逐帧导入时写
+    /// 实际用到的贴图名集合。两者不同即判「需要重建」——这正是从逐帧切到图集之后
+    /// 最该被发现的一种变化，光比帧内容看不出来。</item>
+    /// <item><c>slots</c>/<c>blanks</c> —— 整条序列占多少格、其中几格是空白。
+    /// Flipbook 里每帧停留的格数是展开的，所以这一对数两侧都算得出来；
+    /// 帧被增删、或者某帧的停留格数被改，都会在这里露出来。</item>
+    /// </list>
     /// </summary>
-    public static string BuildActionPayload(string? actionCode, int fps)
+    public static string BuildActionPayload(string? actionCode, int fps, string layout, int slots, int blanks)
     {
         var canonicalCode = SequenceActionCatalog.TryResolve(actionCode, out var definition, out var formIndex)
             ? SequenceActionCatalog.GetVariantCode(definition, formIndex)
@@ -208,11 +246,85 @@ internal static class SequenceFrameIdentity
             writer.WriteStartObject();
             writer.WriteString("actionCode", canonicalCode);
             writer.WriteString("fps", Math.Clamp(fps, 1, 60).ToString(CultureInfo.InvariantCulture));
+            writer.WriteString("layout", layout ?? string.Empty);
+            writer.WriteString("slots", slots.ToString(CultureInfo.InvariantCulture));
+            writer.WriteString("blanks", blanks.ToString(CultureInfo.InvariantCulture));
             writer.WriteEndObject();
         }
 
         return Encoding.UTF8.GetString(stream.ToArray());
     }
+
+    /// <summary>
+    /// 不带布局与帧结构的最小载荷。**只给「两侧用同一段代码算同一个字符串」这类断言用** ——
+    /// 生产路径一律走上面那个五参版本，否则布局变化会被漏掉。
+    /// </summary>
+    public static string BuildActionPayload(string? actionCode, int fps) =>
+        BuildActionPayload(actionCode, fps, layout: string.Empty, slots: -1, blanks: -1);
+
+    /// <summary>
+    /// 图集布局的载荷文字。两侧各算一次，算出来一样才算布局对齐。
+    /// </summary>
+    public static string BuildAtlasLayout(string atlasName) => "atlas:" + atlasName;
+
+    /// <summary>
+    /// 读回动作载荷里的布局与帧结构。
+    ///
+    /// 中栏的「Unreal 现有 N 个帧位」必须从这里取，不能去数差异条目 ——
+    /// 从缓存恢复时，两侧已经一致的帧（Unchanged）按设计会被剔掉，
+    /// 列表里只剩待办项，数出来永远是 0。动作节点自己不会被剔，载荷里带着两侧的帧位数。
+    /// </summary>
+    public static bool TryReadActionPayload(
+        string? payloadJson,
+        out string layout,
+        out int slots,
+        out int blanks)
+    {
+        layout = string.Empty;
+        slots = -1;
+        blanks = -1;
+        if (string.IsNullOrWhiteSpace(payloadJson) || !payloadJson.TrimStart().StartsWith('{'))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(payloadJson);
+            var root = document.RootElement;
+            if (root.TryGetProperty("layout", out var layoutValue) && layoutValue.ValueKind == JsonValueKind.String)
+            {
+                layout = layoutValue.GetString() ?? string.Empty;
+            }
+
+            if (root.TryGetProperty("slots", out var slotsValue) &&
+                int.TryParse(slotsValue.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedSlots))
+            {
+                slots = parsedSlots;
+            }
+
+            if (root.TryGetProperty("blanks", out var blanksValue) &&
+                int.TryParse(blanksValue.GetString(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedBlanks))
+            {
+                blanks = parsedBlanks;
+            }
+
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>还没换成图集时的布局文字：实际用到的贴图名，按名字排序后拼起来。</summary>
+    public static string BuildFrameLayout(IEnumerable<string> textureNames) =>
+        "frames:" + string.Join(
+            ",",
+            textureNames
+                .Where(name => !string.IsNullOrWhiteSpace(name))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name, StringComparer.OrdinalIgnoreCase));
 
     /// <summary>
     /// 该帧同步到 Unreal 之后应有的贴图对象路径。差异比较用它判断某一帧是否已经落在规范命名上：

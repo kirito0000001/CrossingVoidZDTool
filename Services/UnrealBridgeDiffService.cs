@@ -32,6 +32,13 @@ internal sealed class UnrealBridgeDiffService
         var canonicalSequenceTexturePaths = direction == UnrealBridgeDirection.PublishToUnreal
             ? BuildCanonicalSequenceTexturePaths(toolboxItems, toolbox.CharacterCode)
             : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // 已经换成图集布局的动作。只有这些动作的帧才谈得上「按精灵名核对」——
+        // 它们每一帧指向的贴图都是同一张图集，精灵名才是唯一的帧身份。
+        // 还停在逐帧旧布局的动作，精灵名是历史导入留下的（按帧序号命名），
+        // 拿它去比工具箱按素材序号算出来的名字只会把没问题的帧判成要重做。
+        var atlasLayoutActions = direction == UnrealBridgeDirection.PublishToUnreal
+            ? CollectAtlasLayoutActions(unrealItems)
+            : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         // 每个动作同步之后应有的资产名；Unreal 侧多出来的资产就是要清理的历史素材。
         var canonicalSequenceAssetPaths = BuildCanonicalSequenceAssetPaths(toolboxItems, toolbox.CharacterCode);
         var changes = toolboxItems.Keys
@@ -45,18 +52,112 @@ internal sealed class UnrealBridgeDiffService
                 direction == UnrealBridgeDirection.PublishToUnreal &&
                     toolboxItems.TryGetValue(stableId, out var matchedToolboxItem) &&
                     unrealItems.TryGetValue(stableId, out var matchedUnrealItem) &&
-                    IsMigrationSafePair(matchedToolboxItem, matchedUnrealItem, toolbox.CharacterCode, canonicalSequenceTexturePaths),
+                    IsMigrationSafePair(matchedToolboxItem, matchedUnrealItem, toolbox.CharacterCode, canonicalSequenceTexturePaths, atlasLayoutActions),
                 direction == UnrealBridgeDirection.PublishToUnreal &&
                     toolboxItems.TryGetValue(stableId, out var renameToolboxItem) &&
                     unrealItems.TryGetValue(stableId, out var renameUnrealItem) &&
-                    NeedsCanonicalSequenceRename(renameToolboxItem, renameUnrealItem, canonicalSequenceTexturePaths)))
+                    NeedsCanonicalSequenceRename(renameToolboxItem, renameUnrealItem, canonicalSequenceTexturePaths, atlasLayoutActions)))
             .SelectMany(ExpandSequenceChange)
             .Where(change => !IsCanonicalOwnedSequenceAsset(change, canonicalSequenceAssetPaths))
             .Where(change => !IsAdditiveOnlyDeleteCandidate(change))
             .OrderBy(change => change.Module)
             .ThenBy(change => change.StableId, StringComparer.OrdinalIgnoreCase)
             .ToArray();
-        return changes;
+        return ExpandSequenceLayoutRebuilds(changes);
+    }
+
+    /// <summary>
+    /// 布局换代时，把动作级的「需要重建」摊成它下面每一帧的删除 + 新增。
+    ///
+    /// 非摊开不可：中栏是按帧数的增删来数「删除 N 项 / 新增 N 项」的，
+    /// 只留一个动作级的 Updated 节点的话，列表里什么都看不见 ——
+    /// 明明几十张旧贴图还挂在动作目录里，界面却落在「没有差异」的空态上。
+    ///
+    /// 帧自己的稳定 ID 不能重复出现，所以删除和新增各挂 <c>:delete</c>/<c>:add</c> 后缀 ——
+    /// 与 <see cref="ExpandSequenceChange"/> 处理内容变化时用的是同一套约定。
+    /// </summary>
+    private static IReadOnlyList<UnrealBridgeChange> ExpandSequenceLayoutRebuilds(
+        IReadOnlyList<UnrealBridgeChange> changes)
+    {
+        var rebuildActions = changes
+            .Where(change => change.Module == UnrealBridgeModule.SequenceFrames &&
+                SequenceFrameIdentity.IsActionStableId(change.StableId) &&
+                change.Kind is UnrealBridgeChangeKind.Updated or UnrealBridgeChangeKind.Renamed)
+            .Select(change => change.StableId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (rebuildActions.Count == 0)
+        {
+            return changes;
+        }
+
+        var result = new List<UnrealBridgeChange>(changes.Count);
+        // 新增按**素材**去重，不按帧位：一条序列可以有 23 个帧位而素材只有 17 张，
+        // 差的那些是复用位置。复用不需要新建精灵——它们共用同一个。
+        // 不去重的话，界面上会写「新增 23 项」，而实际只进 17 张图，对不上。
+        var addedSourceByAction = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        // 图集贴图每个动作只算一次。它是这一轮真正要导进去的那张图，
+        // 但它在检测阶段还不存在（打包发生在同步时），所以没有对应的帧节点，得单独补一条。
+        var addedAtlasByAction = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var change in changes)
+        {
+            result.Add(change);
+            if (change.Module != UnrealBridgeModule.SequenceFrames ||
+                !SequenceFrameIdentity.IsFrameStableId(change.StableId) ||
+                !rebuildActions.Contains(change.ParentStableId))
+            {
+                continue;
+            }
+
+            // 内容也变了的那一帧，前面已经摊成「旧/新」两行了（`:delete` + `:add`）。
+            // 这里再摊一次会得到 `:add:add` —— 同一张图被数两遍，界面上的新增数虚高。
+            if (change.StableId.EndsWith(":add", StringComparison.OrdinalIgnoreCase) ||
+                change.StableId.EndsWith(":delete", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var groupKey = string.IsNullOrWhiteSpace(change.SequenceGroupKey)
+                ? change.ParentStableId
+                : change.SequenceGroupKey;
+            // 删除**不在这里摊**。动作占用的资产（旧贴图、旧精灵、旧 Flipbook）本来就有
+            // 自己的条目，那些条目对应的就是磁盘上的文件；再按帧位摊一遍等于把同一批文件
+            // 数两次——Sk2 目录里实际 47 个文件，界面上却写「删除 52 项」，就是这么来的。
+            if (change.ToolboxItem is null)
+            {
+                continue;
+            }
+
+            var sourceKey = change.ParentStableId + "|" +
+                (change.ToolboxItem.AssetPath ?? change.ToolboxItem.ToolboxRelativePath ?? change.StableId);
+            if (!addedSourceByAction.Add(sourceKey))
+            {
+                continue;
+            }
+
+            result.Add(change with
+            {
+                StableId = $"{change.StableId}:add",
+                Kind = UnrealBridgeChangeKind.Added,
+                UnrealItem = null,
+                IsSelected = false,
+                SequenceGroupKey = groupKey,
+            });
+
+            if (addedAtlasByAction.Add(change.ParentStableId))
+            {
+                result.Add(change with
+                {
+                    StableId = SequenceFrameIdentity.BuildAtlasStableId(change.ParentStableId),
+                    DisplayName = "图集贴图",
+                    Kind = UnrealBridgeChangeKind.Added,
+                    UnrealItem = null,
+                    IsSelected = false,
+                    SequenceGroupKey = groupKey,
+                });
+            }
+        }
+
+        return result;
     }
 
     /// <summary>
@@ -189,8 +290,20 @@ internal sealed class UnrealBridgeDiffService
         {
             var frames = group.ToArray();
             var actionCode = ExtractActionCode(frames[0].PayloadJson);
+            // 精灵是按**素材**建的，不是按帧位 —— 复用位置共用同一个精灵。
+            // 用帧位数会算多：Sk2 有 23 个帧位而素材只有 17 张。
+            var sourceImageCount = frames
+                .Where(frame => !string.IsNullOrWhiteSpace(frame.AssetPath))
+                .Select(frame => frame.AssetPath)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .Count();
+            if (sourceImageCount == 0)
+            {
+                sourceImageCount = frames.Length;
+            }
+
             result[group.Key] = SequenceFrameIdentity.BuildCanonicalAssetPackagePaths(
-                characterCode, actionCode, frames.Length);
+                characterCode, actionCode, sourceImageCount);
         }
 
         return result;
@@ -228,7 +341,8 @@ internal sealed class UnrealBridgeDiffService
     private static bool IsCanonicalSequenceFramePair(
         UnrealBridgeSnapshotItem toolboxItem,
         UnrealBridgeSnapshotItem unrealItem,
-        IReadOnlyDictionary<string, string> canonicalTexturePaths)
+        IReadOnlyDictionary<string, string> canonicalTexturePaths,
+        IReadOnlySet<string> atlasLayoutActions)
     {
         if (toolboxItem.Module != UnrealBridgeModule.SequenceFrames ||
             unrealItem.Module != UnrealBridgeModule.SequenceFrames ||
@@ -243,6 +357,22 @@ internal sealed class UnrealBridgeDiffService
             return true;
         }
 
+        // 图集时代：整条动作的每一帧都指向同一张图集，贴图路径**分不出帧**。
+        // 能分清的是 Flipbook 关键帧挂的精灵 —— 工具箱侧按「素材目录里第几张图」
+        // 算得出应有的精灵名，Unreal 侧从关键帧上读得到实际精灵名，两边对上才算同步。
+        //
+        // 少了这一条，已同步的动作每次检测都会被判成「改名」，然后摊成
+        // 「删除 23 项 + 新增 23 项」——素材明明是对的，列表却永远清不干净。
+        if (!string.IsNullOrWhiteSpace(toolboxItem.SpriteAssetName) &&
+            !string.IsNullOrWhiteSpace(unrealItem.SpriteAssetName) &&
+            atlasLayoutActions.Contains(unrealItem.ParentStableId))
+        {
+            return string.Equals(
+                toolboxItem.SpriteAssetName,
+                unrealItem.SpriteAssetName,
+                StringComparison.OrdinalIgnoreCase);
+        }
+
         return canonicalTexturePaths.TryGetValue(toolboxItem.StableId, out var canonicalPath) &&
             SameObjectPath(unrealItem.SourceObjectPath, canonicalPath);
     }
@@ -251,7 +381,8 @@ internal sealed class UnrealBridgeDiffService
     private static bool NeedsCanonicalSequenceRename(
         UnrealBridgeSnapshotItem toolboxItem,
         UnrealBridgeSnapshotItem unrealItem,
-        IReadOnlyDictionary<string, string> canonicalTexturePaths)
+        IReadOnlyDictionary<string, string> canonicalTexturePaths,
+        IReadOnlySet<string> atlasLayoutActions)
     {
         if (toolboxItem.Module != UnrealBridgeModule.SequenceFrames ||
             unrealItem.Module != UnrealBridgeModule.SequenceFrames ||
@@ -260,7 +391,33 @@ internal sealed class UnrealBridgeDiffService
             return false;
         }
 
-        return !IsCanonicalSequenceFramePair(toolboxItem, unrealItem, canonicalTexturePaths);
+        return !IsCanonicalSequenceFramePair(toolboxItem, unrealItem, canonicalTexturePaths, atlasLayoutActions);
+    }
+
+    /// <summary>
+    /// Unreal 侧已经按图集布局的动作。判据是动作节点载荷里的 <c>layout</c> 前缀，
+    /// 和图集布局的生成规则（<see cref="SequenceFrameIdentity.BuildAtlasLayout"/>）同源。
+    /// </summary>
+    private static HashSet<string> CollectAtlasLayoutActions(
+        IReadOnlyDictionary<string, UnrealBridgeSnapshotItem> unrealItems)
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in unrealItems.Values)
+        {
+            if (item.Module != UnrealBridgeModule.SequenceFrames ||
+                !SequenceFrameIdentity.IsActionStableId(item.StableId))
+            {
+                continue;
+            }
+
+            if (SequenceFrameIdentity.TryReadActionPayload(item.PayloadJson, out var layout, out _, out _) &&
+                layout.StartsWith("atlas:", StringComparison.OrdinalIgnoreCase))
+            {
+                result.Add(item.StableId);
+            }
+        }
+
+        return result;
     }
     private static IEnumerable<UnrealBridgeChange> ExpandSequenceChange(UnrealBridgeChange change)
     {
@@ -451,11 +608,12 @@ internal sealed class UnrealBridgeDiffService
         UnrealBridgeSnapshotItem toolboxItem,
         UnrealBridgeSnapshotItem unrealItem,
         string characterCode,
-        IReadOnlyDictionary<string, string> canonicalSequenceTexturePaths)
+        IReadOnlyDictionary<string, string> canonicalSequenceTexturePaths,
+        IReadOnlySet<string> atlasLayoutActions)
     {
         if (toolboxItem.Module == UnrealBridgeModule.SequenceFrames)
         {
-            return IsCanonicalSequenceFramePair(toolboxItem, unrealItem, canonicalSequenceTexturePaths);
+            return IsCanonicalSequenceFramePair(toolboxItem, unrealItem, canonicalSequenceTexturePaths, atlasLayoutActions);
         }
 
         if (toolboxItem.Module is not (UnrealBridgeModule.BaseMaterials or UnrealBridgeModule.Voices) ||
@@ -547,6 +705,22 @@ internal sealed class UnrealBridgeDiffService
         else if (sourceItem is null)
         {
             kind = UnrealBridgeChangeKind.DeleteCandidate;
+        }
+        // 序列动作以工具箱为准，直接比两侧当前载荷，不走三方比较。
+        //
+        // 三方比较的假设是「两边都可能被人独立编辑」，所以两边都动过才算冲突 ——
+        // 这对素材成立，对序列不成立：动画由工具箱定义，Unreal 侧的布局和帧结构
+        // 是从工具箱推出去的，没有独立的编辑来源。
+        // 更要紧的是载荷格式一换代，旧基线两侧都对不上，三方比较会把全部动作判成冲突，
+        // 于是「从逐帧换成图集」这种最该被看见的变化，反而显示成一堆冲突。
+        else if (referenceItem.Module == UnrealBridgeModule.SequenceFrames &&
+            SequenceFrameIdentity.IsActionStableId(stableId))
+        {
+            kind = string.Equals(sourceItem.ContentHash, targetItem!.ContentHash, StringComparison.OrdinalIgnoreCase)
+                ? isRename || sequenceNeedsCanonicalRename
+                    ? UnrealBridgeChangeKind.Renamed
+                    : UnrealBridgeChangeKind.Unchanged
+                : UnrealBridgeChangeKind.Updated;
         }
         else if (stateEntry is not null)
         {

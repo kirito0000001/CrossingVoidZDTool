@@ -1492,6 +1492,28 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
             if (step is 3 or 5 && cache.IsPublishDetection)
             {
+                // 这一步的树已经在内存里了，就别再拿缓存盖回去。
+                //
+                // 「重新加载序列同步」的流程是：检测 → 建树 → SetLoadedPublishStep(5)
+                // → ReturnToWorkflowStep(5)。最后这一步如果老老实实读缓存，
+                // 刚检测出来的结果马上会被上一次写下的那份覆盖掉 —— 用户按了刷新，
+                // 屏幕上却还是刷新前的内容，日志里却能同时看到两份不同的数字。
+                //
+                // 判定用 _loadedPublishStep：它记的就是「内存里这棵树属于哪一步」。
+                // 第三步和第五步共用同一棵树的槽位、范围不同，只有它能把两者分开。
+                // 换角色时 SelectSource 会 ResetImportOperation 把它清零，冷启动是 0，
+                // 这两种情况照常从缓存恢复。
+                if (_hasImportDetection &&
+                    _loadedPublishStep == step &&
+                    SelectionTreeRoots.Count > 0 &&
+                    string.Equals(
+                        SelectedSource?.DraftCharacter?.Code ?? SelectedSource?.UnrealCandidate?.Code,
+                        cache.SelectedCharacterCode,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
                 SetLoadedPublishStep(step);
                 var changes = FilterCachedPublishChanges(cache, SelectedSource?.DraftCharacter).ToArray();
                 var roots = step == 5
@@ -2318,6 +2340,26 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 }
                 else
                 {
+                    // 这一步的差异树**已经用刚检测出来的数据建好了**，就别再拿缓存盖回去。
+                    //
+                    // 缓存里存的是一份「待办清单」——两侧已经一致的项（Unchanged）按设计
+                    // 被剔掉了。盖回去之后，界面上会重新冒出一批早就同步完的动作，
+                    // 看着就像「刷新了却什么都没变」。用户点重新加载、看到列表照旧，
+                    // 就是这么来的。
+                    //
+                    // 只在这一步已经加载过、且还是同一个角色时才跳过；冷启动时
+                    // _loadedPublishStep 是 0，照常从缓存恢复。
+                    if (_loadedPublishStep == cache.WorkflowStep &&
+                        _loadedPublishStep is 3 or 5 &&
+                        SelectionTreeRoots.Count > 0 &&
+                        string.Equals(
+                            SelectedSource?.DraftCharacter?.Code,
+                            cache.SelectedCharacterCode,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        return loadResult;
+                    }
+
                     var cachedComparison = FilterPublishChanges(cache.PublishChanges).ToArray();
                     var cachedChanges = FilterCachedPublishChanges(cache, source.DraftCharacter).ToArray();
                     var roots = cache.WorkflowStep == 5
@@ -2396,9 +2438,21 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         UnrealSyncSessionCache cache,
         CharacterCard? character)
     {
+        var sequenceView = WorkflowStep == 5 ||
+            SelectedPublishStage?.Stage == UnrealBridgePublishStage.ZdAnimationTracks;
+        // 序列这一侧**不能**剔掉 Unchanged。第五步的树是按帧配对数出来的：
+        // 动作节点（sequence:<动作>）本身往往就是 Unchanged，剔掉之后
+        // 「Unreal 现有多少个帧位」无从得知，帧与帧的配对也全断了，
+        // 于是已经同步好的动作会重新显示成「删除 23 项 + 新增 23 项」。
+        // 第三步（素材）没有这个问题，那边只要待办清单。
         var changes = FilterPublishChanges(cache.PublishChanges)
-            .Where(change => change.Kind != UnrealBridgeChangeKind.Unchanged)
+            .Where(change => sequenceView || change.Kind != UnrealBridgeChangeKind.Unchanged)
             .ToArray();
+        if (sequenceView)
+        {
+            return changes;
+        }
+
         if (character is null)
         {
             return changes;

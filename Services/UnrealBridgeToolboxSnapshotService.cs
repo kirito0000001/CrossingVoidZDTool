@@ -6,6 +6,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using CrossingVoidZDTool.Services.Atlas;
 
 namespace CrossingVoidZDTool.Services;
 
@@ -162,6 +163,24 @@ internal sealed class UnrealBridgeToolboxSnapshotService
         }
     }
 
+    /// <summary>
+    /// 工具箱期望 Unreal 侧呈现的资产布局：一张图集，名字由角色代号和动作变体决定。
+    ///
+    /// Unreal 侧会用同一套规则算出同一串文字 —— 算得出来才叫「布局已对齐」。
+    /// 对不上的时候（例如那边还是逐帧导入留下的几十张贴图），这个动作会被判成需要重建。
+    /// </summary>
+    private static string ResolveExpectedAtlasLayout(CharacterCard character, string actionCode)
+    {
+        if (!SequenceActionCatalog.TryResolve(actionCode, out var definition, out var formIndex))
+        {
+            return string.Empty;
+        }
+
+        var variantCode = SequenceActionCatalog.GetVariantCode(definition, formIndex);
+        return SequenceFrameIdentity.BuildAtlasLayout(
+            AtlasManifestWriter.BuildAtlasName(character.Code, variantCode));
+    }
+
     private static void AddSequenceFrames(
         List<UnrealBridgeSnapshotItem> items,
         CharacterCard character,
@@ -174,15 +193,28 @@ internal sealed class UnrealBridgeToolboxSnapshotService
             // 否则两侧永远配不上对，第五步只能看到“全部新增 + 全部待删除”。
             var actionId = SequenceFrameIdentity.BuildActionStableId(section.Action.Code);
             var fps = service.GetActionFps(character, section.Action);
+            var orderedForPayload = section.Frames.OrderBy(frame => frame.Index).ToArray();
+            var expectedSpriteNames = ResolveExpectedSpriteNames(character, section, orderedForPayload);
             items.Add(CreateItem(
                 actionId,
                 $"module:{UnrealBridgeModule.SequenceFrames}",
                 UnrealBridgeModule.SequenceFrames,
                 section.Action.DisplayName,
-                SequenceFrameIdentity.BuildActionPayload(section.Action.Code, fps),
+                SequenceFrameIdentity.BuildActionPayload(
+                    section.Action.Code,
+                    fps,
+                    ResolveExpectedAtlasLayout(character, section.Action.Code),
+                    // 帧条数，不是「各帧停留格数之和」。
+                    //
+                    // 导出侧是**一个关键帧一项**（frame_run 只表示它停留多久，
+                    // 播放总长另记在 playback_frame_count 里）。我一开始在这边写成了
+                    // 停留格数求和，Sk2 于是成了 26 而 Unreal 侧是 23 —— 每个动作都被
+                    // 判成需要重建，列表永远清不掉。两侧必须数同一件事。
+                    orderedForPayload.Length,
+                    orderedForPayload.Count(frame => frame.IsBlank)),
                 string.Empty));
 
-            var orderedFrames = section.Frames.OrderBy(frame => frame.Index).ToArray();
+            var orderedFrames = orderedForPayload;
             for (var ordinal = 0; ordinal < orderedFrames.Length; ordinal++)
             {
                 var frame = orderedFrames[ordinal];
@@ -200,9 +232,64 @@ internal sealed class UnrealBridgeToolboxSnapshotService
                     payload,
                     frame.IsBlank ? string.Empty : frame.FilePath,
                     ToToolboxRelativePath(character, frame.IsBlank ? string.Empty : frame.FilePath),
-                    $"{section.Action.Code}-{frame.Index}"));
+                    $"{section.Action.Code}-{frame.Index}",
+                    expectedSpriteNames[ordinal]));
             }
         }
+    }
+
+    /// <summary>
+    /// 每一帧同步之后应当落在哪个精灵上。
+    ///
+    /// 帧与精灵不是一一对应：23 个帧位可能只用 17 张素材，复用位置共用同一个精灵。
+    /// 对应关系由**素材目录里第几张图**决定（按文件名升序，和打图集、生成同步计划时
+    /// 用的是同一份列表、同一个序号），不是帧自己的序号。所以这里必须枚举目录，
+    /// 而不能拿帧下标当精灵号 —— 拿错了会把「复用了第 3 张图」误判成「改用了第 20 张」。
+    ///
+    /// 图集改造之后贴图路径已经分不出帧（同一个动作的每一帧都指向同一张图集），
+    /// 中栏的「已同步」判定只能靠这个精灵名。
+    /// </summary>
+    private static string[] ResolveExpectedSpriteNames(
+        CharacterCard character,
+        SequenceFrameSection section,
+        IReadOnlyList<SequenceFrameItem> orderedFrames)
+    {
+        var names = new string[orderedFrames.Count];
+        if (orderedFrames.Count == 0 ||
+            !SequenceActionCatalog.TryResolve(section.Action.Code, out var definition, out var formIndex))
+        {
+            return names;
+        }
+
+        var framesFolder = SequenceActionFolderLayout.GetFramesFolderPath(character, section.Action);
+        var sourceImages = AtlasManifestWriter.EnumerateSourceImages(framesFolder);
+        if (sourceImages.Count == 0)
+        {
+            return names;
+        }
+
+        var ordinalByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (var ordinal = 0; ordinal < sourceImages.Count; ordinal++)
+        {
+            ordinalByPath[Path.GetFullPath(sourceImages[ordinal])] = ordinal;
+        }
+
+        for (var index = 0; index < orderedFrames.Count; index++)
+        {
+            var frame = orderedFrames[index];
+            if (frame.IsBlank || string.IsNullOrWhiteSpace(frame.FilePath))
+            {
+                continue;
+            }
+
+            if (ordinalByPath.TryGetValue(Path.GetFullPath(frame.FilePath), out var sourceOrdinal))
+            {
+                names[index] = SequenceActionCatalog.GetFrameSpriteName(
+                    definition, formIndex, sourceOrdinal, sourceImages.Count);
+            }
+        }
+
+        return names;
     }
 
     private static void AddBuffs(List<UnrealBridgeSnapshotItem> items, CharacterCard character)
@@ -302,7 +389,8 @@ internal sealed class UnrealBridgeToolboxSnapshotService
         string payload,
         string assetPath,
         string toolboxRelativePath = "",
-        string normalizedName = "")
+        string normalizedName = "",
+        string spriteAssetName = "")
     {
         if ((module is UnrealBridgeModule.BaseMaterials or UnrealBridgeModule.Voices) &&
             !string.IsNullOrWhiteSpace(assetPath) && File.Exists(assetPath))
@@ -316,7 +404,8 @@ internal sealed class UnrealBridgeToolboxSnapshotService
                 payload,
                 assetPath,
                 ToolboxRelativePath: toolboxRelativePath,
-                NormalizedName: normalizedName);
+                NormalizedName: normalizedName,
+                SpriteAssetName: spriteAssetName);
         }
 
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -341,7 +430,8 @@ internal sealed class UnrealBridgeToolboxSnapshotService
             payload,
             assetPath,
             ToolboxRelativePath: toolboxRelativePath,
-            NormalizedName: normalizedName);
+            NormalizedName: normalizedName,
+            SpriteAssetName: spriteAssetName);
     }
 
     private static string ComputeFileContentHash(string path)

@@ -69,7 +69,8 @@ internal sealed class AtlasPackService
         string outputDirectory,
         string? configuredPythonPath = null,
         IProgress<AtlasPackProgress>? progress = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        int? maxSize = null)
     {
         ArgumentNullException.ThrowIfNull(definition);
         ArgumentException.ThrowIfNullOrWhiteSpace(framesFolder);
@@ -112,13 +113,7 @@ internal sealed class AtlasPackService
             FileName = python.FilePath,
             // 参数按「原样传递、不做 shell 解析」给：ProcessStartInfo 的 Arguments
             // 是拼成一条命令行的，所以路径里的空格和引号必须自己处理干净。
-            Arguments = string.Join(' ', [
-                Quote(scriptPath),
-                "--manifest", Quote(manifestPath),
-                "--report", Quote(reportPath),
-                "-o", Quote(outputFullPath),
-                "--name", manifest.Atlas,
-            ]),
+            Arguments = BuildArguments(scriptPath, manifestPath, reportPath, outputFullPath, manifest.Atlas, maxSize),
             UseShellExecute = false,
             CreateNoWindow = true,
             WorkingDirectory = outputFullPath,
@@ -187,6 +182,38 @@ internal sealed class AtlasPackService
     /// ——图集工具出错时的线索全在 stdout 里，不带出去就等于让人盲查。
     /// </summary>
     /// <exception cref="InvalidOperationException">report 不新鲜、读不出来、或 ok 为假。</exception>
+    /// <summary>
+    /// 拼命令行参数。路径一律带引号 —— 参数是拼成一条命令行交给系统的，
+    /// 中文路径和空格都很常见，不引就会被拆开。
+    /// </summary>
+    private static string BuildArguments(
+        string scriptPath,
+        string manifestPath,
+        string reportPath,
+        string outputDirectory,
+        string atlasName,
+        int? maxSize)
+    {
+        var arguments = new List<string>
+        {
+            Quote(scriptPath),
+            "--manifest", Quote(manifestPath),
+            "--report", Quote(reportPath),
+            "-o", Quote(outputDirectory),
+            "--name", atlasName,
+        };
+
+        if (maxSize is { } size)
+        {
+            // 上限只约束搜索范围，**不决定结果** —— 打包器仍会挑「装得下且最省面积」的那个尺寸。
+            // 不传就退到工具默认的 2048，帧一多就直接装不下。
+            arguments.Add("--max-size");
+            arguments.Add(size.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        }
+
+        return string.Join(' ', arguments);
+    }
+
     public static AtlasReport ReadReport(string reportPath, DateTime startedAtUtc, string atlasName)
     {
         if (!File.Exists(reportPath))

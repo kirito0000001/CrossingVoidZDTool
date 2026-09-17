@@ -111,3 +111,72 @@ internal sealed class AtlasManifestFrame
     /// <summary>序号，从 1 起（清单接口的约定），等于「原始数组下标 + 1」。</summary>
     public int Index { get; set; }
 }
+
+/// <summary>
+/// 图集工具写出来的 <c>&lt;图集名&gt;_sequence.json</c>。
+///
+/// 它回答的问题只有一个：**每张素材落在图集的哪个矩形里**。
+/// 帧序不归它管（那是序列清单的事），素材目录里有几张 PNG 它就有几条。
+///
+/// 同步序列要的就是这个矩形 —— 有了它才能在一张贴图上切出 N 个 Sprite，
+/// 而不是把 N 张 PNG 各导入成一个贴图。
+/// </summary>
+internal sealed class AtlasSequenceManifest
+{
+    public string Atlas { get; set; } = string.Empty;
+
+    public string? Image { get; set; }
+
+    public string? Sprites { get; set; }
+
+    /// <summary>图集贴图的尺寸。</summary>
+    public AtlasReportSize? Texture { get; set; }
+
+    public int FrameCount { get; set; }
+
+    public string? Order { get; set; }
+
+    public System.Collections.Generic.List<AtlasSequenceFrame> Frames { get; set; } = [];
+}
+
+/// <summary>
+/// 图集里的一格。字段名对齐图集工具的产物（camelCase），详见 <c>Tools/Atlas/MANIFEST.md</c>。
+/// </summary>
+internal sealed class AtlasSequenceFrame
+{
+    /// <summary>序号，从 1 起；等于写入清单时的下标 + 1。**这是与清单对齐的唯一可靠键。**</summary>
+    public int Index { get; set; }
+
+    /// <summary>精灵名。</summary>
+    public string Name { get; set; } = string.Empty;
+
+    /// <summary>这一格在图集贴图里的矩形。</summary>
+    public AtlasRect? Frame { get; set; }
+
+    /// <summary>是否在图集里被转了 90°。</summary>
+    public bool Rotated { get; set; }
+
+    /// <summary>是否被裁掉了透明边。</summary>
+    public bool Trimmed { get; set; }
+
+    /// <summary>裁剪后那块内容在**原图**里的位置与尺寸。</summary>
+    public AtlasRect? SpriteSourceSize { get; set; }
+
+    /// <summary>裁剪前的原图尺寸。</summary>
+    public AtlasReportSize? SourceSize { get; set; }
+}
+
+/// <summary>
+/// 一个像素矩形。图集工具给的是 <c>{x, y, w, h}</c>，和 <see cref="AtlasReportSize"/>
+/// 的 <c>{w, h}</c> 不是一个形状，所以单列一个类型，免得读串。
+/// </summary>
+internal sealed class AtlasRect
+{
+    public int X { get; set; }
+
+    public int Y { get; set; }
+
+    public int W { get; set; }
+
+    public int H { get; set; }
+}

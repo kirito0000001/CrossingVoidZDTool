@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
+using CrossingVoidZDTool.Services.Atlas;
 
 namespace CrossingVoidZDTool.Services;
 
@@ -84,13 +85,25 @@ internal sealed class UnrealBridgeSemanticSnapshotService
             // 之前这里把 Unreal 对象路径算进身份，发布改名后身份就变了，两侧再也配不上对。
             var variantCode = SequenceFrameIdentity.ResolveVariantCode(action.ActionCode, action.FormIndex);
             var actionId = SequenceFrameIdentity.BuildActionStableId(variantCode);
+            var frames = action.OrderedFrames.Count > 0 ? action.OrderedFrames : action.PreviewFrames;
+            // 布局对不上时（例如还是逐帧导入留下的几十张贴图），这串文字会和工具箱算的不一样，
+            // 这个动作因此被判成需要重建 —— 光比帧内容看不出布局换没换。
+            var expectedAtlas = AtlasManifestWriter.BuildAtlasName(candidate.Code, variantCode);
+            var textureNames = frames.Where(frame => !frame.IsBlank).Select(frame => frame.AssetName).ToArray();
+            var layout = textureNames.Length > 0 &&
+                textureNames.Distinct(StringComparer.OrdinalIgnoreCase).Count() == 1 &&
+                string.Equals(textureNames[0], expectedAtlas, StringComparison.OrdinalIgnoreCase)
+                    ? SequenceFrameIdentity.BuildAtlasLayout(expectedAtlas)
+                    : SequenceFrameIdentity.BuildFrameLayout(textureNames);
             Add(items, actionId, $"module:{UnrealBridgeModule.SequenceFrames}", UnrealBridgeModule.SequenceFrames,
                 action.Title, candidate.SequenceFramesPreview.AnimMapsObjectPath,
                 // 与工具箱动作节点共用同一份载荷，帧率取整后比较（工具箱只能产出整数帧率）。
                 SequenceFrameIdentity.BuildActionPayload(
                     variantCode,
-                    (int)Math.Round(action.FramesPerSecond <= 0 ? SequenceFrameService.DefaultFps : action.FramesPerSecond)));
-            var frames = action.OrderedFrames.Count > 0 ? action.OrderedFrames : action.PreviewFrames;
+                    (int)Math.Round(action.FramesPerSecond <= 0 ? SequenceFrameService.DefaultFps : action.FramesPerSecond),
+                    layout,
+                    frames.Count,
+                    frames.Count(frame => frame.IsBlank)));
             for (var index = 0; index < frames.Count; index++)
             {
                 var frame = frames[index];
@@ -98,7 +111,10 @@ internal sealed class UnrealBridgeSemanticSnapshotService
                     UnrealBridgeModule.SequenceFrames,
                     $"{action.Title} 第 {index + 1} 帧", frame.ObjectPath,
                     Join(action.ActionCode, action.FormIndex, index + 1, frame.IsBlank),
-                    frame.ExportedFilePath, frame.AssetName);
+                    frame.ExportedFilePath, frame.AssetName,
+                    // 图集时代的关键身份：这一帧挂的是哪个精灵。
+                    // 贴图（ObjectPath）对整条动作是同一张图集，分不出帧，只有精灵分得出。
+                    frame.SpriteName);
             }
 
             // 该动作在 Unreal 里实际占用的资产。规范命名的那些会被差异比较过滤掉，
@@ -176,7 +192,8 @@ internal sealed class UnrealBridgeSemanticSnapshotService
         string objectPath,
         string payload,
         string assetPath = "",
-        string normalizedName = "")
+        string normalizedName = "",
+        string spriteAssetName = "")
     {
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
         hash.AppendData(Encoding.UTF8.GetBytes(payload));
@@ -196,7 +213,8 @@ internal sealed class UnrealBridgeSemanticSnapshotService
             objectPath,
             string.IsNullOrWhiteSpace(objectPath) ? string.Empty : $"object:{objectPath.ToLowerInvariant()}",
             string.Empty,
-            normalizedName));
+            normalizedName,
+            spriteAssetName));
     }
 
     private static string Join(params object?[] values) =>

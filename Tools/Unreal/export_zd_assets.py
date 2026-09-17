@@ -596,6 +596,21 @@ def _object_path_text(value):
     return _to_text(value)
 
 
+def _object_path_asset_name(value, object_path_text=""):
+    """对象路径的资产名。优先问对象本身，拿不到再从路径的末段截。"""
+    if value is not None:
+        try:
+            name = value.get_name()
+            if name:
+                return str(name)
+        except Exception:
+            pass
+    text = str(object_path_text or "")
+    if not text:
+        return ""
+    return text.split(".")[0].rsplit("/", 1)[-1]
+
+
 def _object_path_array(values):
     result = []
     if values is None:
@@ -1453,7 +1468,14 @@ def _split_character_actor_relative_path(package_path, code):
     return [part for part in relative.split("/") if part]
 
 
-def _sequence_asset_export_item(asset, duration_frames=1):
+def _sequence_asset_export_item(asset, duration_frames=1, sprite_name="", sprite_object_path=""):
+    """一帧的导出记录。
+
+    图集改造之后，一个动作的每一帧指向的**贴图**都是同一张图集，只有**精灵**才
+    分得清这一帧用的是哪张素材。工具箱侧按「素材目录里第几张图」编号，
+    Unreal 侧只能靠 Flipbook 关键帧上的精灵名反推；不带精灵信息的话，
+    两侧永远配不上对，已同步的动作每次检测都会报「全部新增 + 全部待删除」。
+    """
     return {
         "assetName": asset.get("assetName", ""),
         "assetClass": asset.get("assetClass", ""),
@@ -1461,6 +1483,8 @@ def _sequence_asset_export_item(asset, duration_frames=1):
         "objectPath": asset.get("objectPath", ""),
         "exportedFilePath": asset.get("exportedFilePath", ""),
         "durationFrames": max(1, int(duration_frames)),
+        "spriteName": sprite_name or "",
+        "spriteObjectPath": sprite_object_path or "",
     }
 
 
@@ -1473,6 +1497,8 @@ def _blank_sequence_frame_export_item(duration_frames=1):
         "exportedFilePath": "",
         "isBlank": True,
         "durationFrames": max(1, int(duration_frames)),
+        "spriteName": "",
+        "spriteObjectPath": "",
     }
 
 
@@ -2158,11 +2184,13 @@ def _ordered_flipbook_frame_assets(flipbook_assets, texture_assets, all_assets):
             sprite_text = _object_path_text(sprite)
             if sprite_text:
                 sprite_paths.add(sprite_text)
+            sprite_name = _object_path_asset_name(sprite, sprite_text)
             texture_path = _sprite_source_texture_path(sprite)
             texture_asset = _find_asset_by_object_path(texture_assets, texture_path) or _find_asset_by_object_path(all_assets, texture_path)
             if texture_asset is None:
                 continue
-            ordered_frames.append(_sequence_asset_export_item(texture_asset, frame_run))
+            ordered_frames.append(_sequence_asset_export_item(
+                texture_asset, frame_run, sprite_name, sprite_text))
     return ordered_frames, len(sprite_paths), sorted(sprite_paths, key=str.lower), playback_frame_count
 
 
@@ -3534,10 +3562,20 @@ def _export():
             if recursive or path in (CHAR_ITEM_ROOT, TEAM_SELECT_ROOT)
         ]
     elif sequence_scope:
-        asset_scan_entries = [
-            ("{}/{}/".format(CHARACTER_ACTOR_ROOT, code).rstrip("/"), True)
-            for code in sorted(selected_codes)
-        ]
+        # 只扫序列相关的目录。
+        #
+        # 这里以前写成「递归整个角色目录」，事后虽然把 Sound 和 BUFF 从资产清单里滤掉了，
+        # 但**扫描本身**还是把那两个目录整个走了一遍 —— 进度里看着就是全量扫描，
+        # 这正是「明明说的是专属扫描，却在扫 BUFF」的来源。
+        # 角色根目录用非递归，只取角色蓝图、AnimBP、AnimMaps 这几个直接躺在根下的资产。
+        asset_scan_entries = []
+        for code in sorted(selected_codes):
+            actor_root = "{}/{}".format(CHARACTER_ACTOR_ROOT, code)
+            asset_scan_entries.extend([
+                (actor_root, False),
+                (actor_root + "/AnimSequences", True),
+                (actor_root + "/Material", True),
+            ])
         asset_scan_entries.append((CHAR_ITEM_ROOT, False))
         scan_paths = [path for path, _ in asset_scan_entries]
     else:

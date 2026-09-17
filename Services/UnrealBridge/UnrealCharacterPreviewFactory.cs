@@ -684,7 +684,8 @@ internal static class UnrealCharacterPreviewFactory
             asset.PackagePath,
             asset.ObjectPath,
             string.Empty,
-            asset.ExportedFilePath);
+            asset.ExportedFilePath,
+            asset.SpriteName);
     }
 
     internal sealed record UnrealSequenceActionDefinition(

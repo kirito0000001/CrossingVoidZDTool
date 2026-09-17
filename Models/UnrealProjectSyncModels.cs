@@ -85,7 +85,9 @@ internal sealed record UnrealProjectSyncExportAssetView(
     string PackagePath,
     string ObjectPath,
     string SourceRoot,
-    string ExportedFilePath)
+    string ExportedFilePath,
+    /// <summary>序列帧专用：这一帧挂的精灵名。非序列素材为空。</summary>
+    string SpriteName = "")
 {
     public bool IsBlank => string.Equals(AssetClass, "BlankFrame", StringComparison.OrdinalIgnoreCase);
 
@@ -1040,6 +1042,18 @@ internal sealed class UnrealProjectExportSequenceAsset
 
     [JsonPropertyName("isBlank")]
     public bool IsBlank { get; set; }
+
+    /// <summary>
+    /// 这一帧在 Flipbook 里挂的精灵名与对象路径。
+    ///
+    /// 图集改造之后每一帧的贴图都是同一张图集，帧与帧之间只剩精灵能区分。
+    /// 老版本导出没有这两个字段，读出来是空串，差异比较会自动退回「按贴图路径比」。
+    /// </summary>
+    [JsonPropertyName("spriteName")]
+    public string SpriteName { get; set; } = string.Empty;
+
+    [JsonPropertyName("spriteObjectPath")]
+    public string SpriteObjectPath { get; set; } = string.Empty;
 }
 
 internal sealed class UnrealProjectExportLinkSkillLibrary

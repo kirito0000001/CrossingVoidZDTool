@@ -190,7 +190,16 @@ internal sealed record UnrealBridgeSnapshotItem(
     string SourceObjectPath = "",
     string OriginIdentity = "",
     string ToolboxRelativePath = "",
-    string NormalizedName = "");
+    string NormalizedName = "",
+    /// <summary>
+    /// 序列帧这一格用的精灵资产名（不带路径与后缀）。
+    ///
+    /// 图集改造之后，同一个动作的每一帧指向的贴图都是同一张图集，贴图路径再也分不出
+    /// 帧与帧的区别。真正区分它们的是 Flipbook 关键帧上的精灵：工具箱侧按「素材目录里
+    /// 第几张图」算得出应有的精灵名，Unreal 侧从关键帧上读得到实际精灵名。
+    /// 两侧对不上，这个动作就是没同步（或素材换过），必须重做。
+    /// </summary>
+    string SpriteAssetName = "");
 
 internal sealed record UnrealBridgeChange(
     string StableId,

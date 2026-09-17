@@ -46,9 +46,22 @@ def _load(path):
         frames = get(action, 'frames', []) or []
         for frame in frames:
             for name in ('index', 'ordinal', 'filePath', 'durationFrames', 'isBlank', 'voiceFileName',
-                         'textureAssetName', 'spriteAssetName'):
+                         'sourceImageIndex', 'spriteAssetName'):
                 frame[name] = get(frame, name, frame.get(name, ''))
         action['frames'] = frames
+        # 图集那两块也是嵌套对象，键名同样要能两种写法都吃下。
+        atlas = get(action, 'atlas', None)
+        if atlas:
+            for name in ('atlasName', 'imagePath', 'width', 'height'):
+                atlas[name] = get(atlas, name, atlas.get(name, ''))
+            action['atlas'] = atlas
+        source_images = get(action, 'sourceImages', []) or []
+        for image in source_images:
+            for name in ('index', 'spriteAssetName', 'filePath', 'x', 'y', 'width', 'height',
+                         'rotated', 'trimmed', 'trimOriginX', 'trimOriginY',
+                         'sourceImageWidth', 'sourceImageHeight'):
+                image[name] = get(image, name, image.get(name, ''))
+        action['sourceImages'] = source_images
     value['actions'] = actions
     return value
 
@@ -287,6 +300,89 @@ def _refresh_existing_sprite(folder, sprite_name, texture, action):
     _save(sprite.get_path_name())
     unreal.log('SequenceSync: refreshed sprite %s to %dx%d' % (path, width, height))
     return True
+
+
+def _apply_atlas_sprite(folder, name, texture, atlas_width, atlas_height, image, action):
+    """按图集里的一格建出（或就地更新）精灵。
+
+    ZDBridge.CreatePaperSpriteFromTexture 只会做「整张贴图一个精灵」，
+    而这里要的是贴图里的一小块 —— 所以建完之后把取图区域写回去。
+    写入这些属性会触发 PostEditChangeProperty，精灵的几何、包围盒、锚点跟着重建，
+    和 .paper2dsprites 导入器内部做的事是同一件。
+
+    裁剪信息必须一起写：图集默认会裁掉透明边，只给矩形的话，
+    每一帧都会被贴到画布左上角，整条动画会抖。
+    """
+    def set_first(target, candidates, value, label):
+        # 属性名不要赌，挨个试，全都不存在才报错并列出试过的名字。
+        #
+        # 2026-09-16 用探针在真实工程上问过引擎（对着 Click_Frame0_Sprite），
+        # 引擎里写作 bTrimmedInSourceImage 的字段，Python 侧的真名是
+        # trimmed_in_source_image —— **带 b_ 的那个不存在**。旋转同理。
+        # 候选表把真名放前面，带 b_ 的留作版本差异的兜底。
+        for candidate in candidates:
+            try:
+                target.set_editor_property(candidate, value)
+                return
+            except Exception:
+                continue
+
+        raise RuntimeError(
+            '%s: %s not found on %s; tried %s'
+            % (action, label, target.get_class().get_name(), ', '.join(candidates)))
+
+    path = folder + '/' + name
+    if unreal.EditorAssetLibrary.does_asset_exist(path):
+        sprite = unreal.load_asset(path)
+    else:
+        sprite, _ = _bridge_call('create_paper_sprite_from_texture', [texture, folder, name], action)
+    if sprite is None:
+        raise RuntimeError('%s: sprite could not be created: %s' % (action, path))
+
+    x = float(image.get('x') or 0)
+    y = float(image.get('y') or 0)
+    width = float(image.get('width') or 0)
+    height = float(image.get('height') or 0)
+    if width <= 0 or height <= 0:
+        raise RuntimeError('%s: atlas rect for %s is empty' % (action, path))
+
+    trimmed = bool(image.get('trimmed'))
+    origin_x = float(image.get('trimOriginX') or 0)
+    origin_y = float(image.get('trimOriginY') or 0)
+    source_width = float(image.get('sourceImageWidth') or width)
+    source_height = float(image.get('sourceImageHeight') or height)
+
+    # 顺序有讲究：先把贴图指过去，再写区域。反过来的话，
+    # SourceTexture 那次赋值会因为区域还是旧的而被判成「新精灵」重置掉。
+    sprite.set_editor_property('source_texture', texture)
+    sprite.set_editor_property('source_uv', unreal.Vector2D(x, y))
+    sprite.set_editor_property('source_dimension', unreal.Vector2D(width, height))
+    sprite.set_editor_property(
+        'source_texture_dimension', unreal.Vector2D(float(atlas_width), float(atlas_height)))
+    set_first(
+        sprite,
+        ('trimmed_in_source_image', 'b_trimmed_in_source_image'),
+        trimmed,
+        'trimmed flag')
+    set_first(
+        sprite,
+        ('origin_in_source_image_before_trimming', 'origin_in_source_image'),
+        unreal.Vector2D(origin_x, origin_y),
+        'trim origin')
+    set_first(
+        sprite,
+        ('source_image_dimension_before_trimming', 'source_image_dimension'),
+        unreal.Vector2D(source_width, source_height),
+        'trim source dimension')
+    set_first(
+        sprite,
+        ('rotated_in_source_image', 'b_rotated_in_source_image'),
+        bool(image.get('rotated')),
+        'rotated flag')
+    unreal.log(
+        'SequenceSync: sprite %s <- atlas rect (%d,%d %dx%d) trimmed=%s'
+        % (path, int(x), int(y), int(width), int(height), trimmed))
+    return sprite
 
 
 def _import_texture(source, folder, name, action):
@@ -555,36 +651,45 @@ def _sync_action(action):
     old_sequence = unreal.load_asset(sequence_folder + '/' + sequence_name)
     source_asset = _require(action['animMapsPath'], code)
     old_assets = _collect_action_assets(action)
-    imported = []
-    for ordinal, frame in enumerate(frames):
+    # 一张图集进来，N 个精灵出去。素材目录里几张图就几个精灵，
+    # 序列里复用同一张图的位置共用同一个精灵 —— 这是与「逐帧导入」最大的区别，
+    # 也是 Sk2 那种「17 张素材却建出 23 个资产」的根治办法。
+    atlas = action.get('atlas') or {}
+    source_images = action.get('sourceImages') or []
+    if not atlas.get('imagePath') or not source_images:
+        raise RuntimeError('%s: sync plan has no atlas information' % code)
+
+    atlas_texture_path = _import_texture(atlas['imagePath'], material_folder, atlas['atlasName'], code)
+    atlas_texture = _require(atlas_texture_path, code)
+    atlas_width, atlas_height = _texture_size(atlas_texture)
+
+    sprite_by_index = {}
+    for image in source_images:
+        index = int(image.get('index') or 0)
+        sprite_name = image.get('spriteAssetName') or ''
+        if index <= 0 or not sprite_name:
+            raise RuntimeError('%s: atlas entry %s has no usable index or sprite name' % (code, index))
+        _align_asset_name_case(material_folder, sprite_name, code)
+        sprite = _apply_atlas_sprite(
+            material_folder, sprite_name, atlas_texture, atlas_width, atlas_height, image, code)
+        # Sprite 是独立的包；不显式保存的话离线 commandlet 退出后不会落盘，
+        # Flipbook 会引用到磁盘上并不存在的资产。
+        _save(sprite.get_path_name())
+        sprite_by_index[index] = sprite
+
+    # 按序列位置展开：空白帧留空，其余指向它引用的那一格。
+    sprites = []
+    for frame in frames:
         if frame.get('isBlank'):
-            imported.append(None)
-        else:
-            texture_name = frame.get('textureAssetName') or _frame_ordinal_name(
-                code, _frame_ordinal(frame, ordinal), len(frames))
-            _align_asset_name_case(material_folder, texture_name, code)
-            imported.append(_import_texture(frame.get('filePath', ''), material_folder, texture_name, code))
-    sprites = [None] * len(frames)
-    textures = []
-    for index, texture_path in enumerate(imported):
-        if texture_path is None:
+            sprites.append(None)
             continue
-        textures.append((_require(texture_path, code), index))
-    # Do not call EditorAssetLibrary.sync_browser_to_objects here. That API
-    # opens or focuses the Content Browser and crashes commandlet/remote runs
-    # where SlateApplication is not available. Asset creation is independent
-    # of Content Browser selection, so keep the sync unattended and headless.
-    if textures:
-        for texture, index in textures:
-            sprite_name = frames[index].get('spriteAssetName') or (_frame_ordinal_name(
-                code, _frame_ordinal(frames[index], index), len(frames)) + '_Sprite')
-            _align_asset_name_case(material_folder, sprite_name, code)
-            _refresh_existing_sprite(material_folder, sprite_name, texture, code)
-            sprite, _ = _create_sprite_from_texture(texture, material_folder, sprite_name, code)
-            # Sprite 是独立的包；不显式保存的话离线 commandlet 退出后不会落盘，
-            # Flipbook 会引用到磁盘上并不存在的资产。
-            _save(sprite.get_path_name())
-            sprites[index] = sprite
+        source_index = int(frame.get('sourceImageIndex') or 0)
+        sprite = sprite_by_index.get(source_index)
+        if sprite is None:
+            raise RuntimeError(
+                '%s: frame %s references atlas entry %s, which is not in the plan'
+                % (code, frame.get('index'), source_index))
+        sprites.append(sprite)
     if not any(sprite is not None for sprite in sprites):
         raise RuntimeError('%s: every frame is blank; the flipbook would have no image' % code)
     # 空白帧在 Flipbook 里保留一个 Sprite 为空的关键帧，否则整条序列的时长和节奏都会变短。
@@ -627,9 +732,11 @@ def _sync_action(action):
     _save(sequence.get_path_name())
     # 第五步不再往角色蓝图里写序列槽位——把序列绑到蓝图属于下一步的职责。
     # 计划里仍然带着 blueprintProperty / blueprintFormSlotIndex，留给那一步用。
-    new_paths = [texture_path for texture_path in imported if texture_path] + [
-        sprite.get_path_name() for sprite in sprites if sprite is not None
-    ] + [flipbook.get_path_name(), sequence.get_path_name()]
+    # 图集贴图 + 去重后的精灵 + Flipbook + 序列，就是这一轮的全部产物。
+    # 其余留在这个动作目录里的（上一版逐帧导入的贴图和精灵）都是旧资产，交给清理。
+    new_paths = [atlas_texture.get_path_name()] + sorted(
+        {sprite.get_path_name() for sprite in sprite_by_index.values()}
+    ) + [flipbook.get_path_name(), sequence.get_path_name()]
     skipped, deleted = _cleanup_old_assets(old_assets, new_paths, action)
     return {'actionCode': code, 'sequencePath': sequence.get_path_name(), 'flipbookPath': flipbook.get_path_name(), 'frameCount': len(frames), 'animMapsChange': anim_maps_change, 'deletedAssets': deleted, 'legacyAssetsNotDeleted': skipped}
 

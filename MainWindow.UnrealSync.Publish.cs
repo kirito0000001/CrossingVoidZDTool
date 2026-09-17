@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using CrossingVoidZDTool.Services;
+using CrossingVoidZDTool.Services.Atlas;
 using CrossingVoidZDTool.ViewModels;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -162,9 +163,25 @@ namespace CrossingVoidZDTool
                 {
                     AppendLog(LogKind.Warning,
                         $"[Sync Aborted] reason=changes-drifted character={character.Code} latest={latestChanges.Length}");
-                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(isSequenceSynchronization ? 5 : 3);
-                    CompleteGlobalProgress("同步内容发生变化", "已刷新第三步列表，请重新确认后再次同步。");
-                    ShowFloatingTip(InfoBarSeverity.Warning, "同步内容已刷新", "最终检测发现素材发生变化，请重新确认本次选择。");
+                    var driftedStep = isSequenceSynchronization ? 5 : 3;
+                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(driftedStep);
+                    // ReturnToWorkflowStep 会把**缓存里那份旧的差异树**读回来。
+                    // 于是界面看着「一点没变」，而用户再点一次同步又会撞到同一个漂移 ——
+                    // 来回死循环，永远走不出去。这里把刚算出来的新树重新压回去，
+                    // 让用户看到的就是这一轮真正会执行的那一份。
+                    await _applicationViewModel.UnrealProjectSync.SetPublishSelectionTreeAsync(
+                        latestChanges,
+                        UnrealBridgePublishSupportPolicy.CanExecute,
+                        GetGlobalProgressCancellationToken(),
+                        selectPendingByDefault: !isSequenceSynchronization);
+                    _applicationViewModel.UnrealProjectSync.SetLoadedPublishStep(driftedStep);
+                    CompleteGlobalProgress(
+                        "同步内容发生变化",
+                        $"已刷新{(isSequenceSynchronization ? "序列同步" : "同步素材")}列表，请重新确认后再次同步。");
+                    ShowFloatingTip(
+                        InfoBarSeverity.Warning,
+                        "同步内容已刷新",
+                        "最终检测发现差异有变化，列表已换成最新的一份，请重新勾选。");
                     await HideGlobalProgressAfterDelayAsync();
                     return;
                 }
@@ -270,8 +287,23 @@ namespace CrossingVoidZDTool
 
                 if (isSequenceSynchronization)
                 {
+                    // 先把勾选动作的图集打出来。Unreal 侧要的是「一张贴图切 N 个精灵」，
+                    // 而每格在图集里的矩形只有装箱器知道 —— 计划里得带着这些矩形走。
+                    UpdateGlobalProgress("阶段 2/5 · 正在打包图集", 32, $"角色：{character.Code} · 打包勾选动作的图集", true);
+                    var atlases = await new SequenceAtlasPackService().PackAsync(
+                        character,
+                        changes,
+                        Settings.AtlasPythonPath,
+                        new Progress<AtlasPackProgress>(update =>
+                            UpdateGlobalProgress(
+                                $"阶段 2/5 · 打包图集：{update.Message}",
+                                32 + 24,
+                                $"角色：{character.Code}",
+                                update.Stage != AtlasPackStage.Finished)),
+                        GetGlobalProgressCancellationToken());
+                    AppendLog(LogKind.Info, $"[Sequence Atlas] character={character.Code} atlases={atlases.Count}");
                     var sequencePublishService = new UnrealBridgeSequencePublishService();
-                    var sequencePlan = sequencePublishService.BuildSequenceSyncPlan(character, projectPath, changes);
+                    var sequencePlan = sequencePublishService.BuildSequenceSyncPlan(character, projectPath, changes, atlases);
                     if (sequencePublishService.SkippedActionCodes.Count > 0)
                     {
                         AppendLog(LogKind.Warning, $"[Sequence Plan Skipped] character={character.Code} actions={string.Join("、", sequencePublishService.SkippedActionCodes)}（工具箱侧没有序列帧数据）");
