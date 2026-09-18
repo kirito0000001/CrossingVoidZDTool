@@ -61,9 +61,10 @@ namespace CrossingVoidZDTool
                 // 动作自带的 FormIndex 优先，解析出来的兜底 —— 两者不一致时以动作卡为准。
                 var formIndex = action.FormIndex > 1 ? action.FormIndex : parsedForm;
                 var variantCode = SequenceActionCatalog.GetVariantCode(definition, formIndex);
-                // 图集的帧列表来自**素材目录**，不是序列清单：
-                // 素材目录里有几张 PNG 就打几个格子，谁复用谁是序列那边的事。
-                var framesFolder = SequenceActionFolderLayout.GetFramesFolderPath(character, action);
+                // 图集的帧列表来自「这些帧实际用到哪些图」，去重后按文件名升序，
+                // 不是序列清单（按帧位会打出重复的格子），也不是自己的素材目录
+                // （帧可以复用别的动作目录里的同一张图）。
+                var sourceImages = SequenceActionFolderLayout.ResolveSourceImages(section.Frames);
                 var outputDirectory = AtlasPackService.ResolveOutputDirectory(
                     AtlasDestination.Export,
                     Settings.ProjectRootPath,
@@ -81,7 +82,7 @@ namespace CrossingVoidZDTool
 
                 var result = await new AtlasPackService().PackAsync(
                     character.Code,
-                    framesFolder,
+                    sourceImages,
                     definition,
                     formIndex,
                     outputDirectory,

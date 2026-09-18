@@ -32,12 +32,16 @@ internal sealed class UnrealBridgeDiffService
         var canonicalSequenceTexturePaths = direction == UnrealBridgeDirection.PublishToUnreal
             ? BuildCanonicalSequenceTexturePaths(toolboxItems, toolbox.CharacterCode)
             : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        // 已经换成图集布局的动作。只有这些动作的帧才谈得上「按精灵名核对」——
-        // 它们每一帧指向的贴图都是同一张图集，精灵名才是唯一的帧身份。
-        // 还停在逐帧旧布局的动作，精灵名是历史导入留下的（按帧序号命名），
-        // 拿它去比工具箱按素材序号算出来的名字只会把没问题的帧判成要重做。
+        // 「布局已经对齐」的动作。只有这些动作的帧才谈得上按精灵名逐帧核对：
+        // 布局对齐说明 Unreal 那边已经是这一套产物（自己的图集，或者借来的来源图集），
+        // 精灵名才是可靠的帧身份。
+        //
+        // 还停在逐帧旧布局的动作（例如 frames:Click_Frame0,Click_Frame1…），
+        // 精灵名是历史导入留下的、按帧序号命名的，拿它去比工具箱按素材序号算出来的名字
+        // 只会把没问题的帧判成要重做；这类动作该由**动作节点**报「需要重建」，
+        // 逐帧的结论没有意义。
         var atlasLayoutActions = direction == UnrealBridgeDirection.PublishToUnreal
-            ? CollectAtlasLayoutActions(unrealItems)
+            ? CollectLayoutAlignedActions(toolboxItems, unrealItems)
             : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         // 每个动作同步之后应有的资产名；Unreal 侧多出来的资产就是要清理的历史素材。
         var canonicalSequenceAssetPaths = BuildCanonicalSequenceAssetPaths(toolboxItems, toolbox.CharacterCode);
@@ -145,6 +149,13 @@ internal sealed class UnrealBridgeDiffService
 
             if (addedAtlasByAction.Add(change.ParentStableId))
             {
+                // 整条复用别的动作的图时，这个动作**没有**自己的图集 —— 别补这一条，
+                // 否则列表里会凭空多出一个永远建不出来的「图集贴图」。
+                if (change.ToolboxItem is not { SourceAtlasIsOwn: true })
+                {
+                    continue;
+                }
+
                 result.Add(change with
                 {
                     StableId = SequenceFrameIdentity.BuildAtlasStableId(change.ParentStableId),
@@ -290,20 +301,18 @@ internal sealed class UnrealBridgeDiffService
         {
             var frames = group.ToArray();
             var actionCode = ExtractActionCode(frames[0].PayloadJson);
-            // 精灵是按**素材**建的，不是按帧位 —— 复用位置共用同一个精灵。
-            // 用帧位数会算多：Sk2 有 23 个帧位而素材只有 17 张。
-            var sourceImageCount = frames
-                .Where(frame => !string.IsNullOrWhiteSpace(frame.AssetPath))
-                .Select(frame => frame.AssetPath)
+            // 这个动作**自己**那几只精灵（一只精灵对应一张自己的素材，复用位置共用同一只）。
+            // 借来的图连精灵一起借（来源动作那只），所以这里只数 SourceAtlasIsOwn 的帧：
+            // 整条都借用别人的动作名单是空的 —— 它没有自己的图集、也没有自己的精灵，
+            // 只剩 Flipbook 和序列，工程里遗留的重复图集/精灵因此会被正常列成待删。
+            var ownSpriteNames = frames
+                .Where(frame => frame.SourceAtlasIsOwn && !string.IsNullOrWhiteSpace(frame.SpriteAssetName))
+                .Select(frame => frame.SpriteAssetName)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
-                .Count();
-            if (sourceImageCount == 0)
-            {
-                sourceImageCount = frames.Length;
-            }
-
+                .OrderBy(name => name, StringComparer.Ordinal)
+                .ToArray();
             result[group.Key] = SequenceFrameIdentity.BuildCanonicalAssetPackagePaths(
-                characterCode, actionCode, sourceImageCount);
+                characterCode, actionCode, ownSpriteNames);
         }
 
         return result;
@@ -395,26 +404,34 @@ internal sealed class UnrealBridgeDiffService
     }
 
     /// <summary>
-    /// Unreal 侧已经按图集布局的动作。判据是动作节点载荷里的 <c>layout</c> 前缀，
-    /// 和图集布局的生成规则（<see cref="SequenceFrameIdentity.BuildAtlasLayout"/>）同源。
+    /// 两侧**布局文字**已经一致的动作（只看 layout，不看帧率/帧位数那几项）。
+    ///
+    /// 布局文字是这套产物形态的指纹：自己的图集写 <c>atlas:&lt;图集名&gt;</c>，
+    /// 借了别人素材的写 <c>frames:&lt;用到的图集名&gt;</c>，而逐帧时代遗留的
+    /// 是 <c>frames:&lt;每帧贴图名&gt;</c>——两者不会撞上。
     /// </summary>
-    private static HashSet<string> CollectAtlasLayoutActions(
+    private static HashSet<string> CollectLayoutAlignedActions(
+        IReadOnlyDictionary<string, UnrealBridgeSnapshotItem> toolboxItems,
         IReadOnlyDictionary<string, UnrealBridgeSnapshotItem> unrealItems)
     {
         var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var item in unrealItems.Values)
+        foreach (var pair in toolboxItems)
         {
-            if (item.Module != UnrealBridgeModule.SequenceFrames ||
-                !SequenceFrameIdentity.IsActionStableId(item.StableId))
+            if (pair.Value.Module != UnrealBridgeModule.SequenceFrames ||
+                !SequenceFrameIdentity.IsActionStableId(pair.Key) ||
+                !unrealItems.TryGetValue(pair.Key, out var unrealItem) ||
+                !SequenceFrameIdentity.TryReadActionPayload(pair.Value.PayloadJson, out var toolboxLayout, out _, out _) ||
+                !SequenceFrameIdentity.TryReadActionPayload(unrealItem.PayloadJson, out var unrealLayout, out _, out _) ||
+                string.IsNullOrWhiteSpace(toolboxLayout))
             {
                 continue;
             }
 
-            if (SequenceFrameIdentity.TryReadActionPayload(item.PayloadJson, out var layout, out _, out _) &&
-                layout.StartsWith("atlas:", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(toolboxLayout, unrealLayout, StringComparison.OrdinalIgnoreCase))
             {
-                result.Add(item.StableId);
+                result.Add(pair.Key);
             }
+
         }
 
         return result;

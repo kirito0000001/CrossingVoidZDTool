@@ -104,6 +104,28 @@ internal sealed class UnrealBridgeSequenceSyncSourceImage
     /// <summary>素材原图路径，仅供排查用。</summary>
     public string FilePath { get; set; } = string.Empty;
 
+    /// <summary>
+    /// 这一格用的是哪张图集：图集资产名、图集图片（打成图集的那个 PNG）、
+    /// 以及图集落在哪个材质目录。
+    ///
+    /// 自己的图 → 本动作的图集；借来的图 → **来源动作**的图集（那些图已经在那边了，
+    /// 不再重复打包一份）。三样都给全，Python 侧才能按同一套流程把图集导进来 / 用起来。
+    /// </summary>
+    public string AtlasName { get; set; } = string.Empty;
+    public string AtlasImagePath { get; set; } = string.Empty;
+    public string AtlasMaterialFolder { get; set; } = string.Empty;
+
+    /// <summary>
+    /// 要不要在借用方自己的材质目录里建/更新这只精灵。
+    ///
+    /// 借来的图连精灵一起借：那张图在来源动作里已经切好一只精灵了，这里直接用那只，
+    /// 借用方一只都不建（整条都借用别人的动作因此只剩一个 Flipbook）。
+    /// </summary>
+    public bool CreateSprite { get; set; } = true;
+
+    /// <summary>不建精灵时，这只借来的精灵所在的材质目录。</summary>
+    public string SpriteMaterialFolder { get; set; } = string.Empty;
+
     /// <summary>在图集贴图里的矩形。</summary>
     public int X { get; set; }
     public int Y { get; set; }
@@ -192,13 +214,9 @@ internal sealed class UnrealBridgeSequencePublishService
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToList();
-        var selectedActions = selectedSequenceChanges
-            .Where(change => change.IsSelected && change.Module == UnrealBridgeModule.SequenceFrames)
-            .Select(ResolveAction)
-            .Where(resolved => resolved is not null)
-            .Select(resolved => resolved!.Value)
-            .DistinctBy(resolved => (resolved.Definition.Code, resolved.FormIndex))
-            .ToArray();
+        // 勾选的动作 + 它们借用素材的来源动作（来源在前）。借用方的精灵指向来源图集，
+        // 所以来源那一版必须跟着重建，不然矩形可能和工程里的图集对不上。
+        var selectedActions = ResolveActionsWithSourceOwners(character, selectedSequenceChanges).ToArray();
         // 只勾了非规范序列（只需解绑、不重建任何动作）也是合法的一批。
         if (selectedActions.Length == 0 && detachPaths.Count == 0)
         {
@@ -211,6 +229,10 @@ internal sealed class UnrealBridgeSequencePublishService
             change.IsSelected &&
             change.Module == UnrealBridgeModule.SequenceFrames &&
             change.Kind == UnrealBridgeChangeKind.DeleteCandidate &&
+            // 只有「这个动作占用的资产」那一行才对应磁盘上的一个文件。
+            // 帧行（…:delete）和「图集贴图」行是界面上的重建说明：图集时代一帧的 Unreal 路径
+            // 指向的是**整条动作共用的那张图集**，把它塞进待删列表就会去删一张规范图集。
+            SequenceFrameIdentity.IsOwnedAssetStableId(change.StableId) &&
             !string.IsNullOrWhiteSpace(change.UnrealItem?.SourceObjectPath)))
         {
             var resolved = ResolveAction(change);
@@ -253,8 +275,12 @@ internal sealed class UnrealBridgeSequencePublishService
             // 找不到数据、或者工具箱侧一帧都没有的动作，跳过即可。
             // 以前这里直接抛异常，会让同一批里其它本来能成功的动作全部失败；
             // 零帧动作送到 Python 也只会换个地方抛"no frames in toolbox data"。
+            //
+            // 「一帧都没有」和「有帧但没有一张图」要一起放过：后者是整条都由空白帧组成的动作，
+            // 它没有图集可打（打包那边同样跳过），硬要在计划里找图集只会把这一批整体拦下来。
             if (!sectionByAction.TryGetValue((definition.Code, formIndex), out var section) ||
-                section.Frames.Count == 0)
+                section.Frames.Count == 0 ||
+                SequenceActionFolderLayout.ResolveSourceImages(section.Frames).Count == 0)
             {
                 skipped.Add(SequenceActionCatalog.GetVariantCode(definition, formIndex));
                 continue;
@@ -262,7 +288,10 @@ internal sealed class UnrealBridgeSequencePublishService
 
             var fps = frameService.GetActionFps(character, section.Action);
             var variantCode = SequenceActionCatalog.GetVariantCode(definition, formIndex);
-            var atlas = ResolveAtlas(atlases, definition, formIndex);
+            // 自己的图集：整条都复用别人的图时**没有**（那些图在来源图集里）。
+            var ownAtlas = atlases.TryGetValue(AtlasKey(definition.Code, formIndex), out var resolvedAtlas)
+                ? resolvedAtlas
+                : null;
             var action = new UnrealBridgeSequenceSyncAction
             {
                 ActionCode = variantCode,
@@ -285,14 +314,17 @@ internal sealed class UnrealBridgeSequencePublishService
                     ? stalePaths.Distinct(StringComparer.OrdinalIgnoreCase).ToList()
                     : [],
                 HasStaleAssetSelection = true,
-                Atlas = new UnrealBridgeSequenceSyncAtlas
-                {
-                    AtlasName = atlas.AtlasName,
-                    ImagePath = atlas.ImagePath,
-                    Width = atlas.Width,
-                    Height = atlas.Height
-                },
-                SourceImages = BuildSourceImages(character, section, definition, formIndex, atlas)
+                Atlas = ownAtlas is null
+                    ? null
+                    : new UnrealBridgeSequenceSyncAtlas
+                    {
+                        AtlasName = ownAtlas.AtlasName,
+                        ImagePath = ownAtlas.ImagePath,
+                        Width = ownAtlas.Width,
+                        Height = ownAtlas.Height
+                    },
+                SourceImages = BuildSourceImages(
+                    character, section, definition, formIndex, atlases, sectionByAction, root)
             };
             // 虚幻侧的帧序号按整条序列的位置从 0 开始编号，空白帧同样占一个位置，
             // 这样资产编号和 Flipbook 的关键帧下标始终一一对应。
@@ -368,25 +400,121 @@ internal sealed class UnrealBridgeSequencePublishService
     }
 
     /// <summary>
-    /// 取这个动作的图集。**没有就报错，不退化成「每帧一张贴图」的老路。**
+    /// 勾选的动作 **加上** 它们借用素材的那些来源动作。
     ///
-    /// 退化的代价太大：老路会把复用的帧各导一份，正是要修掉的那个 bug；
-    /// 而且两条路产出的资产布局完全不同，混着跑会让差异树永远在「重建」和「已同步」之间跳。
-    /// 与其悄悄退回去，不如当场说清是哪一步没做。
+    /// 借用方的精灵指向来源动作的图集（那张图已经在那边了，不再重复打包），
+    /// 所以来源动作必须是**当前**那一版 —— 不一起同步，借来的矩形就可能和工程里的图集对不上。
+    /// 来源动作本身也是幂等重建，多做一次没有副作用。
+    ///
+    /// 顺序按「先来源、后借用」，同一批里先重建图集、再被引用，日志读起来也顺。
+    /// 打包和生成计划都用这一份解析 —— 两边各写一套的话，迟早出现
+    /// 「给 A 打了图集、计划里却在找 B」。
     /// </summary>
-    private static UnrealBridgeSequenceAtlasInput ResolveAtlas(
-        IReadOnlyDictionary<string, UnrealBridgeSequenceAtlasInput> atlases,
-        SequenceActionDefinition definition,
-        int formIndex)
+    public static IReadOnlyList<(SequenceActionDefinition Definition, int FormIndex)> ResolveActionsWithSourceOwners(
+        CharacterCard character,
+        IReadOnlyList<UnrealBridgeChange> selectedSequenceChanges)
     {
-        if (atlases.TryGetValue(AtlasKey(definition.Code, formIndex), out var atlas))
+        ArgumentNullException.ThrowIfNull(character);
+        var selected = ResolveSelectedActions(selectedSequenceChanges);
+        if (selected.Count == 0)
         {
-            return atlas;
+            return selected;
         }
 
-        throw new InvalidOperationException(
-            $"动作「{SequenceActionCatalog.GetVariantCode(definition, formIndex)}」没有图集，无法生成同步计划。"
-            + "同步前会先为勾选的动作打包图集，请检查打包是否被跳过或失败。");
+        var sections = new SequenceFrameService()
+            .LoadSections(character, new CharacterSkillsService().Load(character));
+        var sectionByAction = sections
+            .Select(section => (section, resolved: TryResolveActionCode(section.Action.Code)))
+            .Where(pair => pair.resolved is not null)
+            .GroupBy(pair => (pair.resolved!.Value.Definition.Code, pair.resolved!.Value.FormIndex))
+            .ToDictionary(group => group.Key, group => group.First().section);
+
+        var included = new Dictionary<(string Code, int FormIndex), (SequenceActionDefinition Definition, int FormIndex)>();
+        var ownerOf = new Dictionary<(string Code, int FormIndex), HashSet<(string Code, int FormIndex)>>();
+        foreach (var entry in selected)
+        {
+            included[(entry.Definition.Code, entry.FormIndex)] = entry;
+        }
+
+        // 借用关系可能不止一层（A 借 B、B 又借 C），所以按队列推到收敛。
+        var queue = new Queue<(SequenceActionDefinition Definition, int FormIndex)>(selected);
+        while (queue.Count > 0)
+        {
+            var current = queue.Dequeue();
+            if (!sectionByAction.TryGetValue((current.Definition.Code, current.FormIndex), out var section))
+            {
+                continue;
+            }
+
+            var borrowOwners = SequenceActionFolderLayout
+                .ResolveSourceImagePlan(character, section.Action, section.Frames)
+                .Where(image => !image.IsOwn)
+                .Select(image => image.OwnerActionCode)
+                .Distinct(StringComparer.OrdinalIgnoreCase);
+            foreach (var ownerCode in borrowOwners)
+            {
+                if (!SequenceActionCatalog.TryResolve(ownerCode, out var ownerDefinition, out var ownerFormIndex) ||
+                    !sectionByAction.ContainsKey((ownerDefinition.Code, ownerFormIndex)))
+                {
+                    continue;
+                }
+
+                var key = (ownerDefinition.Code, ownerFormIndex);
+                var currentKey = (current.Definition.Code, current.FormIndex);
+                if (!ownerOf.TryGetValue(currentKey, out var owners))
+                {
+                    owners = [];
+                    ownerOf[currentKey] = owners;
+                }
+                owners.Add(key);
+
+                if (included.ContainsKey(key))
+                {
+                    continue;
+                }
+
+                var entry = (ownerDefinition, ownerFormIndex);
+                included[key] = entry;
+                queue.Enqueue(entry);
+            }
+        }
+
+        // 拓扑：来源在前。图很小（十几个动作），直接稳住顺序即可。
+        var ordered = new List<(SequenceActionDefinition Definition, int FormIndex)>();
+        var emitted = new HashSet<(string Code, int FormIndex)>();
+        void Emit((SequenceActionDefinition Definition, int FormIndex) entry)
+        {
+            var key = (entry.Definition.Code, entry.FormIndex);
+            if (!emitted.Add(key) || !included.ContainsKey(key))
+            {
+                return;
+            }
+
+            if (ownerOf.TryGetValue(key, out var owners))
+            {
+                foreach (var owner in owners)
+                {
+                    if (included.TryGetValue(owner, out var ownerEntry))
+                    {
+                        Emit(ownerEntry);
+                    }
+                }
+            }
+
+            ordered.Add(entry);
+        }
+
+        foreach (var entry in selected)
+        {
+            Emit(entry);
+        }
+
+        foreach (var entry in included.Values)
+        {
+            Emit(entry);
+        }
+
+        return ordered;
     }
 
     /// <summary>
@@ -401,42 +529,116 @@ internal sealed class UnrealBridgeSequencePublishService
         SequenceFrameSection section,
         SequenceActionDefinition definition,
         int formIndex,
-        UnrealBridgeSequenceAtlasInput atlas)
+        IReadOnlyDictionary<string, UnrealBridgeSequenceAtlasInput> atlases,
+        IReadOnlyDictionary<(string Code, int FormIndex), SequenceFrameSection> sectionByAction,
+        string unrealRoot)
     {
-        var framesFolder = SequenceActionFolderLayout.GetFramesFolderPath(character, section.Action);
-        var files = AtlasManifestWriter.EnumerateSourceImages(framesFolder);
-        var images = new List<UnrealBridgeSequenceSyncSourceImage>(files.Count);
-        for (var ordinal = 0; ordinal < files.Count; ordinal++)
+        // 每一格素材「用哪张图集、用哪只精灵、要不要在本动作里新建」。
+        // 借来的图**连精灵一起借**（来源动作那只），所以这些格子既不需要矩形、
+        // 也不需要为自己再打一份图集。
+        var resolutions = SequenceSourceImageResolver.Resolve(
+            character,
+            section.Action,
+            section.Frames,
+            ownerCode => ResolveSectionByActionCode(sectionByAction, ownerCode));
+        var images = new List<UnrealBridgeSequenceSyncSourceImage>(resolutions.Count);
+        var variantCode = SequenceActionCatalog.GetVariantCode(definition, formIndex);
+        for (var ordinal = 0; ordinal < resolutions.Count; ordinal++)
         {
+            var resolution = resolutions[ordinal];
             var index = ordinal + 1;
-            if (!atlas.FramesByOrdinal.TryGetValue(index, out var placed) || placed.Frame is null)
-            {
-                throw new InvalidOperationException(
-                    $"图集「{atlas.AtlasName}」里没有第 {index} 格的矩形，无法生成同步计划。"
-                    + "图集帧表和素材目录可能不是同一轮的结果。");
-            }
-
-            images.Add(new UnrealBridgeSequenceSyncSourceImage
+            var image = new UnrealBridgeSequenceSyncSourceImage
             {
                 Index = index,
-                SpriteAssetName = SequenceActionCatalog.GetFrameSpriteName(definition, formIndex, ordinal, files.Count),
-                FilePath = files[ordinal],
-                X = placed.Frame.X,
-                Y = placed.Frame.Y,
-                Width = placed.Frame.W,
-                Height = placed.Frame.H,
-                Rotated = placed.Rotated,
-                Trimmed = placed.Trimmed,
-                // 裁剪偏移是「这块内容原本在原图的哪儿」。没裁过就是 0，
-                // 原图尺寸退回这一格自己的尺寸，等价于「整张图就是这一格」。
-                TrimOriginX = placed.SpriteSourceSize?.X ?? 0,
-                TrimOriginY = placed.SpriteSourceSize?.Y ?? 0,
-                SourceImageWidth = placed.SourceSize?.W ?? placed.Frame.W,
-                SourceImageHeight = placed.SourceSize?.H ?? placed.Frame.H,
-            });
+                SpriteAssetName = resolution.SpriteAssetName,
+                FilePath = resolution.FilePath,
+                AtlasName = resolution.AtlasName,
+                AtlasMaterialFolder = resolution.AtlasMaterialFolder,
+                SpriteMaterialFolder = resolution.SpriteMaterialFolder,
+                CreateSprite = resolution.CreateSprite,
+            };
+
+            if (!resolution.CreateSprite)
+            {
+                // 直接用来源动作那只精灵，不需要矩形。
+                images.Add(image);
+                continue;
+            }
+
+            if (!TryResolveAtlasCell(character, resolution, sectionByAction, atlases, out var atlas, out var placed))
+            {
+                throw new InvalidOperationException(
+                    $"动作「{variantCode}」的第 {index} 张素材（{Path.GetFileName(resolution.FilePath)}）"
+                    + "找不到它所在的图集格，无法生成同步计划。图集帧表和素材目录可能不是同一轮的结果；"
+                    + "借用别人的素材时，来源动作必须一起同步（界面上会自动带上）。");
+            }
+
+            image.AtlasName = atlas!.AtlasName;
+            image.AtlasImagePath = atlas.ImagePath;
+            image.X = placed!.Frame!.X;
+            image.Y = placed.Frame.Y;
+            image.Width = placed.Frame.W;
+            image.Height = placed.Frame.H;
+            image.Rotated = placed.Rotated;
+            image.Trimmed = placed.Trimmed;
+            // 裁剪偏移是「这块内容原本在原图的哪儿」。没裁过就是 0，
+            // 原图尺寸退回这一格自己的尺寸，等价于「整张图就是这一格」。
+            image.TrimOriginX = placed.SpriteSourceSize?.X ?? 0;
+            image.TrimOriginY = placed.SpriteSourceSize?.Y ?? 0;
+            image.SourceImageWidth = placed.SourceSize?.W ?? placed.Frame.W;
+            image.SourceImageHeight = placed.SourceSize?.H ?? placed.Frame.H;
+            images.Add(image);
         }
 
         return images;
+    }
+
+    private static SequenceFrameSection? ResolveSectionByActionCode(
+        IReadOnlyDictionary<(string Code, int FormIndex), SequenceFrameSection> sectionByAction,
+        string actionCode) =>
+        SequenceActionCatalog.TryResolve(actionCode, out var definition, out var formIndex) &&
+        sectionByAction.TryGetValue((definition.Code, formIndex), out var section)
+            ? section
+            : null;
+
+    /// <summary>
+    /// 这张素材在「它归属的那张图集」里是第几格，以及那一格的矩形。
+    ///
+    /// 格子序号按**图集归属动作自己的素材列表**数（图集里只放它自己的图），
+    /// 自己的图和借来的图走的是同一套算法。
+    /// </summary>
+    private static bool TryResolveAtlasCell(
+        CharacterCard character,
+        SequenceSourceImageResolution resolution,
+        IReadOnlyDictionary<(string Code, int FormIndex), SequenceFrameSection> sectionByAction,
+        IReadOnlyDictionary<string, UnrealBridgeSequenceAtlasInput> atlases,
+        out UnrealBridgeSequenceAtlasInput? atlas,
+        out AtlasSequenceFrame? placed)
+    {
+        atlas = null;
+        placed = null;
+        if (!SequenceActionCatalog.TryResolve(resolution.OwnerActionCode, out var ownerDefinition, out var ownerFormIndex) ||
+            !atlases.TryGetValue(AtlasKey(ownerDefinition.Code, ownerFormIndex), out atlas) ||
+            !sectionByAction.TryGetValue((ownerDefinition.Code, ownerFormIndex), out var ownerSection))
+        {
+            return false;
+        }
+
+        var cellIndex = 0;
+        foreach (var own in SequenceActionFolderLayout
+            .ResolveSourceImagePlan(character, ownerSection.Action, ownerSection.Frames)
+            .Where(item => item.IsOwn))
+        {
+            cellIndex++;
+            if (!string.Equals(own.FilePath, resolution.FilePath, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            return atlas.FramesByOrdinal.TryGetValue(cellIndex, out placed) && placed.Frame is not null;
+        }
+
+        return false;
     }
 
     /// <summary>

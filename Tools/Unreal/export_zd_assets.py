@@ -1506,6 +1506,19 @@ def _is_export_texture_asset(asset):
     return "texture" in asset.get("assetClass", "").lower()
 
 
+def _is_redirector_asset(asset):
+    """资产注册表里的这一条是不是重定向器。
+
+    UObjectRedirector 没有暴露到 Python（unreal 模块里没有这个类，UE 5.8 实测），
+    只能按类名判 —— 走既有的 _asset_class，它已经把结构体里的内存地址剥掉了。
+    """
+    try:
+        class_text = _asset_class(asset)
+    except Exception:
+        class_text = ""
+    return _to_text(class_text).strip().lower() == "objectredirector"
+
+
 def _normalize_sequence_name(value):
     text = os.path.splitext(str(value or "").strip())[0]
     return text.replace("-", "_")
@@ -3597,7 +3610,11 @@ def _export():
                 include_only_on_disk_assets=False)
         except TypeError:
             found = registry.get_assets_by_path(unreal.Name(target_path), recursive)
-        found = [asset for asset in found if _is_top_level_asset(asset)]
+        # 重定向器不是资产，是改名留下的书签：它还指着旧路径，引用方可能正靠它解析。
+        # 把它报上去，工具箱会当成「多出来的历史素材」列成待删 —— 用户一勾就会把它删掉，
+        # 引用随即悬空（实测这条路径打断过 Misaka_AnimBP 的 Play Sequence 节点）。
+        # 所以这里直接不认它。
+        found = [asset for asset in found if _is_top_level_asset(asset) and not _is_redirector_asset(asset)]
         if material_scope and target_path != TEAM_SELECT_ROOT:
             found = [asset for asset in found if _include_material_scope_asset(asset, selected_codes)]
         elif sequence_scope:

@@ -7,9 +7,13 @@ using System.Text.Json;
 namespace CrossingVoidZDTool.Services.Atlas;
 
 /// <summary>
-/// 把「动作素材目录里的 PNG」翻译成图集工具的清单。
+/// 把「这个动作的帧实际用到的图片」翻译成图集工具的清单。
 ///
-/// **数据源是素材目录本身，不是序列清单** —— 这一点曾经做错过，记在这里免得改回去：
+/// 图片列表由调用方给（<see cref="SequenceActionFolderLayout.ResolveSourceImages"/>），
+/// 不在这里扫目录：帧可以复用别的动作目录里的同一张图，扫自己的目录会漏。
+/// 这里只负责按顺序编号、起精灵名、校验文件还在。
+///
+/// **数据源是「有哪几张图」，不是「这条序列有几格」** —— 这一点曾经做错过，记在这里免得改回去：
 ///
 /// 序列清单（<c>sequence.json</c>）回答的是「这条动画第几格放哪张图」，
 /// 它是**序列编排**，里面同一条路径可以被引用多次（复用）。
@@ -19,7 +23,7 @@ namespace CrossingVoidZDTool.Services.Atlas;
 /// 23 帧的序列在目录里只有 17 张图，却打出了 23 个格子 ——
 /// 6 张图白占地方，还把「素材」和「序列」两件事混成了一件。
 ///
-/// 现在的规则一句话：**目录里有几张 PNG，就打几个格子。**
+/// 现在的规则一句话：**这个动作的帧一共用到几张不同的 PNG，就打几个格子。**
 /// 好处是**零判断** —— 不去猜哪个是复用、要不要合并，也就没有判断失误的余地。
 /// 谁复用谁、序列怎么排，都是同步序列那一步的事，图集不掺和。
 ///
@@ -49,6 +53,10 @@ internal static class AtlasManifestWriter
     /// 枚举动作素材目录里的 PNG，按文件名升序。
     ///
     /// 不递归子目录：素材目录的约定是平铺的，跑进子目录会把别的东西也扫进来。
+    ///
+    /// **打包路径已经不靠它了**（改用 <see cref="SequenceActionFolderLayout.ResolveSourceImages"/>，
+    /// 帧可以跨目录复用）。它留着是给「这目录里有什么」这类独立查询用，
+    /// 例如 St5 页面的素材清单与诊断。
     /// </summary>
     public static IReadOnlyList<string> EnumerateSourceImages(string framesFolder)
     {
@@ -72,7 +80,10 @@ internal static class AtlasManifestWriter
     /// <param name="characterCode">角色代号，必须与 Unreal 角色目录名完全一致。</param>
     /// <param name="definition">动作定义（取规范代号用）。</param>
     /// <param name="formIndex">形态下标。</param>
-    /// <param name="sourceImagePaths">素材目录里的 PNG 绝对路径（<see cref="EnumerateSourceImages"/> 的产出）。</param>
+    /// <param name="sourceImagePaths">
+    /// 这一轮要打进图集的 PNG 绝对路径，顺序即格子序号。
+    /// 由 <see cref="SequenceActionFolderLayout.ResolveSourceImages"/> 按「帧实际用到的图」算出。
+    /// </param>
     /// <exception cref="InvalidOperationException">
     /// 一张图都没有时抛出。空图集是没有意义的产物，必须**当场报错**，
     /// 不能产出一张空图当成功。
@@ -90,8 +101,9 @@ internal static class AtlasManifestWriter
         if (sourceImagePaths.Count == 0)
         {
             throw new InvalidOperationException(
-                $"动作「{definition.Code}」的素材目录里没有任何 PNG，不能生成图集。"
-                + "请先在 St5 序列帧页导入帧素材。");
+                $"动作「{definition.Code}」的帧没有指向任何图片，不能生成图集。"
+                + "常见原因：这一帧是空白帧、或者引用的素材文件已经被删掉。"
+                + "请先在 St5 序列帧页确认这个动作的帧素材。");
         }
 
         var variantCode = SequenceActionCatalog.GetVariantCode(definition, formIndex);

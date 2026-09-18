@@ -133,6 +133,9 @@ internal static class SequenceFramePool
                 File.Delete(file);
             }
         }
+
+        // 删完之后一张不剩，说明这个动作的帧全在别人的目录里 —— 空目录留着只会误导人。
+        SequenceActionFolderLayout.RemoveFramesFolderIfEmpty(character, action);
     }
 
     /// <summary>

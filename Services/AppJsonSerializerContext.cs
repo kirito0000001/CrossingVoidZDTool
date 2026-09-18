@@ -31,6 +31,8 @@ namespace CrossingVoidZDTool.Services;
   [JsonSerializable(typeof(UnrealBridgeSequenceSyncPlan))]
   [JsonSerializable(typeof(UnrealBridgeSequenceSyncAction))]
   [JsonSerializable(typeof(UnrealBridgeSequenceSyncFrame))]
+  [JsonSerializable(typeof(UnrealBridgeSequenceContentFingerprints))]
+  [JsonSerializable(typeof(UnrealBridgeSequenceActionFingerprint))]
   [JsonSerializable(typeof(UnrealBridgeOperation))]
 [JsonSerializable(typeof(UnrealBridgeExecutionProgress))]
 [JsonSerializable(typeof(UnrealBridgeExecutionResult))]

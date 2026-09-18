@@ -199,7 +199,23 @@ internal sealed record UnrealBridgeSnapshotItem(
     /// 第几张图」算得出应有的精灵名，Unreal 侧从关键帧上读得到实际精灵名。
     /// 两侧对不上，这个动作就是没同步（或素材换过），必须重做。
     /// </summary>
-    string SpriteAssetName = "");
+    string SpriteAssetName = "",
+    /// <summary>
+    /// 序列帧这一格的图落在**哪张图集**里（图集资产名，例如 <c>Misaka_Death</c>）。
+    ///
+    /// 帧可以复用别的动作的图，那张图已经在来源动作的图集里了 —— 借用方不再重复打包，
+    /// 它的精灵直接指向来源图集的那一格。所以「这条序列用到哪些图集」是判定布局是否对齐的
+    /// 依据：全部是自己的图时就是自己的图集，借了别人的图就变成一组图集名。
+    /// </summary>
+    string SourceAtlasName = "",
+    /// <summary>
+    /// 这张图是不是本动作自己的（在它自己的素材目录里）。
+    ///
+    /// 不是自己的就说明是借来的：图已经在来源动作的图集里，这个动作**没有**自己的图集
+    /// （整条都借的时候），或者图集里只放自己那几张（部分是借的）。
+    /// 判定「图集算不算规范资产」就看这个标记，不需要下游再拿路径去反推归属。
+    /// </summary>
+    bool SourceAtlasIsOwn = false);
 
 internal sealed record UnrealBridgeChange(
     string StableId,

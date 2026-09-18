@@ -115,6 +115,12 @@ namespace CrossingVoidZDTool
                 _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(isSequenceSynchronization ? 5 : 3);
                 var latestToolboxSnapshot = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character);
                 var latestUnrealSnapshot = new UnrealBridgeSemanticSnapshotService().Build(latestCandidate);
+                // 序列：把「上次同步时记下的素材内容摘要」补进 Unreal 侧载荷，
+                // 和工具箱侧的当前值一比就知道素材内容有没有被换掉。
+                if (isSequenceSynchronization)
+                {
+                    latestUnrealSnapshot = UnrealBridgeSequenceFingerprintService.ApplyRecordedContent(character, latestUnrealSnapshot);
+                }
                 var latestAllowedModules = isSequenceSynchronization
                     ? new[] { UnrealBridgeModule.SequenceFrames }
                     : new[] { UnrealBridgeModule.BaseMaterials, UnrealBridgeModule.Voices };
@@ -285,6 +291,8 @@ namespace CrossingVoidZDTool
                     return;
                 }
 
+                // 序列这一路要留到同步完成之后写「素材内容指纹」，所以计划得提到这个作用域里。
+                UnrealBridgeSequenceSyncPlan? sequencePlan = null;
                 if (isSequenceSynchronization)
                 {
                     // 先把勾选动作的图集打出来。Unreal 侧要的是「一张贴图切 N 个精灵」，
@@ -303,7 +311,7 @@ namespace CrossingVoidZDTool
                         GetGlobalProgressCancellationToken());
                     AppendLog(LogKind.Info, $"[Sequence Atlas] character={character.Code} atlases={atlases.Count}");
                     var sequencePublishService = new UnrealBridgeSequencePublishService();
-                    var sequencePlan = sequencePublishService.BuildSequenceSyncPlan(character, projectPath, changes, atlases);
+                    sequencePlan = sequencePublishService.BuildSequenceSyncPlan(character, projectPath, changes, atlases);
                     if (sequencePublishService.SkippedActionCodes.Count > 0)
                     {
                         AppendLog(LogKind.Warning, $"[Sequence Plan Skipped] character={character.Code} actions={string.Join("、", sequencePublishService.SkippedActionCodes)}（工具箱侧没有序列帧数据）");
@@ -432,9 +440,26 @@ namespace CrossingVoidZDTool
 
                     // 序列同步后必须用最新 Unreal 快照重新计算差异，不能直接清空选择树；
                     // 否则只同步一个动作时，剩余动作也会被误判为“全部完成”。
+                    // 先把「这一轮成功同步的素材长什么样」记下来：复扫要和它比内容，
+                    // 记录晚一步的话刚同步好的动作会被自己判成「素材变了」。
+                    if (sequencePlan is not null)
+                    {
+                        var executedActions = sequencePlan.Actions
+                            .Where(action => succeededActionCodes.Contains(action.ActionCode, StringComparer.OrdinalIgnoreCase))
+                            .ToArray();
+                        if (executedActions.Length > 0)
+                        {
+                            UnrealBridgeSequenceFingerprintService.Save(character, executedActions, DateTimeOffset.Now);
+                            AppendLog(LogKind.Info,
+                                $"[Sequence Content] character={character.Code} 记录素材内容指纹 actions={executedActions.Length}");
+                        }
+                    }
+
                     var sequenceRefreshedCandidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.First(item =>
                         string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase));
-                    var sequenceRescanned = new UnrealBridgeSemanticSnapshotService().Build(sequenceRefreshedCandidate);
+                    var sequenceRescanned = UnrealBridgeSequenceFingerprintService.ApplyRecordedContent(
+                        character,
+                        new UnrealBridgeSemanticSnapshotService().Build(sequenceRefreshedCandidate));
                     var sequenceBaseline = new UnrealBridgeStateService().Load(character, projectPath);
                     // 只有真正执行成功的动作才允许刷新基线；失败的动作保留原有条目。
                     var executedActionStableIds = succeededActionCodes
@@ -748,6 +773,11 @@ namespace CrossingVoidZDTool
                         : new[] { UnrealBridgeModule.BaseMaterials, UnrealBridgeModule.Voices };
                     toolboxSnapshot = toolboxSnapshot with { Items = toolboxSnapshot.Items.Where(item => allowedModules.Contains(item.Module)).ToArray() };
                     unrealSnapshot = unrealSnapshot with { Items = unrealSnapshot.Items.Where(item => allowedModules.Contains(item.Module)).ToArray() };
+                    if (_workflowStepAfterPublishDetection == 5)
+                    {
+                        // 同上：序列检测要比「素材内容」，Unreal 侧用上次同步记下的摘要。
+                        unrealSnapshot = UnrealBridgeSequenceFingerprintService.ApplyRecordedContent(character, unrealSnapshot);
+                    }
                     return new UnrealBridgeDiffService().Compare(
                         toolboxSnapshot,
                         unrealSnapshot,

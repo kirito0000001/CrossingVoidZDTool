@@ -27,6 +27,7 @@ if (args.Length > 0 && string.Equals(args[0], "migrate-paths", StringComparison.
     return RunPortablePathMigration(args.Skip(1).ToArray());
 }
 
+
 var tests = new (string Name, Action Run)[]
 {
     ("BattleAvatar 固定槽位映射", BattleAvatarSlotsMapToFixedNames),
@@ -286,6 +287,14 @@ var tests = new (string Name, Action Run)[]
     ("已发布序列帧判为无差异并可建立基线", SequenceFramesAlreadyPublishedCountAsUnchanged),
     ("图集序列帧按精灵配对而不是贴图路径", AtlasFramesPairBySpriteInsteadOfTexture),
     ("刷新不会让缓存盖掉刚检测出的序列结果", RefreshKeepsFreshSequenceTreeOverCache),
+    ("复用别的动作目录里的帧也能打包并同步", ReusedFramesOutsideOwnFolderStillSync),
+    ("帧全部复用时不留空的素材目录", EmptyFramesFolderIsRemovedWhenEveryFrameIsReused),
+    ("借用的素材共享来源图集", BorrowedFramesShareTheSourceAtlas),
+    ("借用方遗留的重复图集进差异待删", StaleBorrowerAtlasShowsUpAsDeleteCandidate),
+    ("同名素材换内容能被检测出来", SequenceContentChangeIsDetectedThroughFingerprint),
+    ("整条重建只占一行", RebuildRowsCollapseIntoOneSummaryRow),
+    ("Python 脚本的 unreal 绑定名与引擎对过账", PythonBindingNamesAreVerifiedAgainstEngine),
+    ("序列同步单个动作失败不再拖垮整批", SequenceSyncIsolatesPerActionFailures),
     ("序列帧数量变化产生新增和删除", SequenceFrameCountChangesProduceAddAndDelete),
     ("序列帧区分工具箱更新和虚幻侧冲突", SequenceFrameEditsSeparateUpdateFromConflict),
     ("序列基线只提交本次执行的动作", SequenceBaselineCommitsOnlyExecutedActions),
@@ -9983,16 +9992,34 @@ static void SequenceSyncPlanFieldsAreReadByBridgeScript()
 {
     var script = File.ReadAllText(Path.Combine(
         Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"));
-    // 计划里新增的字段如果没有加进 _load 的归一化列表，Python 只会看到 PascalCase 键，
-    // action.get('camelCase') 会静默取到默认值。
-    foreach (var type in new[] { typeof(UnrealBridgeSequenceSyncAction), typeof(UnrealBridgeSequenceSyncFrame) })
+    // 计划在磁盘上是 **PascalCase**（CreateSprite…），脚本正文读的是 camelCase，
+    // 所以每个字段都必须先出现在 _load 的归一化列表里。
+    //
+    // **只检查「脚本里某处出现过这个名字」不够**：2026-09-18 就是这样漏掉了 createSprite ——
+    // 名字在正文里（`image.get('createSprite')`）出现了，却没进归一化列表，
+    // 于是 Python 读到的永远是 None，所有格子都被当成「借用」，
+    // 连自己该建的那几只也跑去来源目录找，报出「借用的精灵不存在：…/Material/Sub/Sub_Frame0_Sprite」。
+    var loadStart = script.IndexOf("def _load(path):", StringComparison.Ordinal);
+    AssertEqual(true, loadStart > 0);
+    var nextDefinition = script.IndexOf("\ndef ", loadStart + 1, StringComparison.Ordinal);
+    var loadBody = nextDefinition > 0 ? script[loadStart..nextDefinition] : script[loadStart..];
+    // 素材项也要一起查：图上「用哪张图集」是这一轮新加的信息，
+    // 漏读就会静默退化成「全都用本动作的图集」——正好是这个改动要修的东西。
+    foreach (var type in new[]
+             {
+                 typeof(UnrealBridgeSequenceSyncAction),
+                 typeof(UnrealBridgeSequenceSyncFrame),
+                 typeof(UnrealBridgeSequenceSyncSourceImage),
+             })
     {
         foreach (var property in type.GetProperties())
         {
             var camelCase = char.ToLowerInvariant(property.Name[0]) + property.Name[1..];
-            if (!script.Contains("'" + camelCase + "'", StringComparison.Ordinal))
+            if (!loadBody.Contains("'" + camelCase + "'", StringComparison.Ordinal))
             {
-                throw new InvalidOperationException($"同步脚本没有读取计划字段 {camelCase}。");
+                throw new InvalidOperationException(
+                    $"同步脚本的 _load 归一化列表里没有 {camelCase}。计划是 PascalCase，"
+                    + "不归一化的话 Python 读不到它，会静默用默认值。");
             }
         }
     }
@@ -10049,6 +10076,11 @@ static UnrealBridgeSnapshot BuildToolboxSequenceSnapshot(
     {
         var payload = "{\"actionCode\":\"" + actionCode + "\",\"durationFrames\":\"1\",\"index\":\"" +
             (ordinal + 1) + "\",\"isBlank\":\"false\",\"voiceFileName\":\"\"}";
+        // 帧条目要带「用哪张图集、用哪只精灵」：判定规范资产和逐帧核对都靠它。
+        // 这个辅助快照模拟的是「13 张图全是自己的」那种动作。
+        var definition = SequenceActionCatalog.Resolve(actionCode, out var formIndex);
+        var ownAtlas = AtlasManifestWriter.BuildAtlasName(characterCode, SequenceActionCatalog.GetVariantCode(definition, formIndex));
+        var ownSprite = SequenceActionCatalog.GetFrameSpriteName(definition, formIndex, ordinal, frameCount);
         items.Add(new UnrealBridgeSnapshotItem(
             SequenceFrameIdentity.BuildFrameStableId(actionCode, ordinal),
             actionId,
@@ -10056,10 +10088,14 @@ static UnrealBridgeSnapshot BuildToolboxSequenceSnapshot(
             $"{actionCode} 第 {ordinal + 1} 帧",
             $"TOOLBOX-{ordinal}",
             payload,
-            string.Empty,
+            // 给个各自不同的假素材路径：真实快照里每帧都有自己的 PNG，
+            // 而「新增按素材去重」靠 AssetPath 区分 —— 全空的话 13 帧会被折成 1 条。
+            $@"D:\test\{actionCode}\frame{ordinal}.png",
             SpriteAssetName: spriteNames is not null && ordinal < spriteNames.Length
                 ? spriteNames[ordinal]
-                : string.Empty));
+                : ownSprite,
+            SourceAtlasName: ownAtlas,
+            SourceAtlasIsOwn: true));
     }
 
     return new UnrealBridgeSnapshot(characterCode, items);
@@ -10542,6 +10578,525 @@ static void MigrationBaselineDoesNotFlipSequenceKinds()
             .OrderBy(value => value, StringComparer.Ordinal).ToArray());
 }
 
+static void SequenceSyncIsolatesPerActionFailures()
+{
+    // 2026-09-17：18 个动作一起同步，第 1 个成功、第 2 个抛异常，异常直接冒到顶层 ——
+    // 结果里只剩 Sk1 那一条，日志里也看不出是哪个动作（"module 'unreal' has no attribute
+    // 'ObjectRedirector'" 完全没提动作名）。排查只能靠用户回忆自己勾了哪几个。
+    //
+    // 现在一个动作炸掉要**就地记成一条失败项并继续**：协议和 C# 侧本来就支持「部分同步」
+    // （基线只刷新成功过的动作），缺的只是脚本这一层不把整批带走。
+    var script = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
+    var loopStart = script.IndexOf("for index, action in enumerate(actions):", StringComparison.Ordinal);
+    AssertEqual(true, loopStart > 0);
+    var window = string.Join("\n", script[loopStart..].Split('\n').Take(60));
+
+    AssertEqual(true, window.Contains("try:", StringComparison.Ordinal));
+    AssertEqual(true, window.Contains("except Exception as error:", StringComparison.Ordinal));
+    // 失败项必须点名动作，而且带上 traceback —— 否则又是「只报一句引擎报错」。
+    AssertEqual(true, window.Contains("action=%s failed", StringComparison.Ordinal));
+    AssertEqual(true, window.Contains("traceback.format_exc()", StringComparison.Ordinal));
+    AssertEqual(true, window.Contains("'stableId': code,", StringComparison.Ordinal));
+    AssertEqual(true, window.Contains("'succeeded': False,", StringComparison.Ordinal));
+    AssertEqual(true, window.Contains("continue", StringComparison.Ordinal));
+    // 成功那条路径不能被顺手改坏。
+    AssertEqual(true, window.Contains("'succeeded': True,", StringComparison.Ordinal));
+    // 循环里不该再出现裸的 _sync_action(action) —— 那正是原来会带走整批的写法。
+    // 注意要连着前一个换行一起比：只比 12 个空格的话，try 里面那行（16 个空格）
+    // 也contains 得进去，等于没查。
+    AssertEqual(false, window.Contains("\n            action_result = _sync_action(action)\n", StringComparison.Ordinal));
+}
+
+static void PythonBindingNamesAreVerifiedAgainstEngine()
+{
+    // 2026-09-17：同步整批序列时炸在 `module 'unreal' has no attribute 'ObjectRedirector'`。
+    // 那行是照着「UE 应该有这个类」写的，而 UObjectRedirector 从来没暴露到 Python，
+    // 异常还把整批同步打断了。`unreal.X` 想当然的代价太大，所以让它变成一次对账：
+    // 脚本里用到的每个名字都必须在 Tools/UnrealBridge/unreal_python_bindings.json 里，
+    // 那份清单由真引擎跑 probe_unreal_python_bindings.py 产出。
+    var root = Directory.GetCurrentDirectory();
+    var manifestPath = Path.Combine(root, "Tools", "UnrealBridge", "unreal_python_bindings.json");
+    AssertEqual(true, File.Exists(manifestPath));
+
+    using var document = JsonDocument.Parse(File.ReadAllText(manifestPath, Encoding.UTF8));
+    var manifest = document.RootElement;
+    AssertEqual(1, manifest.GetProperty("schemaVersion").GetInt32());
+    var verified = manifest.GetProperty("verifiedWith");
+    AssertEqual(true, verified.GetProperty("engine").GetString()!.Length > 0);
+    AssertEqual(true, verified.GetProperty("at").GetString()!.Length > 0);
+    // 记录「怎么验的」，下一个引擎版本要照着重跑。
+    AssertEqual(true, verified.GetProperty("method").GetString()!.Contains(
+        "probe_unreal_python_bindings.py", StringComparison.Ordinal));
+
+    var allowed = manifest.GetProperty("names").EnumerateArray()
+        .Select(item => item.GetString() ?? string.Empty)
+        .ToHashSet(StringComparer.Ordinal);
+
+    var pattern = new System.Text.RegularExpressions.Regex(@"unreal\.([A-Za-z_][A-Za-z0-9_]*)");
+    var scripts = Directory
+        .EnumerateFiles(Path.Combine(root, "Tools"), "*.py", SearchOption.AllDirectories)
+        .Where(path => !path.Contains("__pycache__", StringComparison.OrdinalIgnoreCase))
+        .ToArray();
+    AssertEqual(true, scripts.Length > 0);
+
+    var unknown = new List<string>();
+    foreach (var script in scripts)
+    {
+        var text = File.ReadAllText(script, Encoding.UTF8);
+        foreach (System.Text.RegularExpressions.Match match in pattern.Matches(text))
+        {
+            var name = match.Groups[1].Value;
+            if (!allowed.Contains(name))
+            {
+                unknown.Add($"{Path.GetFileName(script)} → unreal.{name}");
+            }
+        }
+    }
+
+    if (unknown.Count > 0)
+    {
+        throw new InvalidOperationException(
+            "脚本里出现未对账的 unreal 名字。重跑 Tools/UnrealBridge/probe_unreal_python_bindings.py，"
+            + "确认引擎真的有这些名字，再把结果补进 unreal_python_bindings.json：\n"
+            + string.Join("\n", unknown.Distinct(StringComparer.Ordinal)));
+    }
+}
+
+static void BorrowedFramesShareTheSourceAtlas()
+{
+    // 借来的素材已经在来源动作的图集里了，不该再打一份复制品。
+    // 这条用例钉住三件事：素材计划认得出「图集是谁的」、计划会连带来源动作一起同步、
+    // 工程里遗留的那张重复图集会进差异列表的待删。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var service = new SequenceFrameService();
+        var actions = SequenceFrameService.BuildActions(new CharacterSkillsData());
+        var death = actions.First(item => string.Equals(item.Code, "Death", StringComparison.OrdinalIgnoreCase));
+        var flyStart = actions.First(item => string.Equals(item.Code, "FlyStart", StringComparison.OrdinalIgnoreCase));
+
+        var deathFrames = SequenceActionFolderLayout.GetFramesFolderPath(character, death);
+        Directory.CreateDirectory(deathFrames);
+        var shared = Path.Combine(deathFrames, "Misaka-Death-shared.png");
+        WriteSolidImage(shared, Color.FromArgb(30, 40, 50),
+            SequenceFrameService.RequiredWidth, SequenceFrameService.RequiredHeight);
+
+        var deathManifest = SequenceManifestStore.Create(death);
+        deathManifest.Frames.Add(new SequenceFrameManifestEntry
+        {
+            RelativePath = SequenceActionFolderLayout.NormalizeRelativePath(
+                Path.GetRelativePath(
+                    SequenceActionFolderLayout.GetActionFolderPath(character, death), shared)),
+        });
+        SequenceManifestStore.Save(character, death, deathManifest);
+
+        var flyStartManifest = SequenceManifestStore.Create(flyStart);
+        flyStartManifest.Frames.Add(new SequenceFrameManifestEntry
+        {
+            RelativePath = SequenceActionFolderLayout.NormalizeRelativePath(
+                Path.GetRelativePath(
+                    SequenceActionFolderLayout.GetActionFolderPath(character, flyStart), shared)),
+        });
+        SequenceManifestStore.Save(character, flyStart, flyStartManifest);
+
+        var flyStartSection = service
+            .LoadSections(character, new CharacterSkillsData())
+            .Single(item => string.Equals(item.Action.Code, "FlyStart", StringComparison.OrdinalIgnoreCase));
+        var plan = SequenceActionFolderLayout.ResolveSourceImagePlan(
+            character, flyStartSection.Action, flyStartSection.Frames);
+        AssertEqual(1, plan.Count);
+        AssertEqual(false, plan[0].IsOwn);
+        AssertEqual("Death", plan[0].OwnerActionCode);
+        AssertEqual("Misaka_Death", plan[0].AtlasName);
+
+        // 只勾借用方时，计划里必须**连带**出现来源动作，而且来源排在前面。
+        var change = CreateSequenceDeleteChange("FlyStart", "/Game/GameActor2D/Misaka/Material/FlyStart/FlyStart_Flipbook.FlyStart_Flipbook");
+        var syncPlan = new UnrealBridgeSequencePublishService().BuildSequenceSyncPlan(
+            character,
+            @"C:\Unreal\CrossingVoid.uproject",
+            [change],
+            BuildTestAtlas("Death", 1));
+        AssertSequence(["Death", "FlyStart"], syncPlan.Actions.Select(item => item.ActionCode).ToArray());
+        var borrower = syncPlan.Actions.Single(item => item.ActionCode == "FlyStart");
+        AssertEqual(1, borrower.SourceImages.Count);
+        AssertEqual("Misaka_Death", borrower.SourceImages[0].AtlasName);
+        // 借来的图连精灵一起借：用来源动作那只，自己一只都不建。
+        AssertEqual(false, borrower.SourceImages[0].CreateSprite);
+        AssertEqual("Death_Frame0_Sprite", borrower.SourceImages[0].SpriteAssetName);
+        AssertEqual(
+            "/Game/GameActor2D/Misaka/Material/Death",
+            borrower.SourceImages[0].SpriteMaterialFolder);
+        // 整条都借用 → 借用方没有自己的图集。
+        AssertEqual(true, borrower.Atlas is null);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void StaleBorrowerAtlasShowsUpAsDeleteCandidate()
+{
+    // 借用方不再有自己的图集之后，工程里那张遗留的 Misaka_FlyStart 就是「多出来的资产」，
+    // 必须出现在差异列表里让人处理 —— 而不是被当成规范资产永远留着。
+    var actionId = SequenceFrameIdentity.BuildActionStableId("FlyStart");
+    var layout = SequenceFrameIdentity.BuildFrameLayout(["Misaka_Death"]);
+    var actionPayload = SequenceFrameIdentity.BuildActionPayload("FlyStart", 12, layout, 1, 0);
+    var atlasPath = "/Game/GameActor2D/Misaka/Material/Death/Misaka_Death.Misaka_Death";
+    var toolbox = new UnrealBridgeSnapshot("Misaka", [
+        new UnrealBridgeSnapshotItem(
+            actionId, $"module:{UnrealBridgeModule.SequenceFrames}", UnrealBridgeModule.SequenceFrames,
+            "击飞", "TOOLBOX-ACTION", actionPayload, string.Empty),
+        new UnrealBridgeSnapshotItem(
+            SequenceFrameIdentity.BuildFrameStableId("FlyStart", 0), actionId,
+            UnrealBridgeModule.SequenceFrames, "击飞 第 1 帧", "TOOLBOX-0",
+            "{\"actionCode\":\"FlyStart\",\"durationFrames\":\"1\",\"index\":\"1\",\"isBlank\":\"false\",\"voiceFileName\":\"\"}",
+            @"D:\project\Completed\Misaka\ZDMaterial\Death\Frames\shared.png",
+            SpriteAssetName: "FlyStart_Frame0_Sprite",
+            SourceAtlasName: "Misaka_Death",
+            SourceAtlasIsOwn: false),
+    ]);
+    var unreal = new UnrealBridgeSnapshot("Misaka", [
+        new UnrealBridgeSnapshotItem(
+            actionId, $"module:{UnrealBridgeModule.SequenceFrames}", UnrealBridgeModule.SequenceFrames,
+            "击飞", "UNREAL-ACTION", actionPayload, string.Empty,
+            "/Game/GameActor2D/Misaka/Misaka_AnimMaps.Misaka_AnimMaps"),
+        new UnrealBridgeSnapshotItem(
+            SequenceFrameIdentity.BuildFrameStableId("FlyStart", 0), actionId,
+            UnrealBridgeModule.SequenceFrames, "击飞 第 1 帧", "UNREAL-0",
+            $"FlyStart\u001f1\u001f1\u001fFalse", string.Empty, atlasPath,
+            SpriteAssetName: "FlyStart_Frame0_Sprite"),
+    ]);
+    unreal = AppendOwnedSequenceAssets(unreal, "FlyStart", [
+        "/Game/GameActor2D/Misaka/Material/FlyStart/Misaka_FlyStart.Misaka_FlyStart",
+        "/Game/GameActor2D/Misaka/Material/FlyStart/FlyStart_Flipbook.FlyStart_Flipbook",
+        "/Game/GameActor2D/Misaka/Material/FlyStart/FlyStart_Frame0_Sprite.FlyStart_Frame0_Sprite",
+    ]);
+
+    var changes = new UnrealBridgeDiffService()
+        .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, null)
+        .ToArray();
+
+    // 帧本身是同步好的（精灵名一致）。
+    AssertEqual(
+        UnrealBridgeChangeKind.Unchanged,
+        changes.Single(item => item.StableId == SequenceFrameIdentity.BuildFrameStableId("FlyStart", 0)).Kind);
+    var deletes = changes
+        .Where(item => item.Kind == UnrealBridgeChangeKind.DeleteCandidate)
+        .Select(item => item.DisplayName)
+        .ToArray();
+    // 借用之后这个动作自己既没有图集也没有精灵：遗留的重复图集**和**重复精灵都该列出来。
+    AssertSequence(["FlyStart · FlyStart_Frame0_Sprite", "FlyStart · Misaka_FlyStart"], deletes);
+}
+
+static void RebuildRowsCollapseIntoOneSummaryRow()
+{
+    // 一个动作重建时，逐帧的「第 N 帧（旧）/（新）」会摊出几十行 —— 31 帧的终结技
+    // 就是六十多行，翻都翻不完，而动作行上已经写着「删除 N / 新增 M」。
+    // 现在帧行收成一行「重建整条（N 帧）」，按文件删的那些（动作占用的资产）照旧一行一个。
+    var toolbox = BuildToolboxSequenceSnapshot("Misaka", "Sk1", 13, atlasName: "Misaka_Sk1");
+    const string material = "/Game/GameActor2D/Misaka/Material/Sk1";
+    var unreal = AppendOwnedSequenceAssets(
+        BuildUnrealSequenceSnapshot("Misaka", "Sk1",
+            Enumerable.Range(0, 13)
+                .Select(ordinal => $"{material}/Sk1_Frame{ordinal:00}.Sk1_Frame{ordinal:00}")
+                .ToArray()),
+        "Sk1",
+        [$"{material}/Sk1_Frame00.Sk1_Frame00"]);
+
+    var changes = new UnrealBridgeDiffService()
+        .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, null)
+        .ToArray();
+    var roots = UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
+        changes, UnrealBridgePublishSupportPolicy.CanExecute);
+    var root = roots.Single();
+
+    // 三行：整条重建 + 图集贴图（布局换代要重新导一张）+ 那条要按文件删的旧资产。
+    AssertEqual(3, root.Children.Count);
+    AssertEqual("重建整条（13 帧）", root.Children[0].DisplayName);
+    AssertEqual(true, root.Children[0].IsSelectable);
+    AssertEqual("图集贴图", root.Children[1].DisplayName);
+    AssertEqual("Sk1 · Sk1_Frame00", root.Children[2].DisplayName);
+    // 计数照旧按明细算，用户还是能看到「删除 N / 新增 M」。
+    // 13 帧各一条新增 + 图集贴图一条。
+    AssertEqual(14, root.AddCount);
+    AssertEqual(1, root.DeleteCount);
+}
+
+static void SequenceContentChangeIsDetectedThroughFingerprint()
+{
+    // 同名图被换掉内容，现在也能发现：同步成功后把源图哈希记进角色目录，
+    // 下次检测拿当前值和记录值比 —— 对不上就把那个动作判成需要重建。
+    // （两侧帧哈希天生不可比：工具箱是「源 PNG + JSON 载荷」，Unreal 是「图集 PNG + 分隔符载荷」。）
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var service = new SequenceFrameService();
+        var action = SequenceFrameService.BuildActions(new CharacterSkillsData())
+            .First(item => string.Equals(item.Code, "Click", StringComparison.OrdinalIgnoreCase));
+        var framesFolder = SequenceActionFolderLayout.GetFramesFolderPath(character, action);
+        Directory.CreateDirectory(framesFolder);
+        var imagePath = Path.Combine(framesFolder, "Misaka-Click-0001.png");
+        WriteSolidImage(imagePath, Color.FromArgb(10, 20, 30),
+            SequenceFrameService.RequiredWidth, SequenceFrameService.RequiredHeight);
+        var sourceFrame = Path.Combine(root, "source.png");
+        WriteSolidImage(sourceFrame, Color.FromArgb(10, 20, 30),
+            SequenceFrameService.RequiredWidth, SequenceFrameService.RequiredHeight);
+        service.ImportFrames(character, action, [sourceFrame]);
+
+        var section = service.LoadSections(character, new CharacterSkillsData())
+            .Single(item => string.Equals(item.Action.Code, "Click", StringComparison.OrdinalIgnoreCase));
+        AssertEqual(1, section.Frames.Count);
+
+        // 1) 还没有任何记录：工具箱也不带 content 字段（否则每个动作都会被判成变化）。
+        var toolboxWithoutRecord = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character);
+        AssertEqual(
+            false,
+            toolboxWithoutRecord.Items
+                .Where(item => SequenceFrameIdentity.IsActionStableId(item.StableId))
+                .Any(item => item.PayloadJson.Contains("\"content\"", StringComparison.Ordinal)));
+
+        // 2) 模拟一次成功同步：把这一轮用到的素材记下来。
+        UnrealBridgeSequenceFingerprintService.Save(
+            character,
+            [
+                new UnrealBridgeSequenceSyncAction
+                {
+                    ActionCode = "Click",
+                    SourceImages =
+                    [
+                        new UnrealBridgeSequenceSyncSourceImage { FilePath = section.Frames[0].FilePath },
+                    ],
+                },
+            ],
+            DateTimeOffset.Now);
+
+        var toolbox = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character);
+        // 只有**有记录**的动作才带 content 字段：Click 有记录，其余动作没有。
+        AssertEqual(
+            true,
+            toolbox.Items
+                .Where(item => string.Equals(
+                    item.StableId, SequenceFrameIdentity.BuildActionStableId("Click"), StringComparison.OrdinalIgnoreCase))
+                .All(item => item.PayloadJson.Contains("\"content\"", StringComparison.Ordinal)));
+
+        // 3) 素材没变 → 无差异。Unreal 侧按同步台的做法补上「记录下来的摘要」。
+        var unchanged = new UnrealBridgeDiffService()
+            .Compare(toolbox, ApplyRecorded(character, toolbox), UnrealBridgeDirection.PublishToUnreal, null);
+        AssertEqual(
+            UnrealBridgeChangeKind.Unchanged,
+            unchanged.Single(item =>
+                item.StableId == SequenceFrameIdentity.BuildActionStableId("Click")).Kind);
+
+        // 4) 同名图换内容 → 这个动作必须被判成需要重建。
+        WriteSolidImage(section.Frames[0].FilePath, Color.FromArgb(200, 10, 30),
+            SequenceFrameService.RequiredWidth, SequenceFrameService.RequiredHeight);
+        var changedToolbox = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character);
+        var changed = new UnrealBridgeDiffService()
+            .Compare(changedToolbox, ApplyRecorded(character, changedToolbox), UnrealBridgeDirection.PublishToUnreal, null)
+            .Where(item => item.StableId == SequenceFrameIdentity.BuildActionStableId("Click"))
+            .ToArray();
+        AssertEqual(
+            UnrealBridgeChangeKind.Updated,
+            changed.Single().Kind);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+
+    // 把工具箱快照当成「Unreal 侧报上来的样子」：去掉 content 字段，再按同步台的流程
+    // 用记录值补上 —— 这正是 MainWindow 里那两步。
+    static UnrealBridgeSnapshot ApplyRecorded(CharacterCard character, UnrealBridgeSnapshot toolboxSnapshot)
+    {
+        var items = toolboxSnapshot.Items
+            .Select(item =>
+            {
+                if (!SequenceFrameIdentity.IsActionStableId(item.StableId))
+                {
+                    return item;
+                }
+
+                // 真实流程里 Unreal 侧的载荷是语义快照自己拼的（没有 content 字段），
+                // 哈希也是那一刻算的 —— 这里照着做，否则「改载荷不重算哈希」会
+                // 让两侧永远不相等。
+                var payload = StripContentField(item.PayloadJson);
+                return item with
+                {
+                    PayloadJson = payload,
+                    ContentHash = Convert.ToHexString(
+                        System.Security.Cryptography.SHA256.HashData(Encoding.UTF8.GetBytes(payload))),
+                };
+            })
+            .ToArray();
+        return UnrealBridgeSequenceFingerprintService.ApplyRecordedContent(
+            character, toolboxSnapshot with { Items = items });
+    }
+
+    static string StripContentField(string payload)
+    {
+        var marker = payload.IndexOf(",\"content\"", StringComparison.Ordinal);
+        if (marker < 0)
+        {
+            return payload;
+        }
+
+        var end = payload.IndexOf('}', marker);
+        return end < 0 ? payload : payload.Remove(marker, end - marker);
+    }
+}
+
+static void EmptyFramesFolderIsRemovedWhenEveryFrameIsReused()
+{
+    // 帧整条复用别的动作时（Misaka 的 FlyStart/FlyDown/Flying 借 Death 那张图），
+    // 这个动作一张自己的素材都没有 —— `Frames` 目录建出来之后永远空着。
+    // 空目录没有含义，却会让人以为「这里漏导了素材」，跑回来手工补一遍。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var service = new SequenceFrameService();
+        var actions = SequenceFrameService.BuildActions(new CharacterSkillsData());
+        var death = actions.First(item => string.Equals(item.Code, "Death", StringComparison.OrdinalIgnoreCase));
+        var flyStart = actions.First(item => string.Equals(item.Code, "FlyStart", StringComparison.OrdinalIgnoreCase));
+
+        var deathFrames = SequenceActionFolderLayout.GetFramesFolderPath(character, death);
+        Directory.CreateDirectory(deathFrames);
+        var shared = Path.Combine(deathFrames, "Misaka-Death-shared.png");
+        WriteSolidImage(shared, Color.FromArgb(30, 40, 50),
+            SequenceFrameService.RequiredWidth, SequenceFrameService.RequiredHeight);
+
+        var manifest = SequenceManifestStore.Create(flyStart);
+        manifest.Frames.Add(new SequenceFrameManifestEntry
+        {
+            RelativePath = SequenceActionFolderLayout.NormalizeRelativePath(
+                Path.GetRelativePath(
+                    SequenceActionFolderLayout.GetActionFolderPath(character, flyStart), shared)),
+        });
+        SequenceManifestStore.Save(character, flyStart, manifest);
+
+        var flyStartFrames = SequenceActionFolderLayout.GetFramesFolderPath(character, flyStart);
+        // 1) 保存清单不该再顺手建一个空目录出来。
+        AssertEqual(false, Directory.Exists(flyStartFrames));
+
+        // 2) 历史遗留的空目录：只要这个动作被读到就该收掉（升级后不用跑迁移脚本）。
+        Directory.CreateDirectory(flyStartFrames);
+        var sections = service.LoadSections(character, new CharacterSkillsData());
+        AssertEqual(false, Directory.Exists(flyStartFrames));
+        AssertEqual(
+            1,
+            sections.Single(item => string.Equals(item.Action.Code, "FlyStart", StringComparison.OrdinalIgnoreCase))
+                .Frames.Count);
+
+        // 3) 自己目录里有图的动作不受影响：目录和文件都还在。
+        AssertEqual(true, Directory.Exists(deathFrames));
+        AssertEqual(1, Directory.GetFiles(deathFrames, "*.png").Length);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void ReusedFramesOutsideOwnFolderStillSync()
+{
+    // 帧可以复用别的动作已经收进来的同一张图（SequenceFramePool.ImportSource 就是这么写的，
+    // 清单里记成 `../Death/Frames/xxx.png`）。Misaka 实测有 23 帧这样：Death 借 Land 的、
+    // Ko 借 Victory 的、FlyStart/FlyDown/Flying 整个借 Death 的。
+    //
+    // 打包图集时如果只数「自己的素材目录里有哪些 PNG」，这些动作要么报
+    // 「素材目录里没有任何 PNG」（FlyStart 就是），要么在生成计划时报
+    // 「帧素材不在本动作的图集里」—— 同一个根因的两个出口。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var service = new SequenceFrameService();
+        var actions = SequenceFrameService.BuildActions(new CharacterSkillsData());
+        var death = actions.First(item => string.Equals(item.Code, "Death", StringComparison.OrdinalIgnoreCase));
+        var flyStart = actions.First(item => string.Equals(item.Code, "FlyStart", StringComparison.OrdinalIgnoreCase));
+
+        // Death 目录里先有一张图。
+        var deathFramesFolder = SequenceActionFolderLayout.GetFramesFolderPath(character, death);
+        Directory.CreateDirectory(deathFramesFolder);
+        var sharedImage = Path.Combine(deathFramesFolder, "Misaka-Death-shared.png");
+        WriteSolidImage(sharedImage, Color.FromArgb(30, 40, 50),
+            SequenceFrameService.RequiredWidth, SequenceFrameService.RequiredHeight);
+        // 这张图得是 Death 自己的帧（图集里真有这一格），FlyStart 才借得到。
+        var deathManifest = SequenceManifestStore.Create(death);
+        deathManifest.Frames.Add(new SequenceFrameManifestEntry
+        {
+            RelativePath = SequenceActionFolderLayout.NormalizeRelativePath(
+                Path.GetRelativePath(
+                    SequenceActionFolderLayout.GetActionFolderPath(character, death), sharedImage)),
+        });
+        SequenceManifestStore.Save(character, death, deathManifest);
+
+        // FlyStart 一帧都没有自己的图，整条复用 Death 那张 —— 和真实数据一致。
+        var flyStartManifest = SequenceManifestStore.Create(flyStart);
+        flyStartManifest.Fps = 12;
+        flyStartManifest.Frames.Add(new SequenceFrameManifestEntry
+        {
+            RelativePath = SequenceActionFolderLayout.NormalizeRelativePath(
+                Path.GetRelativePath(
+                    SequenceActionFolderLayout.GetActionFolderPath(character, flyStart), sharedImage)),
+            DurationFrames = 1,
+        });
+        SequenceManifestStore.Save(character, flyStart, flyStartManifest);
+
+        var section = new SequenceFrameService()
+            .LoadSections(character, new CharacterSkillsService().Load(character))
+            .Single(item => string.Equals(item.Action.Code, "FlyStart", StringComparison.OrdinalIgnoreCase));
+        AssertEqual(1, section.Frames.Count);
+        // 帧指向的是 Death 那张图，不是自己的目录。
+        AssertEqual(
+            true,
+            section.Frames[0].FilePath.EndsWith(@"Death\Frames\Misaka-Death-shared.png", StringComparison.OrdinalIgnoreCase));
+
+        var sources = SequenceActionFolderLayout.ResolveSourceImages(section.Frames);
+        AssertEqual(1, sources.Count);
+        AssertEqual(
+            true,
+            sources[0].EndsWith(@"Death\Frames\Misaka-Death-shared.png", StringComparison.OrdinalIgnoreCase));
+
+        // 生成计划必须成功：那张图**借用自 Death**，所以这一批要带上 Death 的图集
+        // （借用方不再重复打包，它的精灵指向来源图集的那一格）。
+        var change = CreateSequenceDeleteChange("FlyStart", "/Game/GameActor2D/Misaka/Material/FlyStart/Old.Old");
+        var plan = new UnrealBridgeSequencePublishService().BuildSequenceSyncPlan(
+            character,
+            @"C:\Unreal\CrossingVoid.uproject",
+            [change],
+            BuildTestAtlas("Death", 1));
+
+        // 来源动作会被连带同步，而且排在借用方前面。
+        AssertSequence(["Death", "FlyStart"], plan.Actions.Select(item => item.ActionCode).ToArray());
+        var action = plan.Actions.Single(item => item.ActionCode == "FlyStart");
+        AssertEqual("FlyStart", action.ActionCode);
+        AssertEqual(1, action.SourceImages.Count);
+        AssertEqual(
+            true,
+            action.SourceImages[0].FilePath.EndsWith(
+                @"Death\Frames\Misaka-Death-shared.png", StringComparison.OrdinalIgnoreCase));
+        // 用的是来源动作的图集，不是自己打的。
+        AssertEqual("Misaka_Death", action.SourceImages[0].AtlasName);
+        // 精灵也一起借：用 Death 的那只，FlyStart 自己一只都不建。
+        AssertEqual(false, action.SourceImages[0].CreateSprite);
+        AssertEqual("Death_Frame0_Sprite", action.SourceImages[0].SpriteAssetName);
+        AssertEqual(1, action.Frames.Single().SourceImageIndex);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static (CharacterCard Character, string Root) CreateSequenceCharacterWithFrames(string actionCode, int frameCount)
 {
     var root = CreateTemporaryTestFolder();
@@ -10638,10 +11193,17 @@ static void SequencePlanCarriesSelectedStaleAssetPaths()
         // 用户勾选的待删资产必须原样进入计划：Python 端按资产名 token 猜测，
         // 既漏删（历史命名不含动作 token）也误删（规范目录里没勾的资产）。
         const string material = "/Game/GameActor2D/Misaka/Material/Click";
+        // 混进一条「帧级待删」——图集时代它的 Unreal 路径指向的是整条动作共用的图集，
+        // 它不是要删的文件，绝不能进待删列表（否则会去删一张规范图集）。
+        var frameRow = CreateSequenceDeleteChange("Click", $"{material}/Misaka_Click.Misaka_Click") with
+        {
+            StableId = $"{SequenceFrameIdentity.BuildFrameStableId("Click", 0)}:delete",
+        };
         var selected = new[]
         {
             CreateSequenceDeleteChange("Click", $"{material}/Origin_Misaka_Click_1.Origin_Misaka_Click_1"),
-            CreateSequenceDeleteChange("Click", $"{material}/Frame_01.Frame_01")
+            CreateSequenceDeleteChange("Click", $"{material}/Frame_01.Frame_01"),
+            frameRow,
         };
 
         var plan = new UnrealBridgeSequencePublishService()
@@ -10650,7 +11212,11 @@ static void SequencePlanCarriesSelectedStaleAssetPaths()
         var action = plan.Actions.Single();
         AssertEqual(true, action.HasStaleAssetSelection);
         AssertSequence(
-            selected.Select(change => change.UnrealItem!.SourceObjectPath).OrderBy(v => v, StringComparer.Ordinal).ToArray(),
+            selected
+                .Where(change => SequenceFrameIdentity.IsOwnedAssetStableId(change.StableId))
+                .Select(change => change.UnrealItem!.SourceObjectPath)
+                .OrderBy(v => v, StringComparer.Ordinal)
+                .ToArray(),
             action.StaleAssetObjectPaths.OrderBy(v => v, StringComparer.Ordinal).ToArray());
 
         // Frame_01 的资产名里不含 "click"，token 猜测永远删不掉它。
@@ -11262,7 +11828,15 @@ static void OrphanSequencesAreDetachedNotDeleted()
     var caseScript = File.ReadAllText(Path.Combine(
         Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
     AssertEqual(true, caseScript.Contains("_fixup_redirectors"));
-    AssertEqual(true, caseScript.Contains("fixup_referencers"));
+    // 解引用走的是 EditorAssetLibrary.consolidate_assets。
+    // AssetTools.fixup_referencers 在 UE 5.8 的 Python 里**不存在**（实测 hasattr 为假）；
+    // 更致命的是 isinstance(obj, unreal.ObjectRedirector) 也不成立 ——
+    // UObjectRedirector 没暴露到 Python，那一行直接抛 AttributeError 把整批同步打断
+    // （用户看到 "module 'unreal' has no attribute 'ObjectRedirector'"）。
+    AssertEqual(true, caseScript.Contains("consolidate_assets"));
+    AssertEqual(true, caseScript.Contains("def _is_redirector"));
+    AssertEqual(false, caseScript.Contains("isinstance(obj, unreal.ObjectRedirector)"));
+    AssertEqual(false, caseScript.Contains("tools.fixup_referencers"));
     // 修复必须发生在两次改名之后，否则中间名仍会被记下来。
     var secondRename = caseScript.IndexOf("_rename_asset(temporary_package, target_package", StringComparison.Ordinal);
     var fixupCall = caseScript.IndexOf("_fixup_redirectors([package, temporary_package]", StringComparison.Ordinal);
@@ -11289,6 +11863,10 @@ static void OrphanSequencesAreDetachedNotDeleted()
     AssertEqual(true, exportScript.Contains("_orphan_animation_sequences"));
     AssertEqual(true, exportScript.Contains("scan_animation_source"));
     AssertEqual(true, exportScript.Contains("orphanSequences"));
+    // 重定向器不是资产，是改名留下的书签：报上去会被当成「多出来的历史素材」列成待删，
+    // 用户一勾就把它删了，引用随即悬空。导出侧直接不认它。
+    AssertEqual(true, exportScript.Contains("_is_redirector_asset"));
+    AssertEqual(true, exportScript.Contains("not _is_redirector_asset(asset)"));
 
     // C++ 侧解绑不能顺手删资产。
     var bridge = File.ReadAllText(ResolveZdBridgeSourcePath(), Encoding.UTF8);
@@ -11469,6 +12047,11 @@ static int RunUnrealSyncSmoke(string[] args)
                 }
 
                 var unrealSnapshot = new UnrealBridgeSemanticSnapshotService().Build(candidate);
+                if (modules.Contains(UnrealBridgeModule.SequenceFrames))
+                {
+                    // 和同步台一样：序列要比「素材内容」，Unreal 侧用上次同步记下的摘要。
+                    unrealSnapshot = UnrealBridgeSequenceFingerprintService.ApplyRecordedContent(character, unrealSnapshot);
+                }
                 var left = toolboxSnapshot with { Items = toolboxSnapshot.Items.Where(item => modules.Contains(item.Module)).ToArray() };
                 var right = unrealSnapshot with { Items = unrealSnapshot.Items.Where(item => modules.Contains(item.Module)).ToArray() };
                 var changes = new UnrealBridgeDiffService()
@@ -11724,10 +12307,12 @@ static void AtlasManifestFollowsMaterialFolderNotSequence()
     //   但素材目录里其实只有 17 张 PNG。
     //   结果图集打出 23 个格子 —— 6 张图白占地方，还让 Unreal 侧多建了 6 对资产。
     //
-    // 正确规则：**素材目录里有几张 PNG，就打几个格子。**
-    // 序列怎么排、谁复用谁，是同步序列那一步的事，图集不掺和。
-    // 这样做还有个好处：**零判断**。不去猜哪个是复用、要不要合并，
-    // 也就没有判断失误的余地 —— 而按清单推算，一旦清单漏引用了某张图就会漏打。
+    // 正确规则：**有几张不同的图，就打几个格子。**（帧位不是图，复用位置不是新图。）
+    //
+    // 数据源在 2026-09-17 又修正过一次：不再扫「动作自己的素材目录」，
+    // 而是数「这个动作的帧实际引用了哪些文件」—— 帧可以复用别的动作目录里的同一张图
+    // （清单里是 ../Death/Frames/xxx.png），只看自己的目录会把这类动作扫成 0 张。
+    // 这条用例直接喂图片列表，钉住的是「同源图不重复出格」这一层。
     var actionFolder = CreateTemporaryTestFolder();
     try
     {
@@ -11833,8 +12418,9 @@ static void AtlasManifestRejectsIncompleteOrEmptyActions()
         var failure = AssertThrows(() => AtlasManifestWriter.Build("Misaka", definition, formIndex, []));
         AssertEqual(true, failure.Message.Contains("Click", StringComparison.Ordinal));
 
-        // 4) 空清单也要点名动作，文案不能是一句无从下手的「失败」
-        AssertEqual(true, failure.Message.Contains("PNG", StringComparison.Ordinal));
+        // 4) 空清单要给得出下一步：现在图集收的是「这些帧实际用到的图」，
+        //    所以「一张图都没有」的出口是空白帧或素材被删，文案要指过去。
+        AssertEqual(true, failure.Message.Contains("帧", StringComparison.Ordinal));
 
         // 5) 兜底：清单里有路径、但文件已经不在（模拟枚举后被人删掉）
         var ghost = WriteAtlasTestImage(actionFolder, "ghost.png");

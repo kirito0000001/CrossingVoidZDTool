@@ -39,7 +39,9 @@ internal sealed class UnrealBridgeToolboxSnapshotService
         AddBaseMaterials(items, character, baseMaterialSections, fileIdentities);
         var skills = new CharacterSkillsService().Load(character);
         AddSkills(items, character, skills);
-        AddSequenceFrames(items, character, skills);
+        // 素材内容指纹：上次同步成功时这些源图长什么样。有记录才带 content 字段，
+        // 否则每个动作都会因为「一边有、一边没有」被判成有变化。
+        AddSequenceFrames(items, character, skills, UnrealBridgeSequenceFingerprintService.Load(character));
         AddBuffs(items, character);
         AddVoices(items, character, voiceSections, fileIdentities);
         return new UnrealBridgeSnapshot(character.Code, items);
@@ -163,55 +165,52 @@ internal sealed class UnrealBridgeToolboxSnapshotService
         }
     }
 
-    /// <summary>
-    /// 工具箱期望 Unreal 侧呈现的资产布局：一张图集，名字由角色代号和动作变体决定。
-    ///
-    /// Unreal 侧会用同一套规则算出同一串文字 —— 算得出来才叫「布局已对齐」。
-    /// 对不上的时候（例如那边还是逐帧导入留下的几十张贴图），这个动作会被判成需要重建。
-    /// </summary>
-    private static string ResolveExpectedAtlasLayout(CharacterCard character, string actionCode)
-    {
-        if (!SequenceActionCatalog.TryResolve(actionCode, out var definition, out var formIndex))
-        {
-            return string.Empty;
-        }
-
-        var variantCode = SequenceActionCatalog.GetVariantCode(definition, formIndex);
-        return SequenceFrameIdentity.BuildAtlasLayout(
-            AtlasManifestWriter.BuildAtlasName(character.Code, variantCode));
-    }
-
     private static void AddSequenceFrames(
         List<UnrealBridgeSnapshotItem> items,
         CharacterCard character,
-        CharacterSkillsData skills)
+        CharacterSkillsData skills,
+        UnrealBridgeSequenceContentFingerprints? contentFingerprints)
     {
         var service = new SequenceFrameService();
-        foreach (var section in service.LoadSections(character, skills))
+        var sections = service.LoadSections(character, skills);
+        var sectionByCode = sections
+            .GroupBy(section => section.Action.Code, StringComparer.OrdinalIgnoreCase)
+            .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        foreach (var section in sections)
         {
             // 动作与帧的稳定 ID 必须和 Unreal 语义快照用同一套规则生成，
             // 否则两侧永远配不上对，第五步只能看到“全部新增 + 全部待删除”。
             var actionId = SequenceFrameIdentity.BuildActionStableId(section.Action.Code);
             var fps = service.GetActionFps(character, section.Action);
             var orderedForPayload = section.Frames.OrderBy(frame => frame.Index).ToArray();
-            var expectedSpriteNames = ResolveExpectedSpriteNames(character, section, orderedForPayload);
+            // 每一格素材「用哪张图集、用哪只精灵、要不要在本动作里新建」。
+            // 借来的图连精灵一起借（来源动作那只），所以整条都借用别人的动作只剩一个 Flipbook。
+            var resolutions = SequenceSourceImageResolver.Resolve(
+                character, section.Action, orderedForPayload,
+                ownerCode => sectionByCode.GetValueOrDefault(ownerCode));
+            var resolutionByFile = resolutions
+                .GroupBy(item => item.FilePath, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+            var actionPayload = SequenceFrameIdentity.BuildActionPayload(
+                section.Action.Code,
+                fps,
+                ResolveExpectedSequenceLayout(character, section.Action.Code, orderedForPayload, resolutionByFile),
+                // 帧条数，不是「各帧停留格数之和」。
+                //
+                // 导出侧是**一个关键帧一项**（frame_run 只表示它停留多久，
+                // 播放总长另记在 playback_frame_count 里）。我一开始在这边写成了
+                // 停留格数求和，Sk2 于是成了 26 而 Unreal 侧是 23 —— 每个动作都被
+                // 判成需要重建，列表永远清不掉。两侧必须数同一件事。
+                orderedForPayload.Length,
+                orderedForPayload.Count(frame => frame.IsBlank));
+            actionPayload = UnrealBridgeSequenceFingerprintService.WithCurrentContent(
+                character, section, actionPayload, contentFingerprints);
             items.Add(CreateItem(
                 actionId,
                 $"module:{UnrealBridgeModule.SequenceFrames}",
                 UnrealBridgeModule.SequenceFrames,
                 section.Action.DisplayName,
-                SequenceFrameIdentity.BuildActionPayload(
-                    section.Action.Code,
-                    fps,
-                    ResolveExpectedAtlasLayout(character, section.Action.Code),
-                    // 帧条数，不是「各帧停留格数之和」。
-                    //
-                    // 导出侧是**一个关键帧一项**（frame_run 只表示它停留多久，
-                    // 播放总长另记在 playback_frame_count 里）。我一开始在这边写成了
-                    // 停留格数求和，Sk2 于是成了 26 而 Unreal 侧是 23 —— 每个动作都被
-                    // 判成需要重建，列表永远清不掉。两侧必须数同一件事。
-                    orderedForPayload.Length,
-                    orderedForPayload.Count(frame => frame.IsBlank)),
+                actionPayload,
                 string.Empty));
 
             var orderedFrames = orderedForPayload;
@@ -233,64 +232,64 @@ internal sealed class UnrealBridgeToolboxSnapshotService
                     frame.IsBlank ? string.Empty : frame.FilePath,
                     ToToolboxRelativePath(character, frame.IsBlank ? string.Empty : frame.FilePath),
                     $"{section.Action.Code}-{frame.Index}",
-                    expectedSpriteNames[ordinal]));
+                    ResolveFrameResolution(resolutionByFile, frame)?.SpriteAssetName ?? string.Empty,
+                    ResolveFrameResolution(resolutionByFile, frame)?.AtlasName ?? string.Empty,
+                    ResolveFrameResolution(resolutionByFile, frame) is { IsOwnSourceImage: true }));
             }
         }
     }
+
+    /// <summary>这一帧引用的素材在解析表里的那一项；空白帧没有。</summary>
+    private static SequenceSourceImageResolution? ResolveFrameResolution(
+        IReadOnlyDictionary<string, SequenceSourceImageResolution> resolutionByFile,
+        SequenceFrameItem frame)
+    {
+        if (frame.IsBlank || string.IsNullOrWhiteSpace(frame.FilePath))
+        {
+            return null;
+        }
+
+        return resolutionByFile.GetValueOrDefault(Path.GetFullPath(frame.FilePath));
+    }
+
 
     /// <summary>
-    /// 每一帧同步之后应当落在哪个精灵上。
+    /// 这条序列同步之后，每一帧会指向哪些图集。
     ///
-    /// 帧与精灵不是一一对应：23 个帧位可能只用 17 张素材，复用位置共用同一个精灵。
-    /// 对应关系由**素材目录里第几张图**决定（按文件名升序，和打图集、生成同步计划时
-    /// 用的是同一份列表、同一个序号），不是帧自己的序号。所以这里必须枚举目录，
-    /// 而不能拿帧下标当精灵号 —— 拿错了会把「复用了第 3 张图」误判成「改用了第 20 张」。
-    ///
-    /// 图集改造之后贴图路径已经分不出帧（同一个动作的每一帧都指向同一张图集），
-    /// 中栏的「已同步」判定只能靠这个精灵名。
+    /// Unreal 侧算的是同一件事（语义快照按每帧的贴图名算），规则必须一模一样：
+    /// 只用自己一张图集 → <c>atlas:&lt;图集名&gt;</c>；用到多张（借了别的动作的图）→
+    /// <c>frames:&lt;图集名按名字排序&gt;</c>。差一个字，这个动作就会被永远判成需要重建。
     /// </summary>
-    private static string[] ResolveExpectedSpriteNames(
+    private static string ResolveExpectedSequenceLayout(
         CharacterCard character,
-        SequenceFrameSection section,
-        IReadOnlyList<SequenceFrameItem> orderedFrames)
+        string actionCode,
+        IReadOnlyList<SequenceFrameItem> orderedFrames,
+        IReadOnlyDictionary<string, SequenceSourceImageResolution> resolutionByFile)
     {
-        var names = new string[orderedFrames.Count];
-        if (orderedFrames.Count == 0 ||
-            !SequenceActionCatalog.TryResolve(section.Action.Code, out var definition, out var formIndex))
+        var textureNames = orderedFrames
+            .Where(frame => !frame.IsBlank && !string.IsNullOrWhiteSpace(frame.FilePath))
+            .Select(frame => resolutionByFile.TryGetValue(
+                Path.GetFullPath(frame.FilePath), out var resolution) ? resolution.AtlasName : string.Empty)
+            .Where(name => !string.IsNullOrWhiteSpace(name))
+            .ToArray();
+        if (textureNames.Length == 0)
         {
-            return names;
+            return SequenceFrameIdentity.BuildFrameLayout(textureNames);
         }
 
-        var framesFolder = SequenceActionFolderLayout.GetFramesFolderPath(character, section.Action);
-        var sourceImages = AtlasManifestWriter.EnumerateSourceImages(framesFolder);
-        if (sourceImages.Count == 0)
-        {
-            return names;
-        }
-
-        var ordinalByPath = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        for (var ordinal = 0; ordinal < sourceImages.Count; ordinal++)
-        {
-            ordinalByPath[Path.GetFullPath(sourceImages[ordinal])] = ordinal;
-        }
-
-        for (var index = 0; index < orderedFrames.Count; index++)
-        {
-            var frame = orderedFrames[index];
-            if (frame.IsBlank || string.IsNullOrWhiteSpace(frame.FilePath))
-            {
-                continue;
-            }
-
-            if (ordinalByPath.TryGetValue(Path.GetFullPath(frame.FilePath), out var sourceOrdinal))
-            {
-                names[index] = SequenceActionCatalog.GetFrameSpriteName(
-                    definition, formIndex, sourceOrdinal, sourceImages.Count);
-            }
-        }
-
-        return names;
+        var ownAtlas = ResolveExpectedAtlasName(character, actionCode);
+        var distinct = textureNames.Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        return distinct.Length == 1 && string.Equals(distinct[0], ownAtlas, StringComparison.OrdinalIgnoreCase)
+            ? SequenceFrameIdentity.BuildAtlasLayout(ownAtlas)
+            : SequenceFrameIdentity.BuildFrameLayout(textureNames);
     }
+
+    /// <summary>这个动作自己的图集名（不管它这张图集最终有没有被建出来）。</summary>
+    private static string ResolveExpectedAtlasName(CharacterCard character, string actionCode) =>
+        SequenceActionCatalog.TryResolve(actionCode, out var definition, out var formIndex)
+            ? AtlasManifestWriter.BuildAtlasName(
+                character.Code, SequenceActionCatalog.GetVariantCode(definition, formIndex))
+            : string.Empty;
 
     private static void AddBuffs(List<UnrealBridgeSnapshotItem> items, CharacterCard character)
     {
@@ -390,7 +389,9 @@ internal sealed class UnrealBridgeToolboxSnapshotService
         string assetPath,
         string toolboxRelativePath = "",
         string normalizedName = "",
-        string spriteAssetName = "")
+        string spriteAssetName = "",
+        string sourceAtlasName = "",
+        bool sourceAtlasIsOwn = false)
     {
         if ((module is UnrealBridgeModule.BaseMaterials or UnrealBridgeModule.Voices) &&
             !string.IsNullOrWhiteSpace(assetPath) && File.Exists(assetPath))
@@ -405,7 +406,9 @@ internal sealed class UnrealBridgeToolboxSnapshotService
                 assetPath,
                 ToolboxRelativePath: toolboxRelativePath,
                 NormalizedName: normalizedName,
-                SpriteAssetName: spriteAssetName);
+                SpriteAssetName: spriteAssetName,
+                SourceAtlasName: sourceAtlasName,
+                SourceAtlasIsOwn: sourceAtlasIsOwn);
         }
 
         using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
@@ -431,7 +434,9 @@ internal sealed class UnrealBridgeToolboxSnapshotService
             assetPath,
             ToolboxRelativePath: toolboxRelativePath,
             NormalizedName: normalizedName,
-            SpriteAssetName: spriteAssetName);
+            SpriteAssetName: spriteAssetName,
+            SourceAtlasName: sourceAtlasName,
+            SourceAtlasIsOwn: sourceAtlasIsOwn);
     }
 
     private static string ComputeFileContentHash(string path)

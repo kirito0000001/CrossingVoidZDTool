@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 1,
+  "verifiedWith": {
+    "engine": "5.8.2-0+UE5",
+    "at": "2026-09-17",
+    "method": "UnrealEditor-Cmd <uproject> -run=pythonscript -script=Tools/UnrealBridge/probe_unreal_python_bindings.py（结果写 ZD_PYTHON_BINDING_PROBE_OUT 指向的文件）"
+  },
+  "note": "脚本里出现的每个 unreal 点名字都必须在 names 里。换引擎版本、或者要新用一个引擎 API 时，先跑一次探针确认引擎真有这个名字，再加进来。2026-09-17 的教训：isinstance(obj, unreal.ObjectRedirector) 里的 UObjectRedirector 从来没暴露到 Python，那一行把整批序列同步打断了。",
+  "names": [
+    "AssetExportTask",
+    "AssetImportTask",
+    "AssetRegistryDependencyOptions",
+    "AssetRegistryHelpers",
+    "AssetToolsHelpers",
+    "BlueprintEditorLibrary",
+    "EditorAssetLibrary",
+    "Exporter",
+    "get_default_object",
+    "get_editor_subsystem",
+    "get_engine_subsystem",
+    "load_asset",
+    "load_class",
+    "load_object",
+    "log",
+    "log_error",
+    "log_warning",
+    "MetaSoundBuilderSubsystem",
+    "MetaSoundEditorSubsystem",
+    "Name",
+    "new_object",
+    "PaperFlipbook",
+    "PaperFlipbookFactory",
+    "PaperFlipbookKeyFrame",
+    "PaperZDFlipbookAnimDataSource",
+    "Paths",
+    "SystemLibrary",
+    "TextureExporterPNG",
+    "Vector2D",
+    "ZDBridgeLibrary"
+  ]
+}

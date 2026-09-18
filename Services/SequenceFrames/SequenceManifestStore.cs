@@ -90,7 +90,9 @@ internal static class SequenceManifestStore
         manifest.Fps = Math.Clamp(manifest.Fps <= 0 ? SequenceFrameSpec.DefaultFps : manifest.Fps, 1, 60);
         manifest.Frames ??= [];
         Directory.CreateDirectory(SequenceActionFolderLayout.GetActionFolderPath(character, action));
-        Directory.CreateDirectory(SequenceActionFolderLayout.GetFramesFolderPath(character, action));
+        // 不预建 Frames 子目录：帧全部复用别的动作时它永远是空的，
+        // 空目录会让人以为「这里漏导了素材」。真有文件要落进去时，
+        // SequenceFramePool.ImportSource 会自己建。
         WriteFileIfChanged(SequenceActionFolderLayout.GetManifestPath(character, action), manifest);
     }
 

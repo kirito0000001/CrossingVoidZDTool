@@ -55,7 +55,11 @@ internal sealed class AtlasPackService
     /// 打一张图集。
     /// </summary>
     /// <param name="characterCode">角色代号，必须与 Unreal 角色目录名完全一致。</param>
-    /// <param name="framesFolder">动作的素材目录（<c>.../ZDMaterial/&lt;动作&gt;/Frames</c>）。</param>
+    /// <param name="sourceImages">
+    /// 这一轮要打进图集的图片（绝对路径，顺序即格子序号）。
+    /// 由调用方按「这个动作的帧实际用到哪些图」算好 —— 不能拿素材目录的内容代替：
+    /// 帧可以复用别的动作目录里的同一张图，只看自己的目录会漏图甚至漏成空图集。
+    /// </param>
     /// <param name="definition">动作定义。</param>
     /// <param name="formIndex">形态下标。</param>
     /// <param name="outputDirectory">产物目录（调用方按 <see cref="AtlasDestination"/> 算好）。</param>
@@ -63,7 +67,7 @@ internal sealed class AtlasPackService
     /// <param name="progress">进度回调，可为空。</param>
     public async Task<AtlasPackResult> PackAsync(
         string characterCode,
-        string framesFolder,
+        IReadOnlyList<string> sourceImages,
         SequenceActionDefinition definition,
         int formIndex,
         string outputDirectory,
@@ -73,15 +77,12 @@ internal sealed class AtlasPackService
         int? maxSize = null)
     {
         ArgumentNullException.ThrowIfNull(definition);
-        ArgumentException.ThrowIfNullOrWhiteSpace(framesFolder);
+        ArgumentNullException.ThrowIfNull(sourceImages);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputDirectory);
         var startedAt = Stopwatch.StartNew();
 
         progress?.Report(new AtlasPackProgress(AtlasPackStage.Preparing, "正在清点素材…"));
 
-        // **帧列表来自素材目录，不是序列清单** —— 见 AtlasManifestWriter 的类注释，
-        // 这里曾经拿序列清单去推导，把复用位置也算成独立帧，23 帧打出 23 个格子（实际只有 17 张图）。
-        var sourceImages = AtlasManifestWriter.EnumerateSourceImages(framesFolder);
         var manifest = AtlasManifestWriter.Build(
             characterCode, definition, formIndex, sourceImages);
 

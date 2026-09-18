@@ -192,11 +192,15 @@ internal static class SequenceFrameIdentity
     /// 名单留在旧口径的话，旧贴图会被当成「应该存在」而过滤掉，界面上就只剩帧位数可数，
     /// 看着像「删除 23 项」，实际那 23 条跟工程里的文件对不上。
     /// </summary>
-    /// <param name="sourceImageCount">素材张数（去重后的原图数），不是序列帧位数。</param>
+    /// <param name="ownSpriteNames">
+    /// 这个动作**自己**那几只精灵的名字（借用来的图连精灵一起借，不在这个动作里建）。
+    /// 名单里没有精灵 = 整条都在借别人的素材 → 这个动作既没有自己的图集、也没有自己的精灵，
+    /// 只剩 Flipbook 和序列 —— 工程里遗留的重复图集/精灵因此会被正常列成待删。
+    /// </param>
     public static IReadOnlyCollection<string> BuildCanonicalAssetPackagePaths(
         string characterCode,
         string? actionCode,
-        int sourceImageCount)
+        IReadOnlyList<string> ownSpriteNames)
     {
         var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         if (string.IsNullOrWhiteSpace(characterCode) ||
@@ -210,12 +214,16 @@ internal static class SequenceFrameIdentity
         var variantCode = SequenceActionCatalog.GetVariantCode(definition, formIndex);
         paths.Add(NormalizePackagePath($"{root}/AnimSequences/{SequenceActionCatalog.GetAnimSequenceName(definition, formIndex)}"));
         paths.Add(NormalizePackagePath($"{materialFolder}/{SequenceActionCatalog.GetFlipbookName(definition, formIndex)}"));
-        paths.Add(NormalizePackagePath(
-            $"{materialFolder}/{AtlasManifestWriter.BuildAtlasName(characterCode, variantCode)}"));
-        for (var ordinal = 0; ordinal < sourceImageCount; ordinal++)
+        if (ownSpriteNames.Count > 0)
         {
+            // 有自己素材的动作才有自己的图集；整条借用的动作没有。
             paths.Add(NormalizePackagePath(
-                $"{materialFolder}/{SequenceActionCatalog.GetFrameSpriteName(definition, formIndex, ordinal, sourceImageCount)}"));
+                $"{materialFolder}/{AtlasManifestWriter.BuildAtlasName(characterCode, variantCode)}"));
+        }
+
+        foreach (var spriteName in ownSpriteNames)
+        {
+            paths.Add(NormalizePackagePath($"{materialFolder}/{spriteName}"));
         }
 
         return paths;

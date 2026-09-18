@@ -117,8 +117,7 @@ internal sealed class SequenceFrameService
         var folderPath = SequenceActionFolderLayout.GetActionFolderPath(character, action);
         Directory.CreateDirectory(folderPath);
         var previousFps = LoadOrCreateManifest(character, action).Fps;
-        var framesFolderPath = SequenceActionFolderLayout.GetFramesFolderPath(character, action);
-        Directory.CreateDirectory(framesFolderPath);
+        // Frames 子目录交给 ImportSource 按需建：整条复用别的动作时不该留下空目录。
         SequenceFramePool.ClearActionFolder(folderPath);
 
         var manifest = SequenceManifestStore.Create(action);
@@ -187,7 +186,7 @@ internal sealed class SequenceFrameService
 
         var folderPath = SequenceActionFolderLayout.GetActionFolderPath(character, action);
         Directory.CreateDirectory(folderPath);
-        Directory.CreateDirectory(SequenceActionFolderLayout.GetFramesFolderPath(character, action));
+        // 同上：不放帧图就别建空目录。落文件的那条路（ImportSource）会自己建。
         SequenceFramePool.ClearActionFolder(folderPath);
 
         var manifest = SequenceManifestStore.Create(action);
@@ -203,6 +202,8 @@ internal sealed class SequenceFrameService
         }
 
         SequenceManifestStore.Save(character, action, manifest);
+        // 整条都复用别的动作时这里一张图都没落，空目录顺手收掉。
+        SequenceActionFolderLayout.RemoveFramesFolderIfEmpty(character, action);
         return LoadSection(character, action, CancellationToken.None).Frames;
     }
 
@@ -650,13 +651,14 @@ internal sealed class SequenceFrameService
         var folderPath = SequenceActionFolderLayout.GetActionFolderPath(character, action);
         SequenceActionFolderLayout.MigrateLegacyActionFolderPath(character, action, folderPath);
         Directory.CreateDirectory(folderPath);
-        Directory.CreateDirectory(SequenceActionFolderLayout.GetFramesFolderPath(character, action));
-        if (!File.Exists(SequenceActionFolderLayout.GetManifestPath(character, action)))
-        {
-            return SequenceFramePool.MigrateLegacyActionFolder(character, action);
-        }
-
-        return SequenceManifestStore.LoadAndNormalize(character, action);
+        // 不预建 Frames 子目录 —— 帧整条复用别的动作时它永远是空的。
+        // 顺带把历史遗留的空目录收掉：这一步在读清单时必走，
+        // 所以升级之后不用跑什么迁移脚本，谁被打开谁就干净了。
+        var manifest = File.Exists(SequenceActionFolderLayout.GetManifestPath(character, action))
+            ? SequenceManifestStore.LoadAndNormalize(character, action)
+            : SequenceFramePool.MigrateLegacyActionFolder(character, action);
+        SequenceActionFolderLayout.RemoveFramesFolderIfEmpty(character, action);
+        return manifest;
     }
 
     private int ResolveManifestIndex(SequenceFrameManifest manifest, SequenceFrameItem frame)

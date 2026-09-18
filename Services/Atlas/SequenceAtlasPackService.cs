@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -40,7 +41,8 @@ internal sealed class SequenceAtlasPackService
         ArgumentNullException.ThrowIfNull(selectedChanges);
 
         var result = new Dictionary<string, UnrealBridgeSequenceAtlasInput>(StringComparer.OrdinalIgnoreCase);
-        var actions = UnrealBridgeSequencePublishService.ResolveSelectedActions(selectedChanges);
+        // 勾选的动作 + 借用素材的来源动作：借用方的精灵指向来源图集，来源必须一起打。
+        var actions = UnrealBridgeSequencePublishService.ResolveActionsWithSourceOwners(character, selectedChanges);
         if (actions.Count == 0)
         {
             return result;
@@ -69,7 +71,6 @@ internal sealed class SequenceAtlasPackService
             }
 
             var variantCode = SequenceActionCatalog.GetVariantCode(definition, formIndex);
-            var framesFolder = SequenceActionFolderLayout.GetFramesFolderPath(character, section.Action);
             var outputDirectory = AtlasPackService.ResolveOutputDirectory(
                 AtlasDestination.Cache,
                 projectRootPath: string.Empty,
@@ -78,19 +79,35 @@ internal sealed class SequenceAtlasPackService
                 variantCode);
             AtlasPackService.ClearCache(outputDirectory);
 
-            var sourceImages = AtlasManifestWriter.EnumerateSourceImages(framesFolder);
+            // 图集只收**这个动作自己的**图。借来的图已经在来源动作的图集里了，
+            // 再打一份就是同一张图存两遍（Misaka 实测这样的重复有 23 格）。
+            var sourceImages = SequenceActionFolderLayout
+                .ResolveSourceImagePlan(character, section.Action, section.Frames)
+                .Where(image => image.IsOwn)
+                .Select(image => image.FilePath)
+                .ToArray();
+            if (sourceImages.Length == 0)
+            {
+                // 一张自己的图都没有：整条都在复用别人的素材，这个动作**没有**自己的图集。
+                // 计划生成那边按「图集归属」去找来源图集，不需要它。
+                // 顺手把上一轮留下的缓存清掉：那是对应「这个动作曾经有自己的图」的产物，
+                // 留着只会让人以为它还有自己的图集。
+                ClearStaleCacheEntry(character, variantCode);
+                continue;
+            }
+
             var packedAt = DateTime.UtcNow;
             var packed = await packer
                 .PackAsync(
                     character.Code,
-                    framesFolder,
+                    sourceImages,
                     definition,
                     formIndex,
                     outputDirectory,
                     configuredPythonPath,
                     progress,
                     cancellationToken,
-                    ResolveMaxSize(sourceImages.Count))
+                    ResolveMaxSize(sourceImages.Length))
                 .ConfigureAwait(false);
 
             var manifest = AtlasSequenceManifestReader.Read(
@@ -142,4 +159,32 @@ internal sealed class SequenceAtlasPackService
         SequenceActionCatalog.TryResolve(rawCode, out var definition, out var formIndex)
             ? (definition, formIndex)
             : null;
+
+    /// <summary>
+    /// 这个动作已经不需要自己的图集了（整条都在借用别人的素材）——
+    /// 把上一轮留在缓存里的那张清掉。留着只会让人以为它还有自己的图集。
+    /// 缓存目录按变体代号命名，路径能直接算出来。
+    /// </summary>
+    private static void ClearStaleCacheEntry(CharacterCard character, string variantCode)
+    {
+        var outputDirectory = AtlasPackService.ResolveOutputDirectory(
+            AtlasDestination.Cache,
+            projectRootPath: string.Empty,
+            character.FolderPath,
+            character.Code,
+            variantCode);
+        if (!Directory.Exists(outputDirectory))
+        {
+            return;
+        }
+
+        try
+        {
+            Directory.Delete(outputDirectory, recursive: true);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            ToolboxLog.Warn($"旧图集缓存没有删掉：{outputDirectory}", error);
+        }
+    }
 }

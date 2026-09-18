@@ -402,11 +402,44 @@ internal static class UnrealSyncSelectionTreeBuilder
                 var addCount = group.Count(change => change.Kind == UnrealBridgeChangeKind.Added);
                 var representative = group.First();
                 var parentKey = group.Key;
-                var children = group
+                // 动作级的「重建」会把它下面每一帧摊成「第 N 帧（旧）/（新）」两行 ——
+                // 一条 31 帧的序列就是六十多行，翻都翻不完，而动作行上已经写着
+                // 「删除 N / 新增 M」。所以帧行收成一行「重建整条（N 帧）」，
+                // 真正按文件删的那些（动作占用的资产）照旧一行一个。
+                var frameChanges = group
+                    .Where(change => SequenceFrameIdentity.IsFrameStableId(change.StableId))
+                    .OrderBy(change => change.Kind)
+                    .ThenBy(change => change.DisplayName, StringComparer.OrdinalIgnoreCase)
+                    .ToArray();
+                var assetChildren = group
+                    .Where(change => !SequenceFrameIdentity.IsFrameStableId(change.StableId))
                     .OrderBy(change => change.Kind)
                     .ThenBy(change => change.DisplayName, StringComparer.OrdinalIgnoreCase)
                     .Select(change => FromChange(change, canExecute, selectPendingByDefault))
-                    .ToArray();
+                    .ToList();
+                if (frameChanges.Length > 0)
+                {
+                    var frameRepresentative = frameChanges[0];
+                    SequenceFrameIdentity.TryReadActionPayload(
+                        allChanges.FirstOrDefault(change =>
+                                SequenceFrameIdentity.IsActionStableId(change.StableId) &&
+                                string.Equals(change.StableId, group.Key, StringComparison.OrdinalIgnoreCase))
+                            ?.ToolboxItem?.PayloadJson,
+                        out _,
+                        out var toolboxSlots,
+                        out _);
+                    var rebuildText = toolboxSlots > 0
+                        ? $"重建整条（{toolboxSlots} 帧）"
+                        : $"重建整条（{frameChanges.Length} 项）";
+                    assetChildren.Insert(
+                        0,
+                        FromChange(
+                            frameRepresentative with { DisplayName = rebuildText },
+                            canExecute,
+                            selectPendingByDefault));
+                }
+
+                var children = assetChildren.ToArray();
                 // 缓存恢复路径会先滤掉 Unchanged 的动作节点，这时 parentNames 里没有它；
                 // 标题必须能从动作键自己算出来，不能退化成第一个叶子的名字（“一技能 第 1 帧”）。
                 var displayName = parentNames.TryGetValue(parentKey, out var parentName)

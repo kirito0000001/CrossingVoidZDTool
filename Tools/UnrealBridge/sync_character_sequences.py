@@ -59,7 +59,15 @@ def _load(path):
         for image in source_images:
             for name in ('index', 'spriteAssetName', 'filePath', 'x', 'y', 'width', 'height',
                          'rotated', 'trimmed', 'trimOriginX', 'trimOriginY',
-                         'sourceImageWidth', 'sourceImageHeight'):
+                         'sourceImageWidth', 'sourceImageHeight',
+                         'atlasName', 'atlasImagePath', 'atlasMaterialFolder',
+                         # 这两个是 2026-09-18 加上的：**漏了它们就会出事** ——
+                         # Python 读不到 createSprite，所有格子都当成「借用」，
+                         # 连自己该建的那几只也跑去来源目录找，于是报
+                         # 「借用的精灵不存在：…/Material/Sub/Sub_Frame0_Sprite」。
+                         # 计划和素材项在磁盘上是 PascalCase（CreateSprite），
+                         # 这里归一化之后才会变成 camelCase。
+                         'createSprite', 'spriteMaterialFolder', 'isOwnSourceImage'):
                 image[name] = get(image, name, image.get(name, ''))
         action['sourceImages'] = source_images
     value['actions'] = actions
@@ -479,15 +487,60 @@ def _rename_asset(source_package, target_package, action_code):
         raise RuntimeError('%s: failed to rename %s to %s' % (action_code, source_package, target_package))
 
 
-def _fixup_redirectors(package_paths, action_code):
+def _character_root_of(package_path):
+    """包路径 → 角色根目录（`/Game/GameActor2D/<代号>`）。取不到就返回空串。"""
+    parts = [part for part in str(package_path or '').split('/') if part]
+    return '/' + '/'.join(parts[:3]) if len(parts) >= 4 else ''
+
+
+def _save_dirty_packages(character_root, action_code):
+    """把角色目录下**脏了的**包存盘。
+
+    命令行走完不会自动保存。改过引用的包（例如 Misaka_AnimBP 里那个引用序列的 Play Sequence
+    节点）必须显式落盘，否则重定向器清掉之后引用就永久悬空，编辑器此后每次都会报
+    "Play Sequence references an unknown sequence"。
+    """
+    if not character_root:
+        return False
+    try:
+        saved = unreal.EditorAssetLibrary.save_directory(
+            character_root, only_if_is_dirty=True, recursive=True)
+    except Exception as exc:
+        unreal.log_warning('SequenceSync: action=%s save_directory failed: %s' % (action_code, exc))
+        return False
+    unreal.log('SequenceSync: action=%s saved dirty packages under %s -> %s'
+               % (action_code, character_root, saved))
+    return bool(saved)
+
+
+def _is_redirector(obj):
+    """这个对象是不是重定向器。
+
+    **不能拿 isinstance 去比 unreal 里的 ObjectRedirector**：UObjectRedirector 没有暴露到
+    Python 侧，UE 5.8 实测 `hasattr(unreal, 'ObjectRedirector')` 就是 False，
+    那一行会抛 AttributeError 把整批同步当场打断 —— 18 个动作里第 2 个就炸，
+    用户看到的就是 "module 'unreal' has no attribute 'ObjectRedirector'"。
+    类名是稳定可查的，用它判断。
+    """
+    if obj is None:
+        return False
+    try:
+        return obj.get_class().get_name() == 'ObjectRedirector'
+    except Exception:
+        return False
+
+
+def _fixup_redirectors(package_paths, action_code, target_package=''):
     """把改名留下的重定向器解引用并清掉。
 
     rename_asset 会在旧路径留一个重定向器。大小写对齐要连着改两次名，
     中间那个名字（*__ZDCaseMigration）一旦被引用方记进包里、而重定向器随后被清理，
     这条引用就永久悬空了——实测把 Misaka_AnimBP 的 Play Sequence 节点打断了，
     此后每次导出编辑器都会报 "references an unknown sequence" 并让 commandlet 返回非 0。
+
+    **解不掉时宁可不删。** 删掉一个还有引用方的重定向器 = 引用永久悬空，
+    比「留着一个重定向器」严重得多。
     """
-    tools = unreal.AssetToolsHelpers.get_asset_tools()
     redirectors = []
     for package in package_paths:
         object_path = '%s.%s' % (package, package.rsplit('/', 1)[-1])
@@ -495,25 +548,44 @@ def _fixup_redirectors(package_paths, action_code):
             obj = unreal.load_object(None, object_path)
         except Exception:
             obj = None
-        if obj is not None and isinstance(obj, unreal.ObjectRedirector):
+        if _is_redirector(obj):
             redirectors.append(obj)
 
     if not redirectors:
         return
 
-    try:
-        tools.fixup_referencers(redirectors)
-    except Exception as exc:
-        unreal.log_warning('SequenceSync: action=%s fixup_referencers failed: %s' % (action_code, exc))
+    # 解引用走 EditorAssetLibrary.consolidate_assets：把引用方搬到目标资产上，
+    # 再删掉源包 —— 和编辑器里那个「Fix Up Redirectors」是同一件事。
+    # AssetTools.fixup_referencers 在这个版本的 Python 里同样不存在（实测 hasattr 为假）。
+    target_asset = None
+    if target_package:
+        try:
+            target_asset = unreal.load_asset(target_package)
+        except Exception:
+            target_asset = None
+    if target_asset is None:
+        unreal.log_warning(
+            'SequenceSync: action=%s 找不到重定向目标 %s，保留 %d 个重定向器不动'
+            % (action_code, target_package, len(redirectors)))
         return
 
-    for package in package_paths:
+    fixed = 0
+    for redirector in redirectors:
         try:
-            if unreal.EditorAssetLibrary.does_asset_exist(package):
-                unreal.EditorAssetLibrary.delete_asset(package)
-        except Exception:
-            pass
-    unreal.log('SequenceSync: action=%s fixed up %d redirector(s)' % (action_code, len(redirectors)))
+            if unreal.EditorAssetLibrary.consolidate_assets(target_asset, [redirector]):
+                fixed += 1
+        except Exception as exc:
+            unreal.log_warning(
+                'SequenceSync: action=%s 解引用 %s 失败，保留不动：%s'
+                % (action_code, redirector.get_path_name(), exc))
+
+    if fixed:
+        # **改完引用必须存盘。** consolidate 只改内存里的引用方（实测是 Misaka_AnimBP 里的
+        # Play Sequence 节点），命令行走完就丢了；而重定向器已经删掉，于是引用永久悬空 ——
+        # 编辑器此后每次都会报 "Play Sequence references an unknown sequence"，
+        # commandlet 也一直退 1。这一步以前漏了，交过学费。
+        _save_dirty_packages(_character_root_of(target_package), action_code)
+        unreal.log('SequenceSync: action=%s fixed up %d redirector(s)' % (action_code, fixed))
 
 def _align_asset_name_case(folder, target_name, action_code):
     """Rename an existing asset whose name differs from the target only by case.
@@ -540,7 +612,7 @@ def _align_asset_name_case(folder, target_name, action_code):
             _rename_asset(temporary_package, target_package, action_code)
             # 两次改名各留下一个重定向器，中间那个尤其危险：引用方一旦把
             # *__ZDCaseMigration 记进自己的包里，重定向器被清掉后引用就永久悬空。
-            _fixup_redirectors([package, temporary_package], action_code)
+            _fixup_redirectors([package, temporary_package], action_code, target_package)
             unreal.log('SequenceSync: case migration %s -> %s' % (package, target_package))
             return True
     return False
@@ -654,28 +726,52 @@ def _sync_action(action):
     # 一张图集进来，N 个精灵出去。素材目录里几张图就几个精灵，
     # 序列里复用同一张图的位置共用同一个精灵 —— 这是与「逐帧导入」最大的区别，
     # 也是 Sk2 那种「17 张素材却建出 23 个资产」的根治办法。
-    atlas = action.get('atlas') or {}
     source_images = action.get('sourceImages') or []
-    if not atlas.get('imagePath') or not source_images:
+    if not source_images:
         raise RuntimeError('%s: sync plan has no atlas information' % code)
 
-    atlas_texture_path = _import_texture(atlas['imagePath'], material_folder, atlas['atlasName'], code)
-    atlas_texture = _require(atlas_texture_path, code)
-    atlas_width, atlas_height = _texture_size(atlas_texture)
-
+    # 每一格素材自带「用哪张图集」：自己的图落本动作的图集，借来的图落来源动作的图集
+    # （那些图已经在那边了，不再重复打包一份）。同一张图集只导一次。
+    atlas_texture_by_name = {}
+    atlas_size_by_name = {}
     sprite_by_index = {}
     for image in source_images:
         index = int(image.get('index') or 0)
         sprite_name = image.get('spriteAssetName') or ''
         if index <= 0 or not sprite_name:
             raise RuntimeError('%s: atlas entry %s has no usable index or sprite name' % (code, index))
-        _align_asset_name_case(material_folder, sprite_name, code)
-        sprite = _apply_atlas_sprite(
-            material_folder, sprite_name, atlas_texture, atlas_width, atlas_height, image, code)
-        # Sprite 是独立的包；不显式保存的话离线 commandlet 退出后不会落盘，
-        # Flipbook 会引用到磁盘上并不存在的资产。
-        _save(sprite.get_path_name())
-        sprite_by_index[index] = sprite
+        if image.get('createSprite'):
+            atlas_name = image.get('atlasName') or ''
+            atlas_image_path = image.get('atlasImagePath') or ''
+            atlas_folder = image.get('atlasMaterialFolder') or material_folder
+            if not atlas_name or not atlas_image_path:
+                raise RuntimeError('%s: atlas entry %s has no atlas reference' % (code, index))
+            if atlas_name not in atlas_texture_by_name:
+                texture = _require(_import_texture(atlas_image_path, atlas_folder, atlas_name, code), code)
+                atlas_texture_by_name[atlas_name] = texture
+                atlas_size_by_name[atlas_name] = _texture_size(texture)
+
+            _align_asset_name_case(material_folder, sprite_name, code)
+            sprite = _apply_atlas_sprite(
+                material_folder, sprite_name,
+                atlas_texture_by_name[atlas_name], atlas_size_by_name[atlas_name][0],
+                atlas_size_by_name[atlas_name][1], image, code)
+            # Sprite 是独立的包；不显式保存的话离线 commandlet 退出后不会落盘，
+            # Flipbook 会引用到磁盘上并不存在的资产。
+            _save(sprite.get_path_name())
+            sprite_by_index[index] = sprite
+            continue
+
+        # 借来的图**连精灵一起借**：那张图在来源动作里已经切好一只精灵了，
+        # 这里直接用那只，借用方一只都不建（整条都借用别人的动作只剩一个 Flipbook）。
+        borrowed_folder = image.get('spriteMaterialFolder') or image.get('atlasMaterialFolder') or material_folder
+        borrowed_path = '%s/%s' % (borrowed_folder, sprite_name)
+        borrowed = unreal.load_asset(borrowed_path)
+        if borrowed is None or not unreal.EditorAssetLibrary.does_asset_exist(borrowed_path):
+            raise RuntimeError(
+                '%s: 借用的精灵不存在：%s。它的来源动作要先同步（界面上会自动带上来源动作）。'
+                % (code, borrowed_path))
+        sprite_by_index[index] = borrowed
 
     # 按序列位置展开：空白帧留空，其余指向它引用的那一格。
     sprites = []
@@ -692,6 +788,11 @@ def _sync_action(action):
         sprites.append(sprite)
     if not any(sprite is not None for sprite in sprites):
         raise RuntimeError('%s: every frame is blank; the flipbook would have no image' % code)
+    # 借用别人的素材时，这条日志是唯一能一眼看出「这张图集是谁的」的地方。
+    created_sprites = sum(1 for image in source_images if image.get('createSprite'))
+    unreal.log('SequenceSync: action=%s sourceImages=%d createdSprites=%d borrowedSprites=%d atlases=%s'
+               % (code, len(source_images), created_sprites, len(source_images) - created_sprites,
+                  ','.join(sorted(atlas_texture_by_name)) or 'none'))
     # 空白帧在 Flipbook 里保留一个 Sprite 为空的关键帧，否则整条序列的时长和节奏都会变短。
     sprite_assets = sprites
     frame_runs = [max(1, int(frame.get('durationFrames', 1) or 1)) for frame in frames]
@@ -734,7 +835,9 @@ def _sync_action(action):
     # 计划里仍然带着 blueprintProperty / blueprintFormSlotIndex，留给那一步用。
     # 图集贴图 + 去重后的精灵 + Flipbook + 序列，就是这一轮的全部产物。
     # 其余留在这个动作目录里的（上一版逐帧导入的贴图和精灵）都是旧资产，交给清理。
-    new_paths = [atlas_texture.get_path_name()] + sorted(
+    # 保留名单里带上这一轮用到的**每一张**图集（自己的 + 借来的），
+    # 但清理只扫本动作目录，来源动作的图集本来也不会被误删。
+    new_paths = sorted({texture.get_path_name() for texture in atlas_texture_by_name.values()}) + sorted(
         {sprite.get_path_name() for sprite in sprite_by_index.values()}
     ) + [flipbook.get_path_name(), sequence.get_path_name()]
     skipped, deleted = _cleanup_old_assets(old_assets, new_paths, action)
@@ -865,7 +968,27 @@ def main():
             action['characterCode'] = plan.get('CharacterCode', '')
             code = action.get('actionCode', '')
             _write_progress(progress_path, index, total, code, action.get('displayName', '') or code)
-            action_result = _sync_action(action)
+            try:
+                action_result = _sync_action(action)
+            except Exception as error:
+                # 一个动作炸了，不该让排在它后面的动作一起陪葬；更要紧的是**必须点名**。
+                # 实测 `module 'unreal' has no attribute 'ObjectRedirector'` 那次，异常直接冒到
+                # 顶层，结果里只剩前面成功的那一条 —— 日志里看不出是哪个动作、哪一步出的问题，
+                # 只能靠人回忆自己勾了哪几个，排查代价全压在用户身上。
+                detail = '%s: %s' % (type(error).__name__, error)
+                unreal.log_error('SequenceSync: action=%s failed: %s\n%s'
+                                 % (code, detail, traceback.format_exc()))
+                results.append({
+                    'stableId': code,
+                    'itemKind': ITEM_KIND_ACTION,
+                    'succeeded': False,
+                    'message': detail,
+                    'objectPath': action.get('targetSequencePath', ''),
+                    'originIdentity': '',
+                    'outputFilePath': '',
+                })
+                _write_progress(progress_path, index + 1, total, code, '失败：%s' % detail)
+                continue
             # 结果协议与素材同步保持一致：C# 侧只解析 items，写成 actions 会被静默丢弃。
             results.append({
                 'stableId': code,
