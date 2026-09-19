@@ -100,6 +100,7 @@ var tests = new (string Name, Action Run)[]
     ("虚幻同步仅在更新删除时默认备份", UnrealBridgeBackupPolicyProtectsRiskyChanges),
     ("同步前备份开关对每一步都生效", BackupSettingGovernsEveryStep),
     ("虚幻项目备份使用当前引擎 ZipProjectUp", UnrealBridgeBackupUsesEngineAutomationTool),
+    ("虚幻项目备份只落在工具箱工作区", UnrealProjectBackupStaysInsideToolboxWorkspace),
     ("虚幻发布快照拒绝草稿角色", UnrealBridgeToolboxSnapshotRejectsDraftCharacter),
     ("虚幻工具箱快照覆盖角色六类模块", UnrealBridgeToolboxSnapshotCoversAllModules),
     ("蓝图置入目标值取自工具箱数据", BlueprintSetupRequestComesFromToolboxData),
@@ -4730,6 +4731,47 @@ static void UnrealBridgeBackupUsesEngineAutomationTool()
     }
 }
 
+/// <summary>
+/// 同步前备份只能落在**工具箱自己的工作区**里。
+///
+/// 触发这次用例的现象：用户在 Unreal 工程里看到一份 Misaka 备份 —— 备份被写到
+/// <c>&lt;uproject 所在目录&gt;\Saved\ZDToolboxBackups\&lt;代号&gt;-&lt;时间&gt;.zip</c>。
+/// 那是工具箱自己的数据，应该跟着工作区走；工程目录只该被读、被改，不该被囤备份。
+///
+/// 前半段是**接线护栏**（壳里不许再自己拼 Unreal 工程的备份路径），
+/// 后半段断言目的地本身的性质。
+/// </summary>
+static void UnrealProjectBackupStaysInsideToolboxWorkspace()
+{
+    var source = File.ReadAllText(
+        Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.UnrealSync.Shared.cs"));
+    AssertEqual(false, source.Contains("\"ZDToolboxBackups\"", StringComparison.Ordinal));
+    AssertEqual(true, source.Contains("UnrealProjectBackupLocator.ResolveDestination", StringComparison.Ordinal));
+
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var stamp = new DateTime(2026, 9, 19, 14, 30, 42);
+        var destination = UnrealProjectBackupLocator.ResolveDestination(root, "Misaka", stamp);
+        var expectedDirectory = Path.Combine(root, CharacterFolderLayout.UnrealProjectBackups);
+        AssertEqual(true, destination.StartsWith(expectedDirectory, StringComparison.OrdinalIgnoreCase));
+        AssertEqual(true, destination.EndsWith("Misaka-20260919-143042.zip", StringComparison.Ordinal));
+
+        // 带标签的那条（第六步 / 基础配置）沿用同一套命名。
+        var labeled = UnrealProjectBackupLocator.ResolveDestination(root, "Misaka", stamp, "基础配置");
+        AssertEqual(true, labeled.EndsWith("Misaka-基础配置-20260919-143042.zip", StringComparison.Ordinal));
+
+        // 关键性质：这个函数**拿不到** Unreal 工程路径，所以不可能再写回工程里。
+        AssertEqual(
+            true,
+            CharacterWorkspaceService.IsPathInsideDirectory(destination, root));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static void UnrealBridgeToolboxSnapshotRejectsDraftCharacter()
 {
     var root = CreateTemporaryTestFolder();
@@ -5493,6 +5535,10 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // 行为断言，要么在这里写明它是护栏。
     // 117 -> 118：C3 把导出流程搬进控制器后，`角色详情使用完整文件夹导出流程`
     // 那条断言多读了一个文件（跟着搬，不是删断言）。
+    // 118 -> 117：把 11 条因搬迁失效的结构断言改成读控制器的新写法，并给
+    // `ViewModels/*.cs` 收了一个统一读取口 `ReadViewModelSource`，总数降下来一格。
+    // 117 -> 117（持平）：新增一条漂移护栏「虚幻项目备份只落在工具箱工作区」——
+    // 备份落点必须在工作区里，这条只能靠读壳源码盯着（同额度内的记账，不是涨额度）。
     Ratchet("读源码文件的调用点", sourceReadCalls, 118);
 
     if (violations.Count > 0)

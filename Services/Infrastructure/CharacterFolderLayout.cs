@@ -45,6 +45,15 @@ internal static class CharacterFolderLayout
     public const string Completed = "Completed";
     public const string Export = "Export";
 
+    /// <summary>
+    /// 同步前备份（整包 Unreal 工程）的落点，**放在工作区根下**。
+    ///
+    /// 直属于工作区根、而不是某个角色目录：它压的是**整个 Unreal 工程**，不是这个角色的数据，
+    /// 塞进角色目录会让角色导出/角色备份跟着带上几个 G 的工程包。
+    /// 更不能放在 Unreal 工程里 —— 工程目录只该被读、被改，不该被囤备份。
+    /// </summary>
+    public const string UnrealProjectBackups = "UnrealProjectBackups";
+
     /// <summary>角色目录下必须存在的素材子目录。</summary>
     public static readonly string[] RequiredSubFolders =
         [Tool, AssetMaterial, ZdMaterial, Sound, ExAsset, Buff];

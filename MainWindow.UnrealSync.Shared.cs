@@ -303,11 +303,12 @@ namespace CrossingVoidZDTool
             }
 
             UpdateGlobalProgress("阶段 2/4 · 正在压缩备份 Unreal 项目", band.At(0), projectPath, true);
-            var backupPath = Path.Combine(
-                Path.GetDirectoryName(projectPath)!,
-                "Saved",
-                "ZDToolboxBackups",
-                $"{characterCode}-{DateTime.Now:yyyyMMdd-HHmmss}.zip");
+            // 落点只认**工具箱工作区**（`UnrealProjectBackupLocator` 压根拿不到 Unreal 工程路径）。
+            // 以前是拼在 `<uproject>\Saved\ZDToolboxBackups\` 下——工程目录只该被读、被改。
+            var backupPath = UnrealProjectBackupLocator.ResolveDestination(
+                Settings.ProjectRootPath,
+                characterCode,
+                DateTime.Now);
             var backupInfo = new UnrealBridgeBackupService().BuildZipProjectStartInfo(enginePath, projectPath, backupPath);
             using var backupProcess = Process.Start(backupInfo)
                 ?? throw new InvalidOperationException("无法启动 Unreal 项目备份进程。");
@@ -332,11 +333,11 @@ namespace CrossingVoidZDTool
             string projectPath)
         {
             UpdateGlobalProgress("正在压缩备份 Unreal 项目...", 20, projectPath, true);
-            var backupPath = Path.Combine(
-                Path.GetDirectoryName(projectPath)!,
-                "Saved",
-                "ZDToolboxBackups",
-                $"{characterCode}-基础配置-{DateTime.Now:yyyyMMdd-HHmmss}.zip");
+            var backupPath = UnrealProjectBackupLocator.ResolveDestination(
+                Settings.ProjectRootPath,
+                characterCode,
+                DateTime.Now,
+                "基础配置");
             var backupInfo = new UnrealBridgeBackupService().BuildZipProjectStartInfo(
                 enginePath,
                 projectPath,

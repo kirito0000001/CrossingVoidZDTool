@@ -22,8 +22,13 @@ WinUI 3 桌面应用（.NET 8，unpackaged self-contained），外加一批在 U
 <工作区>/
 ├─ Draft/<角色代号>/         制作中的角色
 ├─ Completed/<角色代号>/     已完成的角色
-└─ Export/<角色代号>/        导出的角色包
+├─ Export/<角色代号>/        导出的角色包
+└─ UnrealProjectBackups/     同步前备份（整包 Unreal 工程的 zip，按 <角色>-<时间> 命名）
 ```
+
+**同步前的整包备份只落在工作区的 `UnrealProjectBackups/` 下**，不会写进 Unreal 工程目录
+——工程那边只该被读、被改，不该被囤备份（落点由 `Services/UnrealProjectBackupLocator.cs`
+算，它的签名里根本没有 Unreal 工程路径）。这一份 zip 目前**不做自动清理**，攒多了自己删。
 
 每个角色目录：
 
