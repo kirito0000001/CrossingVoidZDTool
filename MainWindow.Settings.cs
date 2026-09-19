@@ -26,22 +26,14 @@ namespace CrossingVoidZDTool
     {
         private async void ChooseProjectRootButton_Click(object sender, RoutedEventArgs e)
         {
-            var picker = new FolderPicker
-            {
-                SuggestedStartLocation = PickerLocationId.ComputerFolder
-            };
-            picker.FileTypeFilter.Add("*");
-
-            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-
-            var selectedFolder = await picker.PickSingleFolderAsync();
-            if (selectedFolder is null)
+            var selectedFolderPath = await _filePickerService.PickFolderAsync();
+            if (selectedFolderPath is null)
             {
                 return;
             }
 
-            AppendLog(LogKind.User, $"选择新的整体项目父目录：{selectedFolder.Path}");
-            var newProjectRootPath = Settings.BuildProjectRootPathFromParent(selectedFolder.Path);
+            AppendLog(LogKind.User, $"选择新的整体项目父目录：{selectedFolderPath}");
+            var newProjectRootPath = Settings.BuildProjectRootPathFromParent(selectedFolderPath);
             var oldProjectRootPath = Path.GetFullPath(Settings.ProjectRootPath);
 
             if (Settings.IsCurrentProjectRoot(newProjectRootPath))

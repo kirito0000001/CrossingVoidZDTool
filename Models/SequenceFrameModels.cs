@@ -201,6 +201,35 @@ internal sealed record SequenceFrameItem(
         };
         return Color.FromArgb(alpha, red, green, blue);
     }
+
+    /// <summary>
+    /// 预览区缩略图按钮（S5 收尾）。按钮在**卡片模板里、但数据上下文是这一帧**，
+    /// 所以命令挂在这一帧自己身上（和 `SequenceFrameSection.ManageFramesCommand` 同一个形状）。
+    /// </summary>
+    public System.Windows.Input.ICommand? PreviewThumbnailCommand =>
+        CrossingVoidZDTool.ViewModels.SequenceFramesCommands.Current?.PreviewThumbnailCommand;
+
+    /// <summary>「复用角标」：把同一份素材用到的帧一起选中（S5 收尾）。</summary>
+    public System.Windows.Input.ICommand? SelectReuseGroupCommand =>
+        CrossingVoidZDTool.ViewModels.SequenceFramesCommands.Current?.SelectReuseGroupCommand;
+
+    // S1 收尾：时间轴右键菜单。菜单项在时间轴的 `DataTemplate` 里，数据上下文就是这一帧，
+    // 所以命令只能挂在帧自己身上（页面级路径在那儿的 namescope 里解析不到，
+    // 症状是"菜单点了没反应"）。一律只读计算属性，读全局那一套。
+    public System.Windows.Input.ICommand? ReplaceFrameMenuItemCommand =>
+        CrossingVoidZDTool.ViewModels.SequenceFramesCommands.Current?.ReplaceFrameMenuItemCommand;
+
+    public System.Windows.Input.ICommand? CopyFrameMenuItemCommand =>
+        CrossingVoidZDTool.ViewModels.SequenceFramesCommands.Current?.CopyFrameMenuItemCommand;
+
+    public System.Windows.Input.ICommand? InsertBlankBeforeMenuItemCommand =>
+        CrossingVoidZDTool.ViewModels.SequenceFramesCommands.Current?.InsertBlankBeforeMenuItemCommand;
+
+    public System.Windows.Input.ICommand? InsertBlankAfterMenuItemCommand =>
+        CrossingVoidZDTool.ViewModels.SequenceFramesCommands.Current?.InsertBlankAfterMenuItemCommand;
+
+    public System.Windows.Input.ICommand? DeleteFrameMenuItemCommand =>
+        CrossingVoidZDTool.ViewModels.SequenceFramesCommands.Current?.DeleteFrameMenuItemCommand;
 }
 
 internal sealed record SequenceFrameSection(
@@ -216,6 +245,22 @@ internal sealed record SequenceFrameSection(
     public string OverflowText => Frames.Count > PreviewFrames.Count
         ? $"+{Frames.Count - PreviewFrames.Count}"
         : "...";
+
+    /// <summary>
+    /// 这张动作卡上的命令（S0/S1）。
+    ///
+    /// 卡片按钮在 `ItemsControl.ItemTemplate` 里，数据上下文就是这张卡，所以命令只能挂在卡片上；
+    /// 而 XAML 里绑的属性**必须 public**（internal 会让 XamlCompiler 静默崩掉，查了很久）。
+    /// 这里写成**只读计算属性**，读全局那套命令——这样两个构造点（VM 重建、Builder 首次加载）
+    /// 都不需要各自挂一遍，也不会把命令掺进 record 的相等性里。
+    /// </summary>
+    public System.Windows.Input.ICommand? ManageFramesCommand =>
+        CrossingVoidZDTool.ViewModels.SequenceFramesCommands.Current?.ManageFramesCommand;
+
+    /// <summary>动作卡上的播放按钮（S5 收尾）：放进右侧预览区并开始播。</summary>
+    public System.Windows.Input.ICommand? PreviewSectionCommand =>
+        CrossingVoidZDTool.ViewModels.SequenceFramesCommands.Current?.PreviewSectionCommand;
+
 }
 
 internal sealed record SequenceFrameSectionGroup(
@@ -268,6 +313,11 @@ internal sealed record SequenceFrameCollectionItem(
     public Visibility SelectionOrderVisibility => SelectionOrder > 0
         ? Visibility.Visible
         : Visibility.Collapsed;
+
+    /// <summary>「处理重复」：对着这一项打开重复帧裁决器（S1 收尾）。命令挂在项上，</summary>
+    /// <remarks>因为右键菜单长在项模板里（数据上下文就是这一项）。</remarks>
+    public System.Windows.Input.ICommand? ResolveDuplicatesMenuItemCommand =>
+        CrossingVoidZDTool.ViewModels.SequenceFramesCommands.Current?.ResolveDuplicatesMenuItemCommand;
 
     private void OnPropertyChanged([CallerMemberName] string? propertyName = null)
     {

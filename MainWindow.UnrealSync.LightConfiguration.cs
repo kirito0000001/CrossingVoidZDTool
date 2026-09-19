@@ -20,7 +20,7 @@ namespace CrossingVoidZDTool
     {
         private async void ApplyUnrealLightConfigurationButton_Click(object sender, RoutedEventArgs e)
         {
-            LogUserOperation("应用 Unreal 基础配置");
+            LogUserOperation("应用 Unreal 基础配置", startsRun: true);
             var sync = _applicationViewModel.UnrealProjectSync;
             var character = sync.SelectedSource?.DraftCharacter;
             var selectedIds = sync.GetSelectedLightConfigurationIds();

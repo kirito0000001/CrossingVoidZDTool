@@ -33,6 +33,36 @@ internal sealed record CharacterCard(
     public string EffectiveCoverUri => string.IsNullOrWhiteSpace(CoverUri)
         ? "ms-appx:///Assets/DefaultPortrait.png"
         : CoverUri;
+
+    // C6b：角色详情弹窗那五个按钮的命令。
+    //
+    // **为什么挂在卡片上**：详情面板的 DataContext 就是这张卡
+    // （壳里 `CharacterDetailCard.DataContext = character;`），所以页面级路径
+    // （`CharacterDesk.XxxCommand`）在那个作用域里根本解析不到——症状正是
+    // 「按钮在、点不动、不报错」，冒烟里那条「已绑命令」的断言专门盯这个。
+    // 这跟 `SequenceFrameSection.ManageFramesCommand` 是同一个形状：
+    // 命令放**全局持有者**（`CharacterDetailCommands`），卡片只读它；
+    // 只读计算属性不会把命令掺进 record 的相等性。
+
+    /// <summary>「继续编辑」：恢复草稿（若已完成）→ 关弹窗 → 跳上次编辑的那一页。</summary>
+    public System.Windows.Input.ICommand? ContinueEditingCommand =>
+        CrossingVoidZDTool.ViewModels.CharacterDetailCommands.Current?.ContinueEditingCommand;
+
+    /// <summary>「查看角色」：只读预览。</summary>
+    public System.Windows.Input.ICommand? ViewCharacterCommand =>
+        CrossingVoidZDTool.ViewModels.CharacterDetailCommands.Current?.ViewCharacterCommand;
+
+    /// <summary>「导出角色」。</summary>
+    public System.Windows.Input.ICommand? ExportCharacterCommand =>
+        CrossingVoidZDTool.ViewModels.CharacterDetailCommands.Current?.ExportCharacterCommand;
+
+    /// <summary>「打开角色目录」。</summary>
+    public System.Windows.Input.ICommand? OpenCharacterFolderCommand =>
+        CrossingVoidZDTool.ViewModels.CharacterDetailCommands.Current?.OpenCharacterFolderCommand;
+
+    /// <summary>「前往虚幻同步台」。</summary>
+    public System.Windows.Input.ICommand? GoToUnrealSyncCommand =>
+        CrossingVoidZDTool.ViewModels.CharacterDetailCommands.Current?.GoToUnrealSyncCommand;
 }
 
 internal sealed record CharacterReferenceImage(

@@ -726,20 +726,13 @@ namespace CrossingVoidZDTool
 
         private async Task<IReadOnlyList<string>> PickWaveFilesAsync(bool allowMultiple)
         {
-            var picker = new FileOpenPicker
-            {
-                SuggestedStartLocation = PickerLocationId.MusicLibrary
-            };
-            picker.FileTypeFilter.Add(".wav");
-            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
             if (allowMultiple)
             {
-                var files = await picker.PickMultipleFilesAsync();
-                return files.Select(file => file.Path).ToArray();
+                return await _filePickerService.PickMultipleFilesAsync(PickerLocationId.MusicLibrary, ".wav");
             }
 
-            var file = await picker.PickSingleFileAsync();
-            return file is null ? [] : [file.Path];
+            var singleFile = await _filePickerService.PickSingleFileAsync(PickerLocationId.MusicLibrary, ".wav");
+            return singleFile is null ? [] : [singleFile];
         }
     }
 }

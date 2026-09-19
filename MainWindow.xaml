@@ -254,7 +254,7 @@
                             <Button
                                 Grid.Column="1"
                                 CommandParameter="{Binding}"
-                                Click="ImportSequenceFramesButton_Click"
+                        Command="{Binding SequenceFrames.ImportFramesCommand}"
                                 Style="{StaticResource IconToolButtonStyle}"
                                 ToolTipService.ToolTip="导入这一组序列帧">
                                 <SymbolIcon Symbol="Add" />
@@ -262,7 +262,7 @@
                             <Button
                                 Grid.Column="2"
                                 CommandParameter="{Binding}"
-                                Click="OpenSequenceFrameFolderButton_Click"
+                        Command="{Binding SequenceFrames.OpenActionFolderCommand}"
                                 Style="{StaticResource IconToolButtonStyle}"
                                 ToolTipService.ToolTip="打开动作文件夹">
                                 <FontIcon FontSize="18" Glyph="&#xE838;" />
@@ -270,7 +270,7 @@
                             <Button
                                 Grid.Column="3"
                                 CommandParameter="{Binding}"
-                                Click="PreviewSequenceFramesButton_Click"
+                                Command="{Binding PreviewSectionCommand}"
                                 Style="{StaticResource IconToolButtonStyle}"
                                 ToolTipService.ToolTip="放入右侧预览器">
                                 <SymbolIcon Symbol="Play" />
@@ -301,20 +301,21 @@
                                                 Background="{ThemeResource LayerFillColorAltBrush}"
                                                 BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
                                                 BorderThickness="1"
-                                                Click="PreviewThumbnailSequenceButton_Click"
+                                                Command="{Binding PreviewThumbnailCommand}"
                                                 ToolTipService.ToolTip="查看全部序列帧并排序">
                                                 <Image Source="{Binding FileUri, Mode=OneWay}" Stretch="Uniform" />
                                             </Button>
                                         </DataTemplate>
                                     </ItemsControl.ItemTemplate>
                                 </ItemsControl>
-                                <Button
-                                    Grid.Column="1"
-                                    Width="46"
-                                    Height="62"
-                                    Padding="0"
-                                    CommandParameter="{Binding}"
-                                    Click="ManageSequenceFramesButton_Click"
+                            <Button
+                                Grid.Column="1"
+                                Width="46"
+                                Height="62"
+                                Padding="0"
+                            AutomationProperties.Name="管理序列帧"
+                            Command="{Binding ManageFramesCommand}"
+                            CommandParameter="{Binding}"
                                     Style="{StaticResource IconToolButtonStyle}"
                                     ToolTipService.ToolTip="查看全部序列帧并排序">
                                     <TextBlock FontSize="22" FontWeight="SemiBold" Text="..." />
@@ -1934,31 +1935,31 @@
                                             ValueChanged="SequencePreviewFpsNumberBox_ValueChanged" />
                                         <Button
                                             Grid.Column="2"
-                                            Click="PreviousSequenceFrameButton_Click"
+                                            Command="{Binding SequenceFrames.PreviousFrameCommand}"
                                             Style="{StaticResource IconToolButtonStyle}"
                                             ToolTipService.ToolTip="上一帧">
                                             <FontIcon Glyph="&#xE892;" />
                                         </Button>
                                         <Button
                                             Grid.Column="3"
-                                            Click="PlayPauseSequencePreviewButton_Click"
+                                            Command="{Binding SequenceFrames.TogglePreviewPlaybackCommand}"
                                             Style="{StaticResource IconToolButtonStyle}"
                                             ToolTipService.ToolTip="{Binding SequenceFrames.PlayPauseToolTip, Mode=OneWay}">
                                             <FontIcon Glyph="{Binding SequenceFrames.PlayPauseGlyph, Mode=OneWay}" />
                                         </Button>
                                         <Button
                                             Grid.Column="4"
-                                            Click="NextSequenceFrameButton_Click"
+                                            Command="{Binding SequenceFrames.NextFrameCommand}"
                                             Style="{StaticResource IconToolButtonStyle}"
                                             ToolTipService.ToolTip="下一帧">
                                             <FontIcon Glyph="&#xE893;" />
                                         </Button>
                                         <Button
                                             Grid.Column="5"
-                                            Click="OpenSequenceEditorButton_Click"
+                        Command="{Binding SequenceFrames.OpenEditorCommand}"
                                             Content="编辑帧序列"
                                             Style="{StaticResource PrimaryToolButtonStyle}" />
-                                        <Button Grid.Column="6" Click="OpenSequenceCollectionButton_Click" Content="帧素材合集" Style="{StaticResource PrimaryToolButtonStyle}" />
+<Button Grid.Column="6" Command="{Binding SequenceFrames.OpenCollectionCommand}" Content="帧素材合集" Style="{StaticResource PrimaryToolButtonStyle}" />
                                     </Grid>
                                 </Grid>
                             </Border>
@@ -2119,7 +2120,7 @@
                     RightTapped="PageBlankArea_RightTapped"
                     Visibility="Collapsed"
                     VerticalScrollBarVisibility="Auto">
-                    <Grid Margin="0,0,12,0" RowSpacing="12" IsHitTestVisible="{Binding CharacterDesk.CanEditCurrentCharacter, Mode=OneWay}">
+                    <!-- 同步台整页不随「角色是否可编辑」锁输入：它的操作对象是 Unreal 工程而不是角色数据，绑上去会让只读查看状态下整页点不动（还能滚，所以看着像卡死）。 --><Grid Margin="0,0,12,0" RowSpacing="12">
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
                             <RowDefinition Height="Auto" />
@@ -2838,7 +2839,7 @@
                                                         MinHeight="42"
                                                         HorizontalAlignment="Stretch"
                                                         HorizontalContentAlignment="Center"
-                                                        Click="UnrealSyncPreviousStepButton_Click"
+                                                        Command="{Binding UnrealProjectSync.PreviousStepCommand}"
                                                         Content="上一步"
                                                         IsEnabled="{Binding UnrealProjectSync.IsWorkflowOperationIdle, Mode=OneWay}" />
                                                     <Button
@@ -2846,7 +2847,7 @@
                                                         MinHeight="42"
                                                         HorizontalAlignment="Stretch"
                                                         HorizontalContentAlignment="Center"
-                                                        Click="UnrealSyncNextStepButton_Click"
+                                                        Command="{Binding UnrealProjectSync.NextStepCommand}"
                                                         Content="{Binding UnrealProjectSync.WorkflowNextText, Mode=OneWay}"
                                                         IsEnabled="{Binding UnrealProjectSync.WorkflowNextButtonEnabled, Mode=OneWay}"
                                                         Visibility="{Binding UnrealProjectSync.WorkflowNextButtonVisibility, Mode=OneWay}"
@@ -2855,13 +2856,13 @@
                                                 <Button
                                                     HorizontalAlignment="Stretch"
                                                     HorizontalContentAlignment="Center"
-                                                    Click="UnrealSyncDetectAllStepsButton_Click"
+                                                        Command="{Binding UnrealProjectSync.DetectAllStepsCommand}"
                                                     Content="依次检测后续步骤"
                                                     IsEnabled="{Binding UnrealProjectSync.IsWorkflowOperationIdle, Mode=OneWay}"
                                                     ToolTipService.ToolTip="从当前步骤往后依次检测，停在第一个需要处理的步骤；只检测，不写入" />
                                                 <Button
                                                     HorizontalAlignment="Stretch"
-                                                    Click="ReloadUnrealWorkflowStepButton_Click"
+                                                        Command="{Binding UnrealProjectSync.ReloadStepCommand}"
                                                     Content="{Binding UnrealProjectSync.WorkflowReloadText, Mode=OneWay}"
                                                     IsEnabled="{Binding UnrealProjectSync.IsWorkflowOperationIdle, Mode=OneWay}"
                                                     Visibility="{Binding UnrealProjectSync.PublishWorkspaceVisibility, Mode=OneWay}" />
@@ -2937,21 +2938,21 @@
                                                         <Button
                                                             HorizontalAlignment="Stretch"
                                                             HorizontalContentAlignment="Center"
-                                                            Click="UnrealSyncSelectAllButton_Click"
+                                                            Command="{Binding UnrealProjectSync.SelectAllCommand}"
                                                             Content="全选"
                                                             IsEnabled="{Binding UnrealProjectSync.CanChangeStepSelection, Mode=OneWay}" />
                                                         <Button
                                                             Grid.Column="1"
                                                             HorizontalAlignment="Stretch"
                                                             HorizontalContentAlignment="Center"
-                                                            Click="UnrealSyncSelectNoneButton_Click"
+                                                            Command="{Binding UnrealProjectSync.SelectNoneCommand}"
                                                             Content="全不选"
                                                             IsEnabled="{Binding UnrealProjectSync.CanChangeStepSelection, Mode=OneWay}" />
                                                         <Button
                                                             Grid.Column="2"
                                                             HorizontalAlignment="Stretch"
                                                             HorizontalContentAlignment="Center"
-                                                            Click="UnrealSyncInvertSelectionButton_Click"
+                                                            Command="{Binding UnrealProjectSync.InvertSelectionCommand}"
                                                             Content="反选"
                                                             IsEnabled="{Binding UnrealProjectSync.CanChangeStepSelection, Mode=OneWay}" />
                                                     </Grid>
@@ -2963,7 +2964,7 @@
                                                         <Button
                                                             HorizontalAlignment="Stretch"
                                                             HorizontalContentAlignment="Center"
-                                                            Click="UnrealSyncCopyStepReportButton_Click"
+                                                        Command="{Binding UnrealProjectSync.CopyStepReportCommand}"
                                                             Content="复制清单"
                                                             ToolTipService.ToolTip="把这一步的差异复制成文本" />
                                                         <Button
@@ -3275,7 +3276,7 @@
                                 Spacing="6">
                                 <Button Click="ScrollLogToBottomButton_Click" Content="滚动到底部" />
                                 <Button Click="CopyAllLogButton_Click" Content="复制全部" />
-                                <Button Click="ClearLogButton_Click" Content="清空" />
+                                <Button Click="CopyCurrentRunLogButton_Click" Content="复制本次流程" /><Button Click="ClearLogButton_Click" Content="清空" />
                             </StackPanel>
                         </Grid>
                         <ScrollViewer
@@ -4069,7 +4070,7 @@
                             <TextBlock FontSize="22" FontWeight="SemiBold" Text="角色详情" />
                             <TextBlock Style="{StaticResource SubtleTextStyle}" Text="查看角色状态并执行完成后的管理操作。" />
                         </StackPanel>
-                        <Button
+                        <Button AutomationProperties.Name="关闭角色详情"
                             Grid.Column="1"
                             Click="CharacterDetailCloseButton_Click"
                             Style="{StaticResource IconToolButtonStyle}"
@@ -4149,34 +4150,34 @@
                                     <Button
                                         x:Name="CharacterDetailContinueButton"
                                         HorizontalAlignment="Stretch"
-                                        Click="CharacterDetailContinueButton_Click"
+                                        Command="{Binding ContinueEditingCommand}"
                                         Content="继续编辑"
                                         Style="{StaticResource PrimaryToolButtonStyle}" />
                                     <Button
                                         x:Name="CharacterDetailExportButton"
                                         Grid.Column="1"
                                         HorizontalAlignment="Stretch"
-                                        Click="CharacterDetailExportButton_Click"
+                                        Command="{Binding ExportCharacterCommand}"
                                         Content="导出角色" />
                                     <Button
                                         x:Name="CharacterDetailOpenFolderButton"
                                         Grid.Row="1"
                                         HorizontalAlignment="Stretch"
-                                        Click="CharacterDetailOpenFolderButton_Click"
+                                        Command="{Binding OpenCharacterFolderCommand}"
                                         Content="打开角色目录" />
                                     <Button
                                         x:Name="CharacterDetailUnrealSyncButton"
                                         Grid.Row="1"
                                         Grid.Column="1"
                                         HorizontalAlignment="Stretch"
-                                        Click="CharacterDetailUnrealSyncButton_Click"
+                                        Command="{Binding GoToUnrealSyncCommand}"
                                         Content="前往虚幻同步台" />
                                     <Button
                                         x:Name="CharacterDetailViewButton"
                                         Grid.Row="2"
                                         Grid.ColumnSpan="2"
                                         HorizontalAlignment="Stretch"
-                                        Click="CharacterDetailViewButton_Click"
+                                        Command="{Binding ViewCharacterCommand}"
                                         Content="查看角色"
                                         Visibility="{Binding IsCompleted, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}" />
                                 </Grid>
@@ -4567,14 +4568,14 @@
                         </StackPanel>
                         <Button
                             Grid.Column="1"
-                            Click="OpenSequenceCollectionButton_Click"
+                        Command="{Binding SequenceFrames.OpenCollectionFromManagerCommand}"
                             Style="{StaticResource IconToolButtonStyle}"
                             ToolTipService.ToolTip="检查全部帧素材与重复图片">
                             <SymbolIcon Symbol="Bullets" />
                         </Button>
                         <Button
                             Grid.Column="2"
-                            Click="SequenceFramesManagerCloseButton_Click"
+                            Command="{Binding SequenceFrames.CloseManagerCommand}"
                             Style="{StaticResource IconToolButtonStyle}"
                             ToolTipService.ToolTip="关闭">
                             <SymbolIcon Symbol="Cancel" />
@@ -4599,13 +4600,13 @@
                                     <ColumnDefinition Width="Auto" />
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
-                                <Button Click="PreviousSequenceFrameButton_Click" Style="{StaticResource IconToolButtonStyle}" ToolTipService.ToolTip="上一帧">
+                                <Button Command="{Binding SequenceFrames.PreviousFrameCommand}" Style="{StaticResource IconToolButtonStyle}" ToolTipService.ToolTip="上一帧">
                                     <FontIcon Glyph="&#xE892;" />
                                 </Button>
-                                <Button Grid.Column="1" Click="PlayPauseSequenceEditorPreviewButton_Click" Style="{StaticResource IconToolButtonStyle}" ToolTipService.ToolTip="{Binding SequenceFrames.PlayPauseToolTip, Mode=OneWay}">
+                                <Button Grid.Column="1" Command="{Binding SequenceFrames.ToggleEditorPreviewPlaybackCommand}" Style="{StaticResource IconToolButtonStyle}" ToolTipService.ToolTip="{Binding SequenceFrames.PlayPauseToolTip, Mode=OneWay}">
                                     <FontIcon Glyph="{Binding SequenceFrames.PlayPauseGlyph, Mode=OneWay}" />
                                 </Button>
-                                <Button Grid.Column="2" Click="NextSequenceFrameButton_Click" Style="{StaticResource IconToolButtonStyle}" ToolTipService.ToolTip="下一帧">
+                                <Button Grid.Column="2" Command="{Binding SequenceFrames.NextFrameCommand}" Style="{StaticResource IconToolButtonStyle}" ToolTipService.ToolTip="下一帧">
                                     <FontIcon Glyph="&#xE893;" />
                                 </Button>
                                 <TextBlock Grid.Column="3" VerticalAlignment="Center" Text="FPS" />
@@ -4636,7 +4637,7 @@
                                     x:Name="SequenceEditorExportAtlasButton"
                                     Grid.Column="7"
                                     VerticalAlignment="Center"
-                                    Click="SequenceEditorExportAtlasButton_Click"
+                                    Command="{Binding SequenceFrames.ExportAtlasCommand}"
                                     Style="{StaticResource PrimaryToolButtonStyle}" ToolTipService.ToolTip="把当前动作的序列帧打成一张图集（含坐标 json），落到 Export 目录">
                                     <StackPanel Orientation="Horizontal" Spacing="6">
                                         <FontIcon FontSize="14" Glyph="&#xE8B7;" />
@@ -4729,9 +4730,9 @@
                                             </StackPanel>
                                         </Border>
                                         <StackPanel Spacing="8">
-                                            <Button HorizontalAlignment="Stretch" Click="NewSequenceEditorFrameButton_Click" Content="新建帧" Style="{StaticResource PrimaryToolButtonStyle}" />
-                                            <Button HorizontalAlignment="Stretch" Click="ReplaceSequenceEditorFrameButton_Click" Content="替换帧素材" IsEnabled="{Binding SequenceFrames.HasSelectedEditorFrame, Mode=OneWay}" Style="{StaticResource PrimaryToolButtonStyle}" />
-                                            <Button HorizontalAlignment="Stretch" Click="SelectSequenceEditorFrameFromCollectionButton_Click" Content="从帧合集选择" IsEnabled="{Binding SequenceFrames.HasSelectedEditorFrame, Mode=OneWay}" Style="{StaticResource PrimaryToolButtonStyle}" />
+<Button HorizontalAlignment="Stretch" Command="{Binding SequenceFrames.InsertBlankAfterCommand}" Content="新建帧" Style="{StaticResource PrimaryToolButtonStyle}" />
+                                            <Button HorizontalAlignment="Stretch" Command="{Binding SequenceFrames.ReplaceSelectedEditorFrameCommand}" Content="替换帧素材" IsEnabled="{Binding SequenceFrames.HasSelectedEditorFrame, Mode=OneWay}" Style="{StaticResource PrimaryToolButtonStyle}" />
+                                            <Button HorizontalAlignment="Stretch" Command="{Binding SequenceFrames.PickEditorFrameFromCollectionCommand}" Content="从帧合集选择" IsEnabled="{Binding SequenceFrames.HasSelectedEditorFrame, Mode=OneWay}" Style="{StaticResource PrimaryToolButtonStyle}" />
                                         </StackPanel>
                                         <StackPanel Spacing="5">
                                             <TextBlock Text="持续帧格" />
@@ -4792,10 +4793,10 @@
                                                 <RowDefinition Height="Auto" />
                                                 <RowDefinition Height="Auto" />
                                             </Grid.RowDefinitions>
-                                            <Button HorizontalAlignment="Stretch" Click="CopySequenceEditorFrameButton_Click" Content="复制" IsEnabled="{Binding SequenceFrames.HasSelectedEditorFrame, Mode=OneWay}" Style="{StaticResource PrimaryToolButtonStyle}" />
-                                            <Button Grid.Column="1" HorizontalAlignment="Stretch" Click="InsertBlankSequenceFrameBeforeButton_Click" Content="左插入" IsEnabled="{Binding SequenceFrames.HasSelectedEditorFrame, Mode=OneWay}" Style="{StaticResource PrimaryToolButtonStyle}" />
-                                            <Button Grid.Column="2" HorizontalAlignment="Stretch" Click="InsertBlankSequenceFrameAfterButton_Click" Content="右插入" IsEnabled="{Binding SequenceFrames.HasSelectedEditorFrame, Mode=OneWay}" Style="{StaticResource PrimaryToolButtonStyle}" />
-                                            <Button Grid.Row="1" Grid.ColumnSpan="3" HorizontalAlignment="Stretch" Click="DeleteSequenceEditorFrameButton_Click" Content="删除当前帧" IsEnabled="{Binding SequenceFrames.HasSelectedEditorFrame, Mode=OneWay}" Style="{StaticResource PrimaryToolButtonStyle}" />
+<Button HorizontalAlignment="Stretch" Command="{Binding SequenceFrames.CopyEditorFrameCommand}" Content="复制" IsEnabled="{Binding SequenceFrames.HasSelectedEditorFrame, Mode=OneWay}" Style="{StaticResource PrimaryToolButtonStyle}" />
+<Button Grid.Column="1" HorizontalAlignment="Stretch" Command="{Binding SequenceFrames.InsertBlankBeforeCommand}" Content="左插入" IsEnabled="{Binding SequenceFrames.HasSelectedEditorFrame, Mode=OneWay}" Style="{StaticResource PrimaryToolButtonStyle}" />
+<Button Grid.Column="2" HorizontalAlignment="Stretch" Command="{Binding SequenceFrames.InsertBlankAfterCommand}" Content="右插入" IsEnabled="{Binding SequenceFrames.HasSelectedEditorFrame, Mode=OneWay}" Style="{StaticResource PrimaryToolButtonStyle}" />
+                                            <Button Grid.Row="1" Grid.ColumnSpan="3" HorizontalAlignment="Stretch" Command="{Binding SequenceFrames.DeleteEditorFrameCommand}" Content="删除当前帧" IsEnabled="{Binding SequenceFrames.HasSelectedEditorFrame, Mode=OneWay}" Style="{StaticResource PrimaryToolButtonStyle}" />
                                         </Grid>
                                     </StackPanel>
 
@@ -4810,8 +4811,8 @@
                                             <TextBlock x:Name="SequenceMultiSelectionDurationText" Style="{StaticResource SubtleTextStyle}" TextWrapping="Wrap" />
                                             <TextBlock x:Name="SequenceMultiSelectionVoiceText" Style="{StaticResource SubtleTextStyle}" TextWrapping="Wrap" />
                                         </StackPanel>
-                                        <Button x:Name="DuplicateSelectedSequenceFramesButton" HorizontalAlignment="Stretch" Click="DuplicateSelectedSequenceFramesButton_Click" Content="复制所选帧" Style="{StaticResource PrimaryToolButtonStyle}" />
-                                        <Button x:Name="DeleteSelectedSequenceFramesButton" HorizontalAlignment="Stretch" Click="DeleteSelectedSequenceFramesButton_Click" Content="删除所选帧" Style="{StaticResource PrimaryToolButtonStyle}" />
+                                        <Button x:Name="DuplicateSelectedSequenceFramesButton" HorizontalAlignment="Stretch" Command="{Binding SequenceFrames.ToggleCopyTargetSelectionCommand}" Content="复制所选帧" Style="{StaticResource PrimaryToolButtonStyle}" />
+<Button x:Name="DeleteSelectedSequenceFramesButton" HorizontalAlignment="Stretch" Command="{Binding SequenceFrames.DeleteSelectedFramesCommand}" Content="删除所选帧" Style="{StaticResource PrimaryToolButtonStyle}" />
                                     </StackPanel>
                                 </Grid>
                             </ScrollViewer>
@@ -4869,11 +4870,11 @@
                                         CornerRadius="4">
                                         <Border.ContextFlyout>
                                             <MenuFlyout>
-                                                <MenuFlyoutItem Text="替换素材" Click="ReplaceSequenceFrameMenuItem_Click" Tag="{Binding}" />
-                                                <MenuFlyoutItem Text="复制" Click="CopySequenceFrameMenuItem_Click" Tag="{Binding}" />
-                                                <MenuFlyoutItem Text="左插入" Click="InsertBlankSequenceFrameBeforeMenuItem_Click" Tag="{Binding}" />
-                                                <MenuFlyoutItem Text="右插入" Click="InsertBlankSequenceFrameAfterMenuItem_Click" Tag="{Binding}" />
-                                                <MenuFlyoutItem Text="删除" Click="DeleteSequenceFrameMenuItem_Click" Tag="{Binding}" />
+                                                <MenuFlyoutItem Text="替换素材" Command="{Binding ReplaceFrameMenuItemCommand}" CommandParameter="{Binding}" />
+                                                <MenuFlyoutItem Text="复制" Command="{Binding CopyFrameMenuItemCommand}" CommandParameter="{Binding}" />
+                                                <MenuFlyoutItem Text="左插入" Command="{Binding InsertBlankBeforeMenuItemCommand}" CommandParameter="{Binding}" />
+                                                <MenuFlyoutItem Text="右插入" Command="{Binding InsertBlankAfterMenuItemCommand}" CommandParameter="{Binding}" />
+                                                <MenuFlyoutItem Text="删除" Command="{Binding DeleteFrameMenuItemCommand}" CommandParameter="{Binding}" />
                                             </MenuFlyout>
                                         </Border.ContextFlyout>
                                         <StackPanel Spacing="5">
@@ -4906,7 +4907,7 @@
                                                     Background="{Binding ReuseTintBrush, Mode=OneWay}"
                                                     BorderBrush="{Binding ReuseBrush, Mode=OneWay}"
                                                     BorderThickness="1"
-                                                    Click="SelectSequenceReuseGroupButton_Click"
+                                                    Command="{Binding SelectReuseGroupCommand}"
                                                     CornerRadius="3"
                                                     ToolTipService.ToolTip="选择所有使用此素材的帧"
                                                     Visibility="{Binding ReuseVisibility, Mode=OneWay}">
@@ -5120,19 +5121,19 @@
                         <Button
                             x:Name="DetectSequenceFrameDuplicatesButton"
                             Grid.Column="1"
-                            Click="DetectSequenceFrameDuplicatesButton_Click"
+                        Command="{Binding SequenceFrames.DetectDuplicatesCommand}"
                             Content="检测重复"
                             Style="{StaticResource PrimaryToolButtonStyle}" />
                         <Button
                             x:Name="ResolveAllSequenceFrameDuplicatesButton"
                             Grid.Column="2"
-                            Click="ResolveAllSequenceFrameDuplicatesButton_Click"
+                        Command="{Binding SequenceFrames.ResolveAllDuplicatesCommand}"
                             Content="一键处理"
                             IsEnabled="False"
                             Style="{StaticResource PrimaryToolButtonStyle}" />
                         <Button
                             Grid.Column="3"
-                            Click="SequenceFramesCollectionCloseButton_Click"
+                        Command="{Binding SequenceFrames.CloseCollectionCommand}"
                             Style="{StaticResource IconToolButtonStyle}"
                             ToolTipService.ToolTip="关闭">
                             <SymbolIcon Symbol="Cancel" />
@@ -5165,8 +5166,8 @@
                                     <Border.ContextFlyout>
                                         <MenuFlyout>
                                             <MenuFlyoutItem
-                                                Click="ResolveDuplicateSequenceFrameMenuItem_Click"
-                                                Tag="{Binding}"
+                                                Command="{Binding ResolveDuplicatesMenuItemCommand}"
+                                                CommandParameter="{Binding}"
                                                 Text="处理重复" />
                                         </MenuFlyout>
                                     </Border.ContextFlyout>
@@ -5262,14 +5263,14 @@
                         <Button
                             x:Name="CancelSequenceFrameCollectionSelectionButton"
                             Grid.Column="1"
-                            Click="CancelSequenceFrameCollectionSelectionButton_Click"
+                        Command="{Binding SequenceFrames.CancelCollectionSelectionCommand}"
                             Content="取消"
                             Style="{StaticResource PrimaryToolButtonStyle}"
                             Visibility="Collapsed" />
                         <Button
                             x:Name="ConfirmSequenceFrameCollectionSelectionButton"
                             Grid.Column="2"
-                            Click="ConfirmSequenceFrameCollectionSelectionButton_Click"
+                        Command="{Binding SequenceFrames.ConfirmCollectionSelectionCommand}"
                             Content="确定"
                             IsEnabled="False"
                             Style="{StaticResource PrimaryToolButtonStyle}"
@@ -5376,13 +5377,13 @@
                             <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
                         <Button
-                            Click="SequenceFrameDuplicateResolverCancelButton_Click"
+                        Command="{Binding SequenceFrames.CloseDuplicateResolverCommand}"
                             Content="返回"
                             HorizontalAlignment="Stretch"
                             Style="{StaticResource PrimaryToolButtonStyle}" />
                         <Button
                             Grid.Column="1"
-                            Click="SequenceFrameDuplicateResolverConfirmButton_Click"
+                            Command="{Binding SequenceFrames.ConfirmDuplicateResolutionCommand}"
                             Content="确认保留所选"
                             HorizontalAlignment="Stretch"
                             Style="{StaticResource DialogAccentButtonStyle}" />
@@ -5530,4 +5531,3 @@
         </Grid>
     </Grid>
 </Window>
-

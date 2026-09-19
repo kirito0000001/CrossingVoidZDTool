@@ -94,70 +94,49 @@ internal sealed partial class UnrealProjectSyncViewModel
     }
 
     /// <summary>当前步骤的中栏状态。</summary>
-    public UnrealSyncWorkspaceState WorkspaceState
-    {
-        get
-        {
-            if (IsEngineToToolbox)
-            {
-                // 导入方向没有分步流程，只有「检测出的差异树」一种内容。
-                return SelectedSource is null
-                    ? UnrealSyncWorkspaceState.NoCharacter
-                    : !string.IsNullOrEmpty(_workspaceFailure)
-                        ? UnrealSyncWorkspaceState.Failed
-                        : _isWorkflowOperationRunning
-                            ? UnrealSyncWorkspaceState.Busy
-                            : !_hasImportDetection
-                                ? UnrealSyncWorkspaceState.NotDetected
-                                : SelectionTreeRoots.Count == 0
-                                    ? UnrealSyncWorkspaceState.NoChanges
-                                    : UnrealSyncWorkspaceState.HasContent;
-            }
+    public UnrealSyncWorkspaceState WorkspaceState =>
+        UnrealSyncWorkflowState.ResolveWorkspaceState(BuildWorkflowInputs());
 
-            if (!string.IsNullOrEmpty(_workspaceFailure))
-            {
-                return UnrealSyncWorkspaceState.Failed;
-            }
-            // 正在跑的时候一律是忙碌态：这一步的旧数据可能已经被清掉了，
-            // 继续按旧数据显示会让人以为检测没开始。
-            if (_isWorkflowOperationRunning)
-            {
-                return UnrealSyncWorkspaceState.Busy;
-            }
-            // 这一步已经有数据就按数据说话。放在选角色判断之前是刻意的：
-            // 手里明明有检测结果却显示「尚未选择角色」，比显示结果更让人困惑。
-            if (!IsWorkflowStepLoaded(WorkflowStep))
-            {
-                return SelectedSource?.DraftCharacter is null
-                    ? UnrealSyncWorkspaceState.NoCharacter
-                    : UnrealSyncWorkspaceState.NotDetected;
-            }
-
-            return WorkflowStep switch
-            {
-                // 第一、二步的列表本身就是内容，加载过就有东西看。
-                1 => FoundationChecks.Count == 0
-                    ? UnrealSyncWorkspaceState.NoChanges
-                    : UnrealSyncWorkspaceState.HasContent,
-                2 => NormalizationItems.Count == 0
-                    ? UnrealSyncWorkspaceState.NoChanges
-                    : UnrealSyncWorkspaceState.HasContent,
-                3 or 5 => SelectionTreeRoots.Count == 0
-                    ? UnrealSyncWorkspaceState.NoChanges
-                    : UnrealSyncWorkspaceState.HasContent,
-                4 => LightConfigurationItems.Count == 0
-                    ? UnrealSyncWorkspaceState.NoChanges
-                    : UnrealSyncWorkspaceState.HasContent,
-                6 => BlueprintSetupItems.Count == 0
-                    ? UnrealSyncWorkspaceState.NoChanges
-                    : UnrealSyncWorkspaceState.HasContent,
-                _ => UnrealSyncWorkspaceState.NoChanges,
-            };
-        }
-    }
+    /// <summary>
+    /// 把 ViewModel 里散着的字段和集合折成投影的输入。
+    ///
+    /// 这是 P5「只读投影」那一半：规则搬进 <see cref="UnrealSyncWorkflowState"/> 之后，
+    /// 这里只剩「读现状」。字段本身还没搬进状态对象（那是下一批），
+    /// 但改规则从此只改那一个纯函数，而且能被单测钉住——
+    /// 以前这段六十行嵌套三元只能靠跑起界面去看。
+    /// </summary>
+    internal UnrealSyncWorkflowInputs BuildWorkflowInputs() => new(
+        IsImportDirection: IsEngineToToolbox,
+        HasSelectedSource: SelectedSource is not null,
+        HasSelectedCharacter: SelectedSource?.DraftCharacter is not null,
+        CurrentStep: WorkflowStep,
+        HasFailure: _workspaceFailure.Length > 0,
+        IsOperationRunning: IsWorkflowOperationRunning,
+        Step1Loaded: FoundationChecks.Count > 0,
+        Step1ItemCount: FoundationChecks.Count,
+        Step2Loaded: IsNormalizationStepLoaded,
+        Step2ItemCount: NormalizationItems.Count,
+        Step3Loaded: _stepLoads.IsLoaded(3),
+        Step5Loaded: _stepLoads.IsLoaded(5),
+        Step35ItemCount: SelectionTreeRoots.Count,
+        Step4Loaded: IsLightConfigurationLoaded,
+        Step4ItemCount: LightConfigurationItems.Count,
+        Step4ErrorCount: LightConfigurationErrorCount,
+        Step4PendingCount: LightConfigurationPendingCount,
+        Step6Loaded: IsBlueprintSetupLoaded,
+        Step6ItemCount: BlueprintSetupItems.Count,
+        Step6ErrorCount: BlueprintSetupErrorCount,
+        Step6PendingCount: BlueprintSetupPendingCount,
+        HasDetectionRun: HasImportDetection);
 
     /// <summary>这一步在界面上的名字，占位文案里用。</summary>
-    public string WorkflowStepName => IsEngineToToolbox ? "导入差异" : WorkflowStep switch
+    public string WorkflowStepName => IsEngineToToolbox ? "导入差异" : WorkflowStepNameFor(WorkflowStep);
+
+    /// <summary>
+    /// 任意一步的名字。日志的步骤标题行要按步号取（写「离开第三步」时，
+    /// 当前步已经是第四步了），所以不能只看 <see cref="WorkflowStepName"/>。
+    /// </summary>
+    public string WorkflowStepNameFor(int step) => step switch
     {
         1 => "底层检测",
         2 => "规整素材",
@@ -166,6 +145,20 @@ internal sealed partial class UnrealProjectSyncViewModel
         5 => "序列同步",
         6 => "蓝图置入",
         _ => "同步结果",
+    };
+
+    /// <summary>
+    /// 某一步的结论，日志里「■ 第 N 步 · 结束：…」直接用这一句。
+    /// 复用各步**已经存在**的摘要文案，不另造一套说法。
+    /// </summary>
+    public string WorkflowStepConclusionText(int step) => step switch
+    {
+        1 => FoundationSummaryText,
+        2 => NormalizationSummaryText,
+        3 or 5 => DetectionResultSummaryText,
+        4 => LightConfigurationSummaryText,
+        6 => BlueprintSetupSummaryText,
+        _ => string.Empty,
     };
 
     /// <summary>各步自己的列表；只有内容态才显示。</summary>

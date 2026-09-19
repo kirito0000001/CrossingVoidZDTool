@@ -17,7 +17,18 @@ internal sealed partial class UnrealProjectSyncViewModel
 {
     private List<UnrealBlueprintSetupResultItem> _lastBlueprintSetupItems = [];
     private IReadOnlyList<UnrealBlueprintSetupGroup> _blueprintSetupGroups = [];
-    private bool _isBlueprintSetupLoaded;
+    public bool IsBlueprintSetupLoaded
+    {
+        get => _stepLoads.IsLoaded(6);
+        private set
+        {
+            if (_stepLoads.SetLoaded(6, value))
+            {
+                OnPropertyChanged(nameof(IsBlueprintSetupLoaded));
+                NotifyDerived(UnrealSyncDerivedNotifications.BlueprintSetupLoaded);
+            }
+        }
+    }
     private bool _isApplyingBlueprintSetup;
     private bool _isBulkBlueprintSetupSelection;
     private string _blueprintSetupResultMessage = string.Empty;
@@ -45,7 +56,7 @@ internal sealed partial class UnrealProjectSyncViewModel
         _lastBlueprintSetupItems.Count(item => item.Status == UnrealBlueprintSetupStatus.Unchanged);
     public int BlueprintSetupSelectedCount => BlueprintSetupItems.Count(item => item.IsSelected);
 
-    public string BlueprintSetupSummaryText => !_isBlueprintSetupLoaded
+    public string BlueprintSetupSummaryText => !IsBlueprintSetupLoaded
         ? "尚未检测蓝图数据"
         : $"共检查 {_lastBlueprintSetupItems.Count} 项：无差异 {BlueprintSetupUnchangedCount}，待写入 {BlueprintSetupPendingCount}，错误 {BlueprintSetupErrorCount}";
 
@@ -54,23 +65,13 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     public string BlueprintSetupResultMessage => _blueprintSetupResultMessage;
 
-    public bool IsBlueprintSetupLoaded => _isBlueprintSetupLoaded;
-
     public bool CanApplyBlueprintSetup => IsBlueprintSetupWorkspace &&
-        _isBlueprintSetupLoaded &&
+        IsBlueprintSetupLoaded &&
         BlueprintSetupSelectedCount > 0 &&
         !_isApplyingBlueprintSetup &&
         IsWorkflowOperationIdle;
 
-    public string WorkflowStep6StatusText => WorkflowStep < 6
-        ? "待处理"
-        : !_isBlueprintSetupLoaded
-            ? "进行中"
-            : BlueprintSetupErrorCount > 0
-                ? "存在错误"
-                : BlueprintSetupPendingCount > 0
-                    ? "进行中"
-                    : "已完成";
+    public string WorkflowStep6StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 6);
 
     public void SetBlueprintSetupResult(
         UnrealBlueprintSetupResult result,
@@ -112,7 +113,7 @@ internal sealed partial class UnrealProjectSyncViewModel
         }
 
         RebuildBlueprintSetupGroups();
-        _isBlueprintSetupLoaded = true;
+        IsBlueprintSetupLoaded = true;
         ClearWorkspaceFailure();
         _blueprintSetupResultMessage = result.Succeeded
             ? result.AppliedStableIds.Count > 0
@@ -192,7 +193,7 @@ internal sealed partial class UnrealProjectSyncViewModel
         BlueprintSetupItems.Clear();
         _lastBlueprintSetupItems.Clear();
         _blueprintSetupGroups = [];
-        _isBlueprintSetupLoaded = false;
+        IsBlueprintSetupLoaded = false;
         _isApplyingBlueprintSetup = false;
         _isBulkBlueprintSetupSelection = false;
         _blueprintSetupResultMessage = string.Empty;

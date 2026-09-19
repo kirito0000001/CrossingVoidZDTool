@@ -14,45 +14,6 @@ namespace CrossingVoidZDTool
     /// </summary>
     public sealed partial class MainWindow
     {
-        private void UnrealSyncSelectAllButton_Click(object sender, RoutedEventArgs e)
-        {
-            var sync = _applicationViewModel.UnrealProjectSync;
-            sync.SetStepSelection(true);
-            LogUserOperation($"同步流程：全选（{sync.StepSelectionText}）");
-        }
-
-        private void UnrealSyncSelectNoneButton_Click(object sender, RoutedEventArgs e)
-        {
-            var sync = _applicationViewModel.UnrealProjectSync;
-            sync.SetStepSelection(false);
-            LogUserOperation($"同步流程：全不选（{sync.StepSelectionText}）");
-        }
-
-        private void UnrealSyncInvertSelectionButton_Click(object sender, RoutedEventArgs e)
-        {
-            var sync = _applicationViewModel.UnrealProjectSync;
-            sync.InvertStepSelection();
-            LogUserOperation($"同步流程：反选（{sync.StepSelectionText}）");
-        }
-
-        private void UnrealSyncCopyStepReportButton_Click(object sender, RoutedEventArgs e)
-        {
-            var sync = _applicationViewModel.UnrealProjectSync;
-            var report = sync.BuildStepChangeReport();
-            if (string.IsNullOrWhiteSpace(report))
-            {
-                ShowFloatingTip(InfoBarSeverity.Informational, "没有可复制的内容", "这一步还没有检测结果。");
-                return;
-            }
-
-            CopyTextToClipboard(report);
-            LogUserOperation($"同步流程：复制第 {sync.WorkflowStep} 步清单");
-            ShowFloatingTip(
-                InfoBarSeverity.Success,
-                "清单已复制",
-                $"第 {sync.WorkflowStep} 步 {sync.WorkflowStepName} 的差异已复制到剪贴板。");
-        }
-
         /// <summary>
         /// 在已打开的编辑器里选中这一步涉及的资产。
         ///

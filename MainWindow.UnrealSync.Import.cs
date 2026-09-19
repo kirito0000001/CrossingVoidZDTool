@@ -20,7 +20,7 @@ namespace CrossingVoidZDTool
     {
         private async void GetUnrealProjectCharactersButton_Click(object sender, RoutedEventArgs e)
         {
-            LogUserOperation("刷新虚幻项目角色列表");
+            LogUserOperation("刷新虚幻项目角色列表", startsRun: true);
             var scrollOffset = CaptureUnrealProjectSyncScrollOffset();
             try
             {
@@ -65,7 +65,7 @@ namespace CrossingVoidZDTool
 
         private async void ImportSelectedUnrealCharacterToDraftButton_Click(object sender, RoutedEventArgs e)
         {
-            LogUserOperation("导入选中的 Unreal 角色到草稿");
+            LogUserOperation("导入选中的 Unreal 角色到草稿", startsRun: true);
             var source = _applicationViewModel.UnrealProjectSync.SelectedSource;
             var candidate = source?.UnrealCandidate;
             if (candidate is null)
@@ -138,7 +138,7 @@ namespace CrossingVoidZDTool
 
         private async void DetectUnrealImportButton_Click(object sender, RoutedEventArgs e)
         {
-            LogUserOperation("检测 Unreal 角色并导入工具箱");
+            LogUserOperation("检测 Unreal 角色并导入工具箱", startsRun: true);
             var source = _applicationViewModel.UnrealProjectSync.SelectedSource;
             if (source is null)
             {

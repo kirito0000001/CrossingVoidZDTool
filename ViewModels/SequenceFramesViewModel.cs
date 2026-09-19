@@ -17,6 +17,185 @@ namespace CrossingVoidZDTool.ViewModels;
 
 internal sealed class SequenceFramesViewModel : ObservableObject
 {
+    private SequenceFramesCommands? _commands;
+
+    /// <summary>接上壳的命令宿主（S0 命令宿主）。壳在启动时调用一次。</summary>
+    public void AttachCommandHost(ISequenceFramesCommandHost host)
+    {
+        ArgumentNullException.ThrowIfNull(host);
+        _commands = SequenceFramesCommands.Attach(host);
+        OnPropertyChanged(nameof(ManageSectionCommand));
+        OnPropertyChanged(nameof(CloseManagerCommand));
+        OnPropertyChanged(nameof(OpenCollectionCommand));
+        OnPropertyChanged(nameof(CancelCollectionSelectionCommand));
+        OnPropertyChanged(nameof(DetectDuplicatesCommand));
+        OnPropertyChanged(nameof(ConfirmCollectionSelectionCommand));
+        OnPropertyChanged(nameof(ResolveAllDuplicatesCommand));
+        OnPropertyChanged(nameof(InsertBlankBeforeCommand));
+        OnPropertyChanged(nameof(InsertBlankAfterCommand));
+        OnPropertyChanged(nameof(CopyEditorFrameCommand));
+        OnPropertyChanged(nameof(DeleteEditorFrameCommand));
+        OnPropertyChanged(nameof(DeleteSelectedFramesCommand));
+        OnPropertyChanged(nameof(OpenActionFolderCommand));
+        OnPropertyChanged(nameof(ImportFramesCommand));
+        OnPropertyChanged(nameof(OpenEditorCommand));
+        OnPropertyChanged(nameof(CloseCollectionCommand));
+        OnPropertyChanged(nameof(CloseDuplicateResolverCommand));
+        OnPropertyChanged(nameof(OpenCollectionFromManagerCommand));
+        OnPropertyChanged(nameof(PreviewThumbnailCommand));
+        OnPropertyChanged(nameof(ToggleCopyTargetSelectionCommand));
+        OnPropertyChanged(nameof(SelectReuseGroupCommand));
+        OnPropertyChanged(nameof(ReplaceFrameMenuItemCommand));
+        OnPropertyChanged(nameof(CopyFrameMenuItemCommand));
+        OnPropertyChanged(nameof(InsertBlankBeforeMenuItemCommand));
+        OnPropertyChanged(nameof(InsertBlankAfterMenuItemCommand));
+        OnPropertyChanged(nameof(DeleteFrameMenuItemCommand));
+        OnPropertyChanged(nameof(ResolveDuplicatesMenuItemCommand));
+        OnPropertyChanged(nameof(PreviewSectionCommand));
+        OnPropertyChanged(nameof(PreviousFrameCommand));
+        OnPropertyChanged(nameof(NextFrameCommand));
+        OnPropertyChanged(nameof(TogglePreviewPlaybackCommand));
+        OnPropertyChanged(nameof(ToggleEditorPreviewPlaybackCommand));
+        OnPropertyChanged(nameof(ReplaceSelectedEditorFrameCommand));
+        OnPropertyChanged(nameof(PickEditorFrameFromCollectionCommand));
+        OnPropertyChanged(nameof(ExportAtlasCommand));
+        OnPropertyChanged(nameof(ConfirmDuplicateResolutionCommand));
+    }
+
+    /// <summary>
+    /// 动作卡上的「管理」命令（S0）。命令挂**卡片自己**身上，参数是这张卡：
+    /// 卡片在 `ItemsControl.ItemTemplate` 里，数据上下文就是它，不跨 namescope。
+    /// （XAML 里要绑的属性必须 public，`internal` 会让 XamlCompiler 静默失败。）
+    /// </summary>
+    public RelayCommand? ManageSectionCommand => _commands?.ManageFramesCommand;
+
+    /// <summary>关闭帧管理器浮层（S1）。</summary>
+    public RelayCommand? CloseManagerCommand => _commands?.CloseManagerCommand;
+
+    /// <summary>打开帧素材合集（S1）。</summary>
+    public AsyncRelayCommand? OpenCollectionCommand => _commands?.OpenCollectionCommand;
+
+    /// <summary>
+    /// 「帧素材合集」在**帧管理器浮层**告栏上的那一处。
+    ///
+    /// 它和 <see cref="OpenCollectionCommand"/> 是同一个命令，只是**必须换一个属性名**：
+    /// 实测同一页面里出现两条**一模一样**的 <c>{Binding SequenceFrames.XXXCommand}</c> 时，
+    /// XamlCompiler 会静默失败（无任何诊断、退出码 1、pass1 全走完）——给它换个属性名就好了。
+    /// 注意这是"地雷"不是规则：普通属性路径重复（`{Binding StatusText}`）完全没事。
+    /// </summary>
+    public AsyncRelayCommand? OpenCollectionFromManagerCommand => _commands?.OpenCollectionCommand;
+
+    /// <summary>取消帧合集多选（S2）。</summary>
+    public RelayCommand? CancelCollectionSelectionCommand => _commands?.CancelCollectionSelectionCommand;
+
+    /// <summary>检测帧合集重复内容（S2）。</summary>
+    public AsyncRelayCommand? DetectDuplicatesCommand => _commands?.DetectDuplicatesCommand;
+
+    /// <summary>确认批量替换（S2）。</summary>
+    public AsyncRelayCommand? ConfirmCollectionSelectionCommand => _commands?.ConfirmCollectionSelectionCommand;
+
+    /// <summary>一键处理重复帧（S2）。</summary>
+    public AsyncRelayCommand? ResolveAllDuplicatesCommand => _commands?.ResolveAllDuplicatesCommand;
+
+    /// <summary>在当前帧左侧插入空白帧（S3）。</summary>
+    public AsyncRelayCommand? InsertBlankBeforeCommand => _commands?.InsertBlankBeforeCommand;
+
+    /// <summary>在当前帧右侧插入空白帧（S3，也是「新建帧」）。</summary>
+    public AsyncRelayCommand? InsertBlankAfterCommand => _commands?.InsertBlankAfterCommand;
+
+    /// <summary>复制当前选中帧（S3）。</summary>
+    public AsyncRelayCommand? CopyEditorFrameCommand => _commands?.CopyEditorFrameCommand;
+
+    /// <summary>删除当前选中帧（S3）。</summary>
+    public AsyncRelayCommand? DeleteEditorFrameCommand => _commands?.DeleteEditorFrameCommand;
+
+    /// <summary>批量删除选中帧（S3）。</summary>
+    public AsyncRelayCommand? DeleteSelectedFramesCommand => _commands?.DeleteSelectedFramesCommand;
+
+    /// <summary>打开动作素材目录（S4）。</summary>
+    public RelayCommand? OpenActionFolderCommand => _commands?.OpenActionFolderCommand;
+
+    /// <summary>导入帧素材（S4）。</summary>
+    public AsyncRelayCommand? ImportFramesCommand => _commands?.ImportFramesCommand;
+
+    /// <summary>打开帧序列编辑器（S5 收尾）。</summary>
+    public RelayCommand? OpenEditorCommand => _commands?.OpenEditorCommand;
+
+    /// <summary>关闭帧合集浮层（S1）。</summary>
+    public RelayCommand? CloseCollectionCommand => _commands?.CloseCollectionCommand;
+
+    /// <summary>关闭重复帧裁决器（S1）。</summary>
+    public RelayCommand? CloseDuplicateResolverCommand => _commands?.CloseDuplicateResolverCommand;
+
+    /// <summary>预览区缩略图：打开这张缩略图所属动作的帧管理器（S5 收尾）。</summary>
+    public RelayCommand? PreviewThumbnailCommand => _commands?.PreviewThumbnailCommand;
+
+    /// <summary>「复制所选帧」：进入/退出挑选复制位置模式（S5 收尾）。</summary>
+    public RelayCommand? ToggleCopyTargetSelectionCommand => _commands?.ToggleCopyTargetSelectionCommand;
+
+    /// <summary>「复用角标」：把同一份素材用到的帧一起选中（S5 收尾）。</summary>
+    public RelayCommand? SelectReuseGroupCommand => _commands?.SelectReuseGroupCommand;
+
+    // S1 收尾：时间轴右键菜单五项 + 帧合集「处理重复」。
+    // 命令挂在**项**上（模板的数据上下文是项），页面级只作为唯一持有者。
+    public AsyncRelayCommand? ReplaceFrameMenuItemCommand => _commands?.ReplaceFrameMenuItemCommand;
+
+    public AsyncRelayCommand? CopyFrameMenuItemCommand => _commands?.CopyFrameMenuItemCommand;
+
+    public AsyncRelayCommand? InsertBlankBeforeMenuItemCommand => _commands?.InsertBlankBeforeMenuItemCommand;
+
+    public AsyncRelayCommand? InsertBlankAfterMenuItemCommand => _commands?.InsertBlankAfterMenuItemCommand;
+
+    public AsyncRelayCommand? DeleteFrameMenuItemCommand => _commands?.DeleteFrameMenuItemCommand;
+
+    public RelayCommand? ResolveDuplicatesMenuItemCommand => _commands?.ResolveDuplicatesMenuItemCommand;
+
+    // S5 收尾：预览 / 播放 / 导航 / 图集 / 裁决器确认。
+    public AsyncRelayCommand? PreviewSectionCommand => _commands?.PreviewSectionCommand;
+
+    public RelayCommand? PreviousFrameCommand => _commands?.PreviousFrameCommand;
+
+    public RelayCommand? NextFrameCommand => _commands?.NextFrameCommand;
+
+    public AsyncRelayCommand? TogglePreviewPlaybackCommand => _commands?.TogglePreviewPlaybackCommand;
+
+    public AsyncRelayCommand? ToggleEditorPreviewPlaybackCommand => _commands?.ToggleEditorPreviewPlaybackCommand;
+
+    public AsyncRelayCommand? ReplaceSelectedEditorFrameCommand => _commands?.ReplaceSelectedEditorFrameCommand;
+
+    public AsyncRelayCommand? PickEditorFrameFromCollectionCommand => _commands?.PickEditorFrameFromCollectionCommand;
+
+    public AsyncRelayCommand? ExportAtlasCommand => _commands?.ExportAtlasCommand;
+
+    public AsyncRelayCommand? ConfirmDuplicateResolutionCommand => _commands?.ConfirmDuplicateResolutionCommand;
+
+    /// <summary>
+    /// 找出**拥有这一帧**的那张动作卡（缩略图按钮用）。
+    ///
+    /// 原来壳里是顺着 visual tree 往上找卡片的 DataContext；命令化之后没有 sender，
+    /// 改成从数据里查——更直接，也能单测。
+    /// </summary>
+    public SequenceFrameSection? FindSectionContainingFrame(SequenceFrameItem frame)
+    {
+        ArgumentNullException.ThrowIfNull(frame);
+        return EnumerateAllSections().FirstOrDefault(section =>
+            section.Frames.Any(item => ReferenceEquals(item, frame)));
+    }
+
+    /// <summary>
+    /// 同一份素材被重复使用的所有帧（「复用角标」要选中的那一组）。
+    /// 返回值按时间轴顺序排好；少于两帧时返回空列表（调用方据此直接返回，和原逻辑一致）。
+    /// </summary>
+    public IReadOnlyList<SequenceFrameItem> FindReuseGroupFrames(SequenceFrameItem frame)
+    {
+        ArgumentNullException.ThrowIfNull(frame);
+        var reused = SelectedSectionFrames
+            .Where(item => !item.IsBlank &&
+                string.Equals(item.FilePath, frame.FilePath, StringComparison.OrdinalIgnoreCase))
+            .OrderBy(item => item.Index)
+            .ToList();
+        return reused.Count < 2 ? [] : reused;
+    }
     private static readonly (string ActionCode, VoiceMaterialKind Kind)[] VoiceKindMappings =
     [
         ("Click", VoiceMaterialKind.Click),

@@ -20,7 +20,7 @@ namespace CrossingVoidZDTool
     {
         private async void ApplyUnrealBlueprintSetupButton_Click(object sender, RoutedEventArgs e)
         {
-            LogUserOperation("应用 Unreal 蓝图置入");
+            LogUserOperation("应用 Unreal 蓝图置入", startsRun: true);
             var sync = _applicationViewModel.UnrealProjectSync;
             var character = sync.SelectedSource?.DraftCharacter;
             var selectedIds = sync.GetSelectedBlueprintSetupIds();
@@ -72,6 +72,8 @@ namespace CrossingVoidZDTool
                     $"已写入 {result.AppliedStableIds.Count} 项，剩余待写入 {sync.BlueprintSetupPendingCount} 项。");
                 AppendLog(LogKind.Info,
                     $"[Blueprint Setup] applied={result.AppliedStableIds.Count} saved={result.SavedAssets.Count} pending={sync.BlueprintSetupPendingCount}");
+                // 第六步是最后一步，没有「下一步」可以触发收尾行，这里自己补一条。
+                LogWorkflowStepFinished(6);
                 await HideGlobalProgressAfterDelayAsync();
             }
             catch (OperationCanceledException ex)

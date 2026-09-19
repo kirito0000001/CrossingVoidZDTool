@@ -23,7 +23,7 @@ namespace CrossingVoidZDTool
         /// <item>不因打包失败而改动序列数据 —— 这只是「看一眼成品」，不该有副作用。</item>
         /// </list>
         /// </summary>
-        private async void SequenceEditorExportAtlasButton_Click(object sender, RoutedEventArgs e)
+        private async Task ExportSelectedSequenceAtlasAsync()
         {
             if (SequenceEditorExportAtlasButton.IsEnabled == false)
             {

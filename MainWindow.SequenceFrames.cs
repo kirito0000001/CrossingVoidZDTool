@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using CrossingVoidZDTool.Services;
+using CrossingVoidZDTool.ViewModels;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -17,12 +19,397 @@ using WinRT.Interop;
 
 namespace CrossingVoidZDTool
 {
-    public sealed partial class MainWindow
+    public sealed partial class MainWindow : ISequenceFramesCommandHost, ISequenceFrameDuplicateDetectionHost, ISequenceFrameEditorHost
     {
+        // S3：编辑器里改帧的流程搬进了 SequenceFrameEditorController。
+        private SequenceFrameEditorController? _sequenceFrameEditor;
+
+        private SequenceFrameEditorController SequenceFrameEditor =>
+            _sequenceFrameEditor ??= new SequenceFrameEditorController(this, _applicationViewModel.SequenceFrames);
+
+        Task ISequenceFramesCommandHost.CopySelectedEditorFrameAsync() =>
+            EditorWithSelectedFrame((editor, frame) => editor.CopyFrameAsync(frame));
+
+        Task ISequenceFramesCommandHost.DeleteSelectedEditorFrameAsync() =>
+            EditorWithSelectedFrame((editor, frame) => editor.DeleteFrameAsync(frame, _applicationViewModel.SequenceFrames.SelectedSection!));
+
+        Task ISequenceFramesCommandHost.DeleteSelectedFramesAsync() =>
+            SequenceFrameEditor.DeleteFramesAsync(GetSelectedSequenceFrames().ToArray());
+
+        void ISequenceFramesCommandHost.OpenActionFolder(SequenceFrameSection section)
+        {
+            if (CharacterDesk.CurrentCharacter is not { } character)
+            {
+                return;
+            }
+
+            var folderPath = _applicationViewModel.SequenceFrames.GetActionFolderPath(character, section);
+            Directory.CreateDirectory(folderPath);
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = folderPath,
+                UseShellExecute = true
+            });
+            MarkLastEditedModule("SequenceFrames");
+        }
+
+        async Task ISequenceFramesCommandHost.ImportFramesAsync(SequenceFrameSection section)
+        {
+            var paths = await PickSequenceFrameImagesAsync();
+            if (paths.Count == 0)
+            {
+                return;
+            }
+
+            await SequenceFrameEditor.ImportAsync(section, paths);
+        }
+
+        void ISequenceFramesCommandHost.OpenEditorForPreviewSection()
+        {
+            if (_applicationViewModel.SequenceFrames.PreviewSection is not { } section)
+            {
+                ShowFloatingTip(
+                    InfoBarSeverity.Warning,
+                    "未选择动作",
+                    "先点击动作卡上的播放按钮，再编辑对应帧序列。");
+                return;
+            }
+
+            ShowSequenceFrameManager(section);
+        }
+
+        void ISequenceFramesCommandHost.OpenManagerForFrame(SequenceFrameItem frame)
+        {
+            // 原来是从 sender 的 visual tree 往上找卡片的 DataContext；命令化之后改成从数据里查，
+            // 顺带把"没有所属卡片"这种异常情形显式处理掉（原来是静默 return）。
+            var section = _applicationViewModel.SequenceFrames.FindSectionContainingFrame(frame)
+                ?? _applicationViewModel.SequenceFrames.PreviewSection;
+            if (section is null)
+            {
+                return;
+            }
+
+            ShowSequenceFrameManager(section);
+        }
+
+        // ── S5 收尾：预览 / 播放 / 导航 / 图集 / 裁决器确认 ─────────────────────
+        async Task ISequenceFramesCommandHost.PreviewSectionAsync(SequenceFrameSection section)
+        {
+            StopSequencePreview();
+            ResetSequencePreviewTransform();
+            _applicationViewModel.SequenceFrames.SelectSection(section);
+            UpdateSequencePreviewImageSource();
+            MarkLastEditedModule("SequenceFrames");
+            if (section.Frames.Count == 0)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "暂无序列帧", "先导入这一组动作图片，再进行预览。");
+                return;
+            }
+
+            await StartSequencePreviewAsync();
+        }
+
+        void ISequenceFramesCommandHost.NavigateFrame(int direction) => NavigateSequenceEditorFrame(direction);
+
+        Task ISequenceFramesCommandHost.TogglePreviewPlaybackAsync() => ToggleSequencePreviewPlaybackAsync();
+
+        Task ISequenceFramesCommandHost.ToggleEditorPreviewPlaybackAsync() => ToggleSequenceEditorPreviewAsync();
+
+        Task ISequenceFramesCommandHost.ReplaceSelectedEditorFrameAsync() =>
+            EditorWithSelectedFrame((_, frame) => ReplaceSequenceEditorFrameAsync(frame));
+
+        Task ISequenceFramesCommandHost.PickEditorFrameFromCollectionAsync() =>
+            _applicationViewModel.SequenceFrames.SelectedEditorFrame is { } frame
+                ? ShowSequenceFrameCollectionAsync(frame)
+                : Task.CompletedTask;
+
+        Task ISequenceFramesCommandHost.ExportAtlasAsync() => ExportSelectedSequenceAtlasAsync();
+
+        Task ISequenceFramesCommandHost.ConfirmDuplicateResolutionAsync() => ResolveSelectedDuplicateFramesAsync();
+
+        void ISequenceFramesCommandHost.ToggleCopyTargetSelection()
+        {
+            if (_isSelectingSequenceFrameCopyTarget)
+            {
+                CancelSequenceFrameCopyTargetSelection();
+                return;
+            }
+
+            StartSequenceFrameCopyTargetSelection(GetSelectedSequenceFrames());
+        }
+
+        void ISequenceFramesCommandHost.SelectReuseGroup(SequenceFrameItem frame)
+        {
+            var reusedFrames = _applicationViewModel.SequenceFrames.FindReuseGroupFrames(frame);
+            if (reusedFrames.Count < 2)
+            {
+                return;
+            }
+
+            _isSynchronizingSequenceFrameSelection = true;
+            try
+            {
+                SequenceFrameTimelineListView.SelectedItems.Clear();
+                foreach (var reusedFrame in reusedFrames)
+                {
+                    SequenceFrameTimelineListView.SelectedItems.Add(reusedFrame);
+                }
+            }
+            finally
+            {
+                _isSynchronizingSequenceFrameSelection = false;
+            }
+
+            StopSequencePreview();
+            _applicationViewModel.SequenceFrames.SelectEditorFrame(frame);
+            SynchronizeSequenceFrameVoiceSelection();
+            TryUpdateSequencePreviewImageSource();
+            UpdateSequencePreviewInterval();
+            PlayCurrentSequenceFrameVoice();
+            UpdateSequenceFrameSelectionPresentation(reusedFrames);
+        }
+
+        // ── S1 收尾：时间轴右键菜单五项 + 帧合集「处理重复」 ───────────────────────
+        // 这几条以前都是 `sender`（MenuFlyoutItem）→ Tag 反推那一帧；命令化之后
+        // 帧由 `CommandParameter` 直接传进来，壳里不再需要"从视觉树/标签猜"的路径。
+        Task ISequenceFramesCommandHost.ReplaceFrameFromMenuAsync(SequenceFrameItem frame) =>
+            ReplaceSequenceEditorFrameAsync(frame);
+
+        Task ISequenceFramesCommandHost.CopyFrameFromMenuAsync(SequenceFrameItem frame) =>
+            SequenceFrameEditor.CopyFrameAsync(frame);
+
+        Task ISequenceFramesCommandHost.InsertBlankFrameAtFrameAsync(SequenceFrameItem frame, bool before) =>
+            InsertBlankSequenceFrameAsync(
+                frame,
+                before ? SequenceFrameInsertPosition.Before : SequenceFrameInsertPosition.After);
+
+        async Task ISequenceFramesCommandHost.DeleteFrameFromMenuAsync(SequenceFrameItem frame)
+        {
+            if (_applicationViewModel.SequenceFrames.SelectedSection is { } section)
+            {
+                await DeleteSequenceFrameAsync(frame, section);
+            }
+        }
+
+        void ISequenceFramesCommandHost.ResolveDuplicatesForCollectionItem(SequenceFrameCollectionItem item)
+        {
+            if (!item.HasDuplicate)
+            {
+                ShowFloatingTip(InfoBarSeverity.Informational, "没有重复内容", item.FileName);
+                return;
+            }
+
+            var duplicates = _applicationViewModel.SequenceFrames.GetDuplicateCollectionItems(item);
+            if (duplicates.Count <= 1)
+            {
+                ShowFloatingTip(InfoBarSeverity.Informational, "没有重复内容", item.FileName);
+                return;
+            }
+
+            _pendingDuplicateFrameItems = duplicates;
+            _selectedDuplicateFrameItem = duplicates
+                .FirstOrDefault(candidate => string.Equals(candidate.FilePath, item.FilePath, StringComparison.OrdinalIgnoreCase))
+                ?? duplicates[0];
+            SequenceFrameDuplicateResolverStatusText.Text =
+                $"选择一个资源作为保留项，其它 {duplicates.Count - 1} 个重复资源会删除，所有序列引用会重定向到保留项。";
+            SequenceFrameDuplicateResolverItemsControl.ItemsSource = duplicates;
+            SequenceFrameDuplicateResolverHost.Visibility = Visibility.Visible;
+            AnimateReferenceOverlay(
+                SequenceFrameDuplicateResolverHost,
+                SequenceFrameDuplicateResolverCardScale,
+                show: true);
+            SequenceFrameDuplicateResolverHost.Focus(FocusState.Programmatic);
+            SelectDuplicateResolverRadio(_selectedDuplicateFrameItem);
+        }
+
+        /// <summary>
+        /// 「打开帧序列编辑器」按钮的处理器。
+        ///
+        /// **注意**：这个按钮的 XAML 换成命令绑定（OpenEditorCommand）时，
+        /// XamlCompiler 会静默失败（症状是无诊断、pass1 全走完、返回 1）。
+        /// 命令本身已经准备好了（`SequenceFrames.OpenEditorCommand` + 宿主实现都在），
+        /// 但**换绑之前要先查清这个按钮所在模板的结构**——它和已经成功的那些按钮
+        /// 位置不同（在 St5 页面里而不是浮层里）。
+        /// </summary>
+        private void OpenSequenceEditorButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (_applicationViewModel.SequenceFrames.PreviewSection is not { } section)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择动作", "先点击动作卡上的播放按钮，再编辑对应帧序列。");
+                return;
+            }
+
+            ShowSequenceFrameManager(section);
+        }
+
+        /// <summary>
+        /// 旧调用点（把文件拖到动作卡上）的兼容转发：导入流程现在只有控制器那一份实现。
+        /// 这也是这一页第三次撞到「同一件事有多个入口」——每次都靠转发统一，而不是各留一份。
+        /// </summary>
+        private Task ImportSequenceFramesAsync(SequenceFrameSection section, IReadOnlyList<string> paths) =>
+            SequenceFrameEditor.ImportAsync(section, paths);
+
+        /// <summary>旧调用点的兼容转发：批量删除现在只有控制器那一份实现。</summary>
+        private Task DeleteSelectedSequenceFramesAsync(IReadOnlyList<SequenceFrameItem> frames) =>
+            SequenceFrameEditor.DeleteFramesAsync(frames);
+
+        /// <summary>命令共用的一步：拿到当前选中帧才执行（没有帧就什么都不做）。</summary>
+        private Task EditorWithSelectedFrame(Func<SequenceFrameEditorController, SequenceFrameItem, Task> action) =>
+            _applicationViewModel.SequenceFrames.SelectedEditorFrame is { } frame
+                ? action(SequenceFrameEditor, frame)
+                : Task.CompletedTask;
+
+        CharacterCard? ISequenceFrameEditorHost.CurrentCharacter => CharacterDesk.CurrentCharacter;
+
+        SequenceFrameSection? ISequenceFrameEditorHost.SelectedSection =>
+            _applicationViewModel.SequenceFrames.SelectedSection;
+
+        void ISequenceFrameEditorHost.StopSequencePreview() => StopSequencePreview();
+
+        void ISequenceFrameEditorHost.MarkSequenceFramesEdited() => MarkSequenceFramesEdited();
+
+        Task ISequenceFrameEditorHost.RunPreservingScrollAsync(Func<Task> action) =>
+            RunWithPageScrollPositionPreservedAsync(SequenceFramesPage, action);
+
+        void ISequenceFrameEditorHost.ResetSequencePreviewTransform() => ResetSequencePreviewTransform();
+
+        Task ISequenceFrameEditorHost.StartSequencePreviewAsync() => StartSequencePreviewAsync();
+
+        IReadOnlyList<SequenceFrameItem> ISequenceFrameEditorHost.SelectedTimelineFrames =>
+            GetSelectedSequenceFrames();
+
+        async Task<bool> ISequenceFrameEditorHost.ConfirmBatchDeleteAsync(int frameCount)
+        {
+            var result = await _dialogService.ShowContentAsync(new ContentDialogRequest(
+                "批量删除序列帧",
+                new TextBlock
+                {
+                    Text = $"确定删除选中的 {frameCount} 帧吗？",
+                    TextWrapping = TextWrapping.Wrap
+                },
+                PrimaryButtonText: "删除",
+                CloseButtonText: "取消"));
+            return result == DialogResultKind.Primary;
+        }
+
+        void ISequenceFrameEditorHost.ClearSequencePreviewCache() => ClearSequencePreviewCache();
+
+        void ISequenceFrameEditorHost.ClearSequencePreviewSource() => ShowSequencePreviewSource(null);
+
+        void ISequenceFrameEditorHost.UpdateSequencePreviewImageSource() => UpdateSequencePreviewImageSource();
+
+        void ISequenceFrameEditorHost.UpdateSequencePreviewInterval() => UpdateSequencePreviewInterval();
+
+        void ISequenceFrameEditorHost.HideSequenceFrameManager() => HideSequenceFrameManager();
+
+        void ISequenceFrameEditorHost.RecordSequenceFrameOperation(
+            string actionName,
+            string description,
+            SequenceFrameSection section,
+            IReadOnlyList<string> snapshotFilePaths) =>
+            RecordSequenceFrameOperation(actionName, description, section, snapshotFilePaths);
+
+        void ISequenceFrameEditorHost.ShowFloatingTip(NotifySeverity severity, string title, string message) =>
+            ((INotificationService)this).Notify(severity, title, message);
+
+        void ISequenceFrameEditorHost.AppendLog(LogKind kind, string message, Exception? error) =>
+            AppendLog(kind, message, error);
+
+        /// <summary>
+        /// 旧调用点的兼容转发：删除流程现在只有控制器那一份实现。
+        ///
+        /// 侦察时我以为「删除」只有一处实现，实际文件里有**两份**（一处带防重入、
+        /// 一处不带），这是现场第二次撞到"唯一实现"的假设不成立——所以这里保留
+        /// 这个小转发，把两处调用点统一到控制器，而不是在原地各留一份。
+        /// </summary>
+        private Task DeleteSequenceFrameAsync(SequenceFrameItem frame, SequenceFrameSection section) =>
+            SequenceFrameEditor.DeleteFrameAsync(frame, section);
+
+        // S2：检测重复的流程搬进了 SequenceFrameDuplicateDetectionController。
+        private SequenceFrameDuplicateDetectionController? _duplicateDetection;
+
+        private SequenceFrameDuplicateDetectionController DuplicateDetection =>
+            _duplicateDetection ??= new SequenceFrameDuplicateDetectionController(
+                this, _applicationViewModel.SequenceFrames);
+
+        Task ISequenceFramesCommandHost.DetectDuplicatesAsync() => DuplicateDetection.DetectAsync();
+
+        Task ISequenceFramesCommandHost.ConfirmCollectionSelectionAsync() =>
+            DuplicateDetection.ConfirmCollectionSelectionAsync();
+
+        Task ISequenceFramesCommandHost.ResolveAllDuplicatesAsync() => DuplicateDetection.ResolveAllAsync();
+
+        Task ISequenceFramesCommandHost.InsertBlankFrameAsync(bool before) =>
+            InsertBlankSequenceFrameAsync(
+                _applicationViewModel.SequenceFrames.SelectedEditorFrame,
+                before ? SequenceFrameInsertPosition.Before : SequenceFrameInsertPosition.After);
+
+        bool ISequenceFrameDuplicateDetectionHost.HasDuplicateCollectionItems =>
+            _applicationViewModel.SequenceFrames.CollectionItems.Any(item => item.HasDuplicate);
+
+        SequenceFrameItem? ISequenceFrameDuplicateDetectionHost.CollectionSelectionTarget =>
+            _sequenceFrameCollectionSelectionTarget;
+
+        IReadOnlyList<SequenceFrameCollectionItem> ISequenceFrameDuplicateDetectionHost.OrderedCollectionSelection =>
+            _sequenceFrameCollectionSelectionOrder.OrderedItems;
+
+        Task<bool> ISequenceFrameDuplicateDetectionHost.ReplaceEditorFrameWithSourcesAsync(
+            SequenceFrameItem target, IReadOnlyList<string> sourcePaths) =>
+            ReplaceSequenceEditorFrameWithSourcesAsync(target, sourcePaths);
+
+        void ISequenceFrameDuplicateDetectionHost.HideSequenceFrameCollection() =>
+            HideSequenceFrameCollection();
+
+        CharacterCard? ISequenceFrameDuplicateDetectionHost.CurrentCharacter => CharacterDesk.CurrentCharacter;
+
+        void ISequenceFrameDuplicateDetectionHost.UpdateDuplicateActionButtons() =>
+            UpdateSequenceFrameDuplicateActionButtons();
+
+        void ISequenceFrameDuplicateDetectionHost.ShowGlobalProgress(string title, string detail) =>
+            ShowGlobalProgress(title, detail);
+
+        void ISequenceFrameDuplicateDetectionHost.UpdateGlobalProgress(
+            string message, double percent, string? detail, bool isIndeterminate) =>
+            UpdateGlobalProgress(message, percent, detail, isIndeterminate);
+
+        void ISequenceFrameDuplicateDetectionHost.CompleteGlobalProgress(string message, string? detail) =>
+            CompleteGlobalProgress(message, detail);
+
+        Task ISequenceFrameDuplicateDetectionHost.HideGlobalProgressAfterDelayAsync(int delayMilliseconds) =>
+            HideGlobalProgressAfterDelayAsync(delayMilliseconds);
+
+        CancellationToken ISequenceFrameDuplicateDetectionHost.GetGlobalProgressCancellationToken() =>
+            GetGlobalProgressCancellationToken();
+
+        void ISequenceFrameDuplicateDetectionHost.ShowFloatingTip(
+            NotifySeverity severity, string title, string message) =>
+            ((INotificationService)this).Notify(severity, title, message);
+
+        void ISequenceFrameDuplicateDetectionHost.AppendLog(LogKind kind, string message, Exception? error) =>
+            AppendLog(kind, message, error);
+
+        // S0：St5 命令宿主——「管理」按钮的命令挂在页面级 VM 上，
+        // 卡片通过 CommandParameter 传进来；壳只提供「做这件事要界面做什么」。
+        /// <summary>UI 冒烟用：切到 St5 序列帧页（走壳自己的导航，不模拟点菜单）。</summary>
+        internal void UiSmokeShowSt5Page() => ShowSt5SequenceFramesPage();
+
+        void ISequenceFramesCommandHost.ShowSequenceFrameManager(SequenceFrameSection section) =>
+            ShowSequenceFrameManager(section);
+
+        void ISequenceFramesCommandHost.HideSequenceFrameManager() => HideSequenceFrameManager();
+
+        Task ISequenceFramesCommandHost.ShowSequenceFrameCollectionAsync() => ShowSequenceFrameCollectionAsync();
+
+        void ISequenceFramesCommandHost.CancelSequenceFrameCollectionSelection() =>
+            CancelSequenceFrameCollectionMultiSelection();
+
+        void ISequenceFramesCommandHost.HideSequenceFrameCollection() => HideSequenceFrameCollection();
+
+        void ISequenceFramesCommandHost.HideSequenceFrameDuplicateResolver() =>
+            HideSequenceFrameDuplicateResolver();
+
         private SequenceFrameItem? _sequenceFrameCollectionSelectionTarget;
         private bool _isSequenceFrameCollectionMultiSelecting;
-        private bool _isDetectingSequenceFrameDuplicates;
-        private bool _isResolvingAllSequenceFrameDuplicates;
         private bool _isSequenceEditorPreviewPlayback;
         private bool _isSynchronizingSequenceFrameVoiceSelection;
         private readonly SequenceFrameCollectionSelectionOrder _sequenceFrameCollectionSelectionOrder = new();
@@ -149,21 +536,6 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private async void ImportSequenceFramesButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is not Button { CommandParameter: SequenceFrameSection section })
-            {
-                return;
-            }
-
-            var paths = await PickSequenceFrameImagesAsync();
-            if (paths.Count == 0)
-            {
-                return;
-            }
-
-            await ImportSequenceFramesAsync(section, paths);
-        }
 
         private async void SequenceFrameSection_Drop(object sender, DragEventArgs e)
         {
@@ -195,76 +567,7 @@ namespace CrossingVoidZDTool
             e.Handled = true;
         }
 
-        private async Task ImportSequenceFramesAsync(SequenceFrameSection section, IReadOnlyList<string> paths)
-        {
-            if (CharacterDesk.CurrentCharacter is null)
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择角色", "请先在角色台选择当前制作角色。");
-                return;
-            }
 
-            try
-            {
-                MarkSequenceFramesEdited();
-                StopSequencePreview();
-                ClearSequencePreviewCache();
-                await RunWithPageScrollPositionPreservedAsync(SequenceFramesPage, () =>
-                    _applicationViewModel.SequenceFrames.ImportAsync(CharacterDesk.CurrentCharacter, section, paths));
-                if (_applicationViewModel.SequenceFrames.TrySelectSection(section.Action.Code))
-                {
-                    ResetSequencePreviewTransform();
-                    UpdateSequencePreviewImageSource();
-                    await StartSequencePreviewAsync();
-                }
-
-                ShowFloatingTip(InfoBarSeverity.Success, "序列帧已导入", $"{section.Action.DisplayName}：{paths.Count} 张。");
-                AppendLog(LogKind.User, $"导入序列帧：{section.Action.DisplayName} / {section.Action.Code}，{paths.Count} 张。");
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "序列帧导入失败", ex.Message);
-                AppendLog(LogKind.Error, "序列帧导入失败。", ex);
-            }
-        }
-
-        private void OpenSequenceFrameFolderButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (CharacterDesk.CurrentCharacter is null ||
-                sender is not Button { CommandParameter: SequenceFrameSection section })
-            {
-                return;
-            }
-
-            var folderPath = _applicationViewModel.SequenceFrames.GetActionFolderPath(CharacterDesk.CurrentCharacter, section);
-            Directory.CreateDirectory(folderPath);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = folderPath,
-                UseShellExecute = true
-            });
-            MarkLastEditedModule("SequenceFrames");
-        }
-
-        private async void PreviewSequenceFramesButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is not Button { CommandParameter: SequenceFrameSection section })
-            {
-                return;
-            }
-
-            StopSequencePreview();
-            ResetSequencePreviewTransform();
-            _applicationViewModel.SequenceFrames.SelectSection(section);
-            UpdateSequencePreviewImageSource();
-            MarkLastEditedModule("SequenceFrames");
-            if (section.Frames.Count == 0)
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "暂无序列帧", "先导入这一组动作图片，再进行预览。");
-                return;
-            }
-
-            await StartSequencePreviewAsync();
-        }
 
         private async Task StartSequencePreviewAsync(bool isEditorPlayback = false)
         {
@@ -335,27 +638,6 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private void ManageSequenceFramesButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is not Button { CommandParameter: SequenceFrameSection section })
-            {
-                return;
-            }
-
-            ShowSequenceFrameManager(section);
-        }
-
-        private void PreviewThumbnailSequenceButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is not DependencyObject source ||
-                ResolveSequenceFrameSection(source) is not { } section)
-            {
-                return;
-            }
-
-            ShowSequenceFrameManager(section);
-        }
-
         private void ShowSequenceFrameManager(SequenceFrameSection section)
         {
             if (SequenceFramesCollectionHost.Visibility == Visibility.Visible)
@@ -375,16 +657,6 @@ namespace CrossingVoidZDTool
             MarkLastEditedModule("SequenceFrames");
         }
 
-        private void OpenSequenceEditorButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (_applicationViewModel.SequenceFrames.PreviewSection is not { } section)
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择动作", "先点击动作卡上的播放按钮，再编辑对应帧序列。");
-                return;
-            }
-
-            ShowSequenceFrameManager(section);
-        }
 
         private async void HideSequenceFrameManager()
         {
@@ -397,11 +669,6 @@ namespace CrossingVoidZDTool
             await AnimateReferenceOverlayAsync(SequenceFramesManagerHost, SequenceFramesManagerCardScale, show: false);
             SequenceFramesManagerHost.Visibility = Visibility.Collapsed;
             _isReorderingSequenceFrames = false;
-        }
-
-        private void SequenceFramesManagerCloseButton_Click(object sender, RoutedEventArgs e)
-        {
-            HideSequenceFrameManager();
         }
 
         private void SequenceFramesManagerHost_Tapped(object sender, TappedRoutedEventArgs e)
@@ -429,11 +696,6 @@ namespace CrossingVoidZDTool
         private void SequenceFramesManagerCard_Tapped(object sender, TappedRoutedEventArgs e)
         {
             e.Handled = true;
-        }
-
-        private async void OpenSequenceCollectionButton_Click(object sender, RoutedEventArgs e)
-        {
-            await ShowSequenceFrameCollectionAsync();
         }
 
         private async Task ShowSequenceFrameCollectionAsync(SequenceFrameItem? selectionTarget = null)
@@ -501,11 +763,6 @@ namespace CrossingVoidZDTool
             SequenceFramesCollectionSelectionHintText.Visibility = Visibility.Collapsed;
         }
 
-        private void SequenceFramesCollectionCloseButton_Click(object sender, RoutedEventArgs e)
-        {
-            HideSequenceFrameCollection();
-        }
-
         private void SequenceFramesCollectionHost_Tapped(object sender, TappedRoutedEventArgs e)
         {
             HideSequenceFrameCollection();
@@ -533,102 +790,13 @@ namespace CrossingVoidZDTool
             e.Handled = true;
         }
 
-        private async void DetectSequenceFrameDuplicatesButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (CharacterDesk.CurrentCharacter is null || _isDetectingSequenceFrameDuplicates)
-            {
-                return;
-            }
 
-            _isDetectingSequenceFrameDuplicates = true;
-            UpdateSequenceFrameDuplicateActionButtons();
-            try
-            {
-                ShowGlobalProgress("检测重复帧", CharacterDesk.CurrentCharacter.StatusDisplayText);
-                UpdateGlobalProgress("正在检测帧内容重复...", 2, CharacterDesk.CurrentCharacter.Code);
-                var progress = new Progress<ProgressUpdate>(update =>
-                    UpdateGlobalProgress(update.Message, update.Percent, update.Detail, update.IsIndeterminate));
-                await _applicationViewModel.SequenceFrames.DetectCollectionDuplicatesAsync(
-                    progress,
-                    GetGlobalProgressCancellationToken());
-                CompleteGlobalProgress("重复检测完成", _applicationViewModel.SequenceFrames.CollectionSummaryText);
-                await HideGlobalProgressAfterDelayAsync(600);
-                AppendLog(LogKind.User, "检测帧合集重复内容。");
-            }
-            catch (OperationCanceledException)
-            {
-                CompleteGlobalProgress("重复检测已取消", CharacterDesk.CurrentCharacter.Code);
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (Exception ex)
-            {
-                CompleteGlobalProgress("重复检测失败", ex.Message);
-                await HideGlobalProgressAfterDelayAsync();
-                ShowFloatingTip(InfoBarSeverity.Error, "重复检测失败", ex.Message);
-                AppendLog(LogKind.Error, "检测帧合集重复内容失败。", ex);
-            }
-            finally
-            {
-                _isDetectingSequenceFrameDuplicates = false;
-                UpdateSequenceFrameDuplicateActionButtons();
-            }
-        }
-
-        private async void ResolveAllSequenceFrameDuplicatesButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (CharacterDesk.CurrentCharacter is null ||
-                _isResolvingAllSequenceFrameDuplicates ||
-                !_applicationViewModel.SequenceFrames.CollectionItems.Any(item => item.HasDuplicate))
-            {
-                return;
-            }
-
-            _isResolvingAllSequenceFrameDuplicates = true;
-            UpdateSequenceFrameDuplicateActionButtons();
-            try
-            {
-                ShowGlobalProgress("一键处理重复帧", CharacterDesk.CurrentCharacter.StatusDisplayText);
-                UpdateGlobalProgress("正在准备重复资源组...", 2, CharacterDesk.CurrentCharacter.Code);
-                var progress = new Progress<ProgressUpdate>(update =>
-                    UpdateGlobalProgress(update.Message, update.Percent, update.Detail, update.IsIndeterminate));
-                var updatedReferenceCount = await _applicationViewModel.SequenceFrames.ResolveAllDuplicateFramesAsync(
-                    CharacterDesk.CurrentCharacter,
-                    progress,
-                    GetGlobalProgressCancellationToken());
-                CompleteGlobalProgress(
-                    "重复资源处理完成",
-                    $"已重定向 {updatedReferenceCount} 个帧引用，重复检测结果已更新。");
-                await HideGlobalProgressAfterDelayAsync(700);
-                ShowFloatingTip(
-                    InfoBarSeverity.Success,
-                    "一键处理完成",
-                    $"已重定向 {updatedReferenceCount} 个帧引用。剩余资源已重新检测。");
-                AppendLog(LogKind.User, $"一键处理帧合集重复资源：重定向 {updatedReferenceCount} 个引用。");
-            }
-            catch (OperationCanceledException)
-            {
-                CompleteGlobalProgress("一键处理已取消", CharacterDesk.CurrentCharacter.Code);
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (Exception ex)
-            {
-                CompleteGlobalProgress("一键处理失败", ex.Message);
-                await HideGlobalProgressAfterDelayAsync();
-                ShowFloatingTip(InfoBarSeverity.Error, "一键处理失败", ex.Message);
-                AppendLog(LogKind.Error, "一键处理帧合集重复资源失败。", ex);
-            }
-            finally
-            {
-                _isResolvingAllSequenceFrameDuplicates = false;
-                UpdateSequenceFrameDuplicateActionButtons();
-            }
-        }
 
         private void UpdateSequenceFrameDuplicateActionButtons()
         {
-            var isBusy = _isDetectingSequenceFrameDuplicates ||
-                         _isResolvingDuplicateFrames ||
-                         _isResolvingAllSequenceFrameDuplicates;
+            var isBusy = (_duplicateDetection?.IsDetecting ?? false) ||
+                         (_duplicateDetection?.IsResolvingAll ?? false) ||
+                         _isResolvingDuplicateFrames;
             DetectSequenceFrameDuplicatesButton.IsEnabled = !isBusy;
             ResolveAllSequenceFrameDuplicatesButton.IsEnabled = !isBusy &&
                 _applicationViewModel.SequenceFrames.CollectionItems.Any(item => item.HasDuplicate);
@@ -769,11 +937,6 @@ namespace CrossingVoidZDTool
                 : Visibility.Visible;
         }
 
-        private void CancelSequenceFrameCollectionSelectionButton_Click(object sender, RoutedEventArgs e)
-        {
-            CancelSequenceFrameCollectionMultiSelection();
-        }
-
         private async void ConfirmSequenceFrameCollectionSelectionButton_Click(object sender, RoutedEventArgs e)
         {
             if (_sequenceFrameCollectionSelectionTarget is not { } selectionTarget)
@@ -793,42 +956,6 @@ namespace CrossingVoidZDTool
             {
                 HideSequenceFrameCollection();
             }
-        }
-
-        private void ResolveDuplicateSequenceFrameMenuItem_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is not MenuFlyoutItem { Tag: SequenceFrameCollectionItem item })
-            {
-                return;
-            }
-
-            if (!item.HasDuplicate)
-            {
-                ShowFloatingTip(InfoBarSeverity.Informational, "没有重复内容", item.FileName);
-                return;
-            }
-
-            var duplicates = _applicationViewModel.SequenceFrames.GetDuplicateCollectionItems(item);
-            if (duplicates.Count <= 1)
-            {
-                ShowFloatingTip(InfoBarSeverity.Informational, "没有重复内容", item.FileName);
-                return;
-            }
-
-            _pendingDuplicateFrameItems = duplicates;
-            _selectedDuplicateFrameItem = duplicates
-                .FirstOrDefault(candidate => string.Equals(candidate.FilePath, item.FilePath, StringComparison.OrdinalIgnoreCase))
-                ?? duplicates[0];
-            SequenceFrameDuplicateResolverStatusText.Text =
-                $"选择一个资源作为保留项，其它 {duplicates.Count - 1} 个重复资源会删除，所有序列引用会重定向到保留项。";
-            SequenceFrameDuplicateResolverItemsControl.ItemsSource = duplicates;
-            SequenceFrameDuplicateResolverHost.Visibility = Visibility.Visible;
-            AnimateReferenceOverlay(
-                SequenceFrameDuplicateResolverHost,
-                SequenceFrameDuplicateResolverCardScale,
-                show: true);
-            SequenceFrameDuplicateResolverHost.Focus(FocusState.Programmatic);
-            SelectDuplicateResolverRadio(_selectedDuplicateFrameItem);
         }
 
         private async void HideSequenceFrameDuplicateResolver()
@@ -894,15 +1021,6 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private void SequenceFrameDuplicateResolverCancelButton_Click(object sender, RoutedEventArgs e)
-        {
-            HideSequenceFrameDuplicateResolver();
-        }
-
-        private async void SequenceFrameDuplicateResolverConfirmButton_Click(object sender, RoutedEventArgs e)
-        {
-            await ResolveSelectedDuplicateFramesAsync();
-        }
 
         private async Task ResolveSelectedDuplicateFramesAsync()
         {
@@ -1037,54 +1155,11 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private async void CopySequenceFrameMenuItem_Click(object sender, RoutedEventArgs e)
+        private async Task InsertBlankSequenceFrameAsync(SequenceFrameItem? frame, SequenceFrameInsertPosition position)
         {
-            if (ResolveSequenceFrameCommandFrame(sender) is not { } frame ||
-                CharacterDesk.CurrentCharacter is null ||
-                _applicationViewModel.SequenceFrames.SelectedSection is not { } section)
-            {
-                return;
-            }
-
-            try
-            {
-                var snapshot = await _applicationViewModel.SequenceFrames.CreateSectionSnapshotAsync(CharacterDesk.CurrentCharacter, section);
-                StopSequencePreview();
-                ClearSequencePreviewCache();
-                await _applicationViewModel.SequenceFrames.DuplicateFrameAsync(CharacterDesk.CurrentCharacter, section, frame);
-                RecordSequenceFrameOperation(
-                    "复制序列帧",
-                    $"{section.Action.DisplayName} / {frame.FileName}",
-                    section,
-                    snapshot);
-                ShowFloatingTip(InfoBarSeverity.Success, "序列帧已复制", frame.FileName);
-                AppendLog(LogKind.User, $"复制序列帧：{section.Action.DisplayName} / {frame.FileName}");
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "序列帧复制失败", ex.Message);
-                AppendLog(LogKind.Error, "序列帧复制失败。", ex);
-            }
-        }
-
-        private void InsertBlankSequenceFrameBeforeMenuItem_Click(object sender, RoutedEventArgs e)
-        {
-            _ = InsertBlankSequenceFrameAsync(sender, SequenceFrameInsertPosition.Before);
-        }
-
-        private void InsertBlankSequenceFrameAfterMenuItem_Click(object sender, RoutedEventArgs e)
-        {
-            _ = InsertBlankSequenceFrameAsync(sender, SequenceFrameInsertPosition.After);
-        }
-
-        private void NewSequenceEditorFrameButton_Click(object sender, RoutedEventArgs e)
-        {
-            _ = InsertBlankSequenceFrameAsync(sender, SequenceFrameInsertPosition.After);
-        }
-
-        private async Task InsertBlankSequenceFrameAsync(object sender, SequenceFrameInsertPosition position)
-        {
-            var frame = ResolveSequenceFrameCommandFrame(sender);
+            // S3/S1：帧一律由**调用方**决定（命令传当前选中帧，右键菜单传被点的那一帧）。
+            // 以前这里还有个 `object sender` 分支，要从 MenuFlyoutItem.Tag 反推——
+            // 那条路径删掉之后，"菜单项插到序列末尾"这种坑就不存在了。
             if (CharacterDesk.CurrentCharacter is null ||
                 _applicationViewModel.SequenceFrames.SelectedSection is not { } section)
             {
@@ -1116,18 +1191,6 @@ namespace CrossingVoidZDTool
                 ShowFloatingTip(InfoBarSeverity.Error, "空白帧插入失败", ex.Message);
                 AppendLog(LogKind.Error, "空白帧插入失败。", ex);
             }
-        }
-
-        private async void DeleteSequenceFrameMenuItem_Click(object sender, RoutedEventArgs e)
-        {
-            if (ResolveSequenceFrameCommandFrame(sender) is not { } frame ||
-                CharacterDesk.CurrentCharacter is null ||
-                _applicationViewModel.SequenceFrames.SelectedSection is not { } section)
-            {
-                return;
-            }
-
-            await DeleteSequenceFrameAsync(frame, section);
         }
 
         private async void SequenceFrameTimelineListView_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -1200,47 +1263,6 @@ namespace CrossingVoidZDTool
             {
                 await DuplicatePendingSequenceFramesAfterAsync(afterFrame);
             }
-        }
-
-        private void SelectSequenceReuseGroupButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is not FrameworkElement { DataContext: SequenceFrameItem frame } ||
-                !frame.HasReuse)
-            {
-                return;
-            }
-
-            var reusedFrames = _applicationViewModel.SequenceFrames.SelectedSectionFrames
-                .Where(item => !item.IsBlank &&
-                    string.Equals(item.FilePath, frame.FilePath, StringComparison.OrdinalIgnoreCase))
-                .OrderBy(item => item.Index)
-                .ToList();
-            if (reusedFrames.Count < 2)
-            {
-                return;
-            }
-
-            _isSynchronizingSequenceFrameSelection = true;
-            try
-            {
-                SequenceFrameTimelineListView.SelectedItems.Clear();
-                foreach (var reusedFrame in reusedFrames)
-                {
-                    SequenceFrameTimelineListView.SelectedItems.Add(reusedFrame);
-                }
-            }
-            finally
-            {
-                _isSynchronizingSequenceFrameSelection = false;
-            }
-
-            StopSequencePreview();
-            _applicationViewModel.SequenceFrames.SelectEditorFrame(frame);
-            SynchronizeSequenceFrameVoiceSelection();
-            TryUpdateSequencePreviewImageSource();
-            UpdateSequencePreviewInterval();
-            PlayCurrentSequenceFrameVoice();
-            UpdateSequenceFrameSelectionPresentation(reusedFrames);
         }
 
         private void SynchronizeSequenceTimelineSelectionToCurrentFrame()
@@ -1334,84 +1356,7 @@ namespace CrossingVoidZDTool
             UpdateSequenceFrameSelectionPresentation(frames);
         }
 
-        private async void DeleteSelectedSequenceFramesButton_Click(object sender, RoutedEventArgs e)
-        {
-            await DeleteSelectedSequenceFramesAsync(GetSelectedSequenceFrames());
-        }
 
-        private async Task DeleteSelectedSequenceFramesAsync(IReadOnlyList<SequenceFrameItem> selectedFrames)
-        {
-            if (selectedFrames.Count < 2 ||
-                CharacterDesk.CurrentCharacter is null ||
-                _applicationViewModel.SequenceFrames.SelectedSection is not { } section ||
-                _isDeletingSequenceFrame)
-            {
-                return;
-            }
-
-            var result = await _dialogService.ShowContentAsync(new ContentDialogRequest(
-                "批量删除序列帧",
-                new TextBlock
-                {
-                    Text = $"确定删除选中的 {selectedFrames.Count} 帧吗？",
-                    TextWrapping = TextWrapping.Wrap
-                },
-                PrimaryButtonText: "删除",
-                CloseButtonText: "取消"));
-            if (result != DialogResultKind.Primary)
-            {
-                return;
-            }
-
-            _isDeletingSequenceFrame = true;
-            try
-            {
-                var snapshot = await _applicationViewModel.SequenceFrames.CreateSectionSnapshotAsync(CharacterDesk.CurrentCharacter, section);
-                StopSequencePreview();
-                await _applicationViewModel.SequenceFrames.DeleteFramesAsync(
-                    CharacterDesk.CurrentCharacter,
-                    section,
-                    selectedFrames);
-                if (_applicationViewModel.SequenceFrames.PreviewFrames.Count == 0)
-                {
-                    ShowSequencePreviewSource(null);
-                    HideSequenceFrameManager();
-                }
-                else
-                {
-                    UpdateSequencePreviewImageSource();
-                    UpdateSequencePreviewInterval();
-                }
-
-                RecordSequenceFrameOperation(
-                    "批量删除序列帧",
-                    $"{section.Action.DisplayName} / {selectedFrames.Count} 帧",
-                    section,
-                    snapshot);
-                ShowFloatingTip(InfoBarSeverity.Success, "序列帧已批量删除", $"已删除 {selectedFrames.Count} 帧。");
-                AppendLog(LogKind.User, $"批量删除序列帧：{section.Action.DisplayName} / {selectedFrames.Count} 帧");
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "序列帧批量删除失败", ex.Message);
-                AppendLog(LogKind.Error, "序列帧批量删除失败。", ex);
-            }
-            finally
-            {
-                _isDeletingSequenceFrame = false;
-            }
-        }
-
-        private void DuplicateSelectedSequenceFramesButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (_isSelectingSequenceFrameCopyTarget)
-            {
-                CancelSequenceFrameCopyTargetSelection();
-                return;
-            }
-
-            StartSequenceFrameCopyTargetSelection(GetSelectedSequenceFrames());
-        }
 
         private void StartSequenceFrameCopyTargetSelection(IReadOnlyList<SequenceFrameItem> selectedFrames)
         {
@@ -1508,84 +1453,11 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private async Task DeleteSequenceFrameAsync(SequenceFrameItem frame, SequenceFrameSection section)
-        {
-            if (CharacterDesk.CurrentCharacter is null || _isDeletingSequenceFrame)
-            {
-                return;
-            }
 
-            _isDeletingSequenceFrame = true;
-            try
-            {
-                var snapshot = await _applicationViewModel.SequenceFrames.CreateSectionSnapshotAsync(CharacterDesk.CurrentCharacter, section);
-                StopSequencePreview();
-                await _applicationViewModel.SequenceFrames.DeleteFrameAsync(CharacterDesk.CurrentCharacter, section, frame);
-                if (_applicationViewModel.SequenceFrames.PreviewFrames.Count == 0)
-                {
-                    ShowSequencePreviewSource(null);
-                    HideSequenceFrameManager();
-                }
-                else
-                {
-                    UpdateSequencePreviewImageSource();
-                    UpdateSequencePreviewInterval();
-                }
 
-                RecordSequenceFrameOperation(
-                    "删除序列帧",
-                    $"{section.Action.DisplayName} / {frame.FileName}",
-                    section,
-                    snapshot);
-                ShowFloatingTip(InfoBarSeverity.Success, "序列帧已删除", frame.FileName);
-                AppendLog(LogKind.User, $"删除序列帧：{section.Action.DisplayName} / {frame.FileName}");
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "序列帧删除失败", ex.Message);
-                AppendLog(LogKind.Error, "序列帧删除失败。", ex);
-            }
-            finally
-            {
-                _isDeletingSequenceFrame = false;
-            }
-        }
 
-        private async void ReplaceSequenceFrameMenuItem_Click(object sender, RoutedEventArgs e)
-        {
-            if (ResolveSequenceFrameCommandFrame(sender) is { } frame)
-            {
-                await ReplaceSequenceEditorFrameAsync(frame);
-            }
-        }
 
-        private async void ReplaceSequenceEditorFrameButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (_applicationViewModel.SequenceFrames.SelectedEditorFrame is { } frame)
-            {
-                await ReplaceSequenceEditorFrameAsync(frame);
-            }
-        }
 
-        private void CopySequenceEditorFrameButton_Click(object sender, RoutedEventArgs e)
-        {
-            CopySequenceFrameMenuItem_Click(sender, e);
-        }
-
-        private void InsertBlankSequenceFrameBeforeButton_Click(object sender, RoutedEventArgs e)
-        {
-            _ = InsertBlankSequenceFrameAsync(sender, SequenceFrameInsertPosition.Before);
-        }
-
-        private void InsertBlankSequenceFrameAfterButton_Click(object sender, RoutedEventArgs e)
-        {
-            _ = InsertBlankSequenceFrameAsync(sender, SequenceFrameInsertPosition.After);
-        }
-
-        private void DeleteSequenceEditorFrameButton_Click(object sender, RoutedEventArgs e)
-        {
-            DeleteSequenceFrameMenuItem_Click(sender, e);
-        }
 
         private async Task ReplaceSequenceEditorFrameAsync(SequenceFrameItem frame)
         {
@@ -1604,74 +1476,21 @@ namespace CrossingVoidZDTool
             await ReplaceSequenceEditorFrameAsync(frame, sourcePath);
         }
 
-        private async void SelectSequenceEditorFrameFromCollectionButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (_applicationViewModel.SequenceFrames.SelectedEditorFrame is { } frame)
-            {
-                await ShowSequenceFrameCollectionAsync(frame);
-            }
-        }
 
         private async Task ReplaceSequenceEditorFrameAsync(SequenceFrameItem frame, string sourcePath)
         {
-            if (CharacterDesk.CurrentCharacter is null ||
-                _applicationViewModel.SequenceFrames.SelectedSection is not { } section)
-            {
-                return;
-            }
-
-            try
-            {
-                MarkSequenceFramesEdited();
-                StopSequencePreview();
-                ClearSequencePreviewCache();
-                await _applicationViewModel.SequenceFrames.ReplaceFrameAsync(
-                    CharacterDesk.CurrentCharacter,
-                    section,
-                    frame,
-                    sourcePath);
-                UpdateSequencePreviewImageSource();
-                ShowFloatingTip(InfoBarSeverity.Success, "帧素材已替换", $"{section.Action.DisplayName} / 第 {frame.Index} 帧");
-                AppendLog(LogKind.User, $"替换序列帧素材：{section.Action.DisplayName} / #{frame.Index}");
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "帧素材替换失败", ex.Message);
-                AppendLog(LogKind.Error, "序列帧素材替换失败。", ex);
-            }
+            // S3：流程在 SequenceFrameEditorController.ReplaceFrameAsync；
+            // 这里保留签名，菜单项与编辑器按钮的既有调用点都不用改。
+            await SequenceFrameEditor.ReplaceFrameAsync(frame, sourcePath);
         }
 
         private async Task<bool> ReplaceSequenceEditorFrameWithSourcesAsync(
             SequenceFrameItem frame,
             IReadOnlyList<string> sourcePaths)
         {
-            if (CharacterDesk.CurrentCharacter is null ||
-                _applicationViewModel.SequenceFrames.SelectedSection is not { } section)
-            {
-                return false;
-            }
-
-            try
-            {
-                MarkSequenceFramesEdited();
-                StopSequencePreview();
-                ClearSequencePreviewCache();
-                await _applicationViewModel.SequenceFrames.ReplaceFrameWithSourcesAsync(
-                    CharacterDesk.CurrentCharacter,
-                    section,
-                    frame,
-                    sourcePaths);
-                UpdateSequencePreviewImageSource();
-                ShowFloatingTip(InfoBarSeverity.Success, "帧素材已选入", $"{section.Action.DisplayName} / {sourcePaths.Count} 张");
-                AppendLog(LogKind.User, $"从帧合集选入素材：{section.Action.DisplayName} / #{frame.Index} / {sourcePaths.Count} 张");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "帧素材选入失败", ex.Message);
-                AppendLog(LogKind.Error, "从帧合集选入素材失败。", ex);
-                return false;
-            }
+            // S3：流程在 SequenceFrameEditorController.ReplaceFrameWithSourcesAsync；
+            // 这里保留签名，帧合集「确认批量替换」那条链的调用点不用改。
+            return await SequenceFrameEditor.ReplaceFrameWithSourcesAsync(frame, sourcePaths);
         }
 
         private async void SequenceFrameDurationStepper_ValueChanged(object sender, NumberBoxValueChangedEventArgs args)
@@ -1768,7 +1587,8 @@ namespace CrossingVoidZDTool
                 ?? _applicationViewModel.SequenceFrames.SelectedEditorFrame;
         }
 
-        private async void PlayPauseSequencePreviewButton_Click(object sender, RoutedEventArgs e)
+        /// <summary>预览区（外层）的播放 / 暂停（S5 收尾：由命令调用，不再是 Click 处理器）。</summary>
+        private async Task ToggleSequencePreviewPlaybackAsync()
         {
             if (_applicationViewModel.SequenceFrames.PreviewFrames.Count == 0)
             {
@@ -1783,11 +1603,6 @@ namespace CrossingVoidZDTool
             }
 
             await StartSequencePreviewAsync();
-        }
-
-        private async void PlayPauseSequenceEditorPreviewButton_Click(object sender, RoutedEventArgs e)
-        {
-            await ToggleSequenceEditorPreviewAsync();
         }
 
         private async Task ToggleSequenceEditorPreviewAsync()
@@ -1818,16 +1633,6 @@ namespace CrossingVoidZDTool
             {
                 UpdateSequencePreviewInterval();
             }
-        }
-
-        private void PreviousSequenceFrameButton_Click(object sender, RoutedEventArgs e)
-        {
-            NavigateSequenceEditorFrame(-1);
-        }
-
-        private void NextSequenceFrameButton_Click(object sender, RoutedEventArgs e)
-        {
-            NavigateSequenceEditorFrame(1);
         }
 
         private void NavigateSequenceEditorFrame(int direction)
@@ -2303,33 +2108,15 @@ namespace CrossingVoidZDTool
 
         private async Task<IReadOnlyList<string>> PickSequenceFrameImagesAsync()
         {
-            var picker = new FileOpenPicker
-            {
-                SuggestedStartLocation = PickerLocationId.PicturesLibrary
-            };
-            picker.FileTypeFilter.Add(".png");
-            picker.FileTypeFilter.Add(".jpg");
-            picker.FileTypeFilter.Add(".jpeg");
-            picker.FileTypeFilter.Add(".webp");
-            picker.FileTypeFilter.Add(".bmp");
-            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-            var files = await picker.PickMultipleFilesAsync();
-            return files.Select(file => file.Path).ToList();
+            return (await _filePickerService.PickMultipleFilesAsync(
+                    PickerLocationId.PicturesLibrary, ".png", ".jpg", ".jpeg", ".webp", ".bmp"))
+                .ToList();
         }
 
         private async Task<string?> PickSequenceFrameImageAsync()
         {
-            var picker = new FileOpenPicker
-            {
-                SuggestedStartLocation = PickerLocationId.PicturesLibrary
-            };
-            picker.FileTypeFilter.Add(".png");
-            picker.FileTypeFilter.Add(".jpg");
-            picker.FileTypeFilter.Add(".jpeg");
-            picker.FileTypeFilter.Add(".webp");
-            picker.FileTypeFilter.Add(".bmp");
-            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-            return (await picker.PickSingleFileAsync())?.Path;
+            return await _filePickerService.PickSingleFileAsync(
+                PickerLocationId.PicturesLibrary, ".png", ".jpg", ".jpeg", ".webp", ".bmp");
         }
     }
 }

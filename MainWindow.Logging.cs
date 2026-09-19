@@ -10,6 +10,7 @@ using CrossingVoidZDTool.Services;
 using CrossingVoidZDTool.ViewModels;
 using CrossingVoidZDTool.Views;
 using Microsoft.UI;
+using Microsoft.UI.Text;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -277,16 +278,68 @@ namespace CrossingVoidZDTool
 
         private void ClearLogButton_Click(object sender, RoutedEventArgs e)
         {
-            _logLines.Clear();
+            _logPanel.Clear();
             LogItemsControl.Items.Clear();
             AppendLog(LogKind.User, "已清空输出日志。");
         }
 
         private void CopyAllLogButton_Click(object sender, RoutedEventArgs e)
         {
-            var text = string.Join(Environment.NewLine + Environment.NewLine, _logLines.Select(item => item.CopyText));
+            CopyLogEntries(_logPanel.Entries, "已复制全部日志");
+        }
+
+        /// <summary>
+        /// 复制**本次流程**的全部日志。
+        ///
+        /// 面板只留 300 条，跑完第五步时第一到第四步的日志早就被挤掉了，
+        /// 「复制全部」复制的是面板里残下来的那点。这一条按当前 RunId
+        /// 从 runtime.log 里捞全量行——它才是「一次同步的完整日志」的入口。
+        /// </summary>
+        private void CopyCurrentRunLogButton_Click(object sender, RoutedEventArgs e)
+        {
+            var runId = CurrentLogRunId;
+            if (runId == RuntimeLogFormat.NoRunId)
+            {
+                ShowFloatingTip(
+                    InfoBarSeverity.Informational,
+                    "还没有本次流程",
+                    "先跑一次检测或同步，日志里就会开出一批新的批次号。");
+                return;
+            }
+
+            IReadOnlyList<string> lines;
+            try
+            {
+                lines = RuntimeLogFile.ReadRunLines(_runtimeLogPath, runId);
+            }
+            catch (Exception ex)
+            {
+                ShowFloatingTip(InfoBarSeverity.Error, "读取本次流程日志失败", ex.Message);
+                AppendLog(LogKind.Error, "读取本次流程日志失败。", ex);
+                return;
+            }
+
+            if (lines.Count == 0)
+            {
+                ShowFloatingTip(
+                    InfoBarSeverity.Informational,
+                    "本次流程还没有写进文件",
+                    $"{runId} 在 runtime.log 里一行都没有。");
+                return;
+            }
+
+            CopyTextToClipboard(string.Join(Environment.NewLine, lines));
+            ShowFloatingTip(
+                InfoBarSeverity.Success,
+                "已复制本次流程日志",
+                $"{runId} · {lines.Count} 行（含面板装不下的明细）");
+        }
+
+        private void CopyLogEntries(IReadOnlyList<LogEntry> entries, string tipTitle)
+        {
+            var text = string.Join(Environment.NewLine + Environment.NewLine, entries.Select(item => item.CopyText));
             CopyTextToClipboard(text);
-            ShowFloatingTip(InfoBarSeverity.Success, "已复制全部日志", $"{_logLines.Count} 条记录");
+            ShowFloatingTip(InfoBarSeverity.Success, tipTitle, $"{entries.Count} 条记录");
         }
 
         private void ScrollLogToBottomButton_Click(object sender, RoutedEventArgs e)
@@ -317,11 +370,23 @@ namespace CrossingVoidZDTool
             return Settings.ShouldWriteLog(kind);
         }
 
-        private void LogUserOperation(string action)
+        /// <summary>
+        /// 记一次用户操作。
+        ///
+        /// <paramref name="startsRun"/> 为真表示这是一次「跑流程」的动作
+        /// （检测差异、同步素材、刷新序列、导入、应用配置…），会开一批新日志；
+        /// 选引擎、选项目、全选这类沿用当前批次，免得每点一下就切一次批次号。
+        /// </summary>
+        private void LogUserOperation(string action, bool startsRun = false)
         {
             if (string.IsNullOrWhiteSpace(action))
             {
                 return;
+            }
+
+            if (startsRun)
+            {
+                BeginLogRun(action);
             }
 
             _recentOperations.Enqueue((DateTime.Now, action));
@@ -344,10 +409,19 @@ namespace CrossingVoidZDTool
             {
                 lock (_runtimeLogLock)
                 {
-                    Directory.CreateDirectory(Path.GetDirectoryName(_runtimeLogPath)!);
-                    File.AppendAllText(
-                        _runtimeLogPath,
-                        $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] {line}{Environment.NewLine}");
+                    // 轮转发生在写入之前：先归档旧文件，再在新文件里留一行说明。
+                    // 这是「翻日志要翻一个无限长大的文件」和「跨天找不到上下文」的唯一出口。
+                    var now = DateTimeOffset.Now;
+                    var archived = RuntimeLogFile.RotateIfNeeded(_runtimeLogPath, now);
+                    if (archived is not null)
+                    {
+                        RuntimeLogFile.AppendLine(
+                            _runtimeLogPath,
+                            RuntimeLogFormat.FormatFileLine(
+                                now, CurrentLogScope, $"上一份日志已归档为 {archived}。"));
+                    }
+
+                    RuntimeLogFile.AppendLine(_runtimeLogPath, line);
                 }
             }
             catch
@@ -368,7 +442,10 @@ namespace CrossingVoidZDTool
                 return;
             }
 
-            AppendRuntimeLog($"[{DateTime.Now:HH:mm:ss}] LogZDTool: {GetLogKindLabel(kind)}: {message}");
+            AppendRuntimeLog(RuntimeLogFormat.FormatFileLine(
+                DateTimeOffset.Now,
+                CurrentLogScope,
+                $"LogZDTool: {GetLogKindLabel(kind)}: {message}"));
         }
 
         /// <summary>
@@ -389,33 +466,45 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private void AppendLog(LogKind kind, string message, Exception? exception = null)
+        /// <summary>
+        /// 写一条日志。<paramref name="sticky"/> 为真的条目不参与面板淘汰——
+        /// 步骤标题行和批次首行靠它才能在一次上千行的检测之后还留在面板里。
+        /// </summary>
+        private void AppendLog(
+            LogKind kind,
+            string message,
+            Exception? exception = null,
+            bool sticky = false,
+            int? stepOverride = null)
         {
             if (!ShouldWriteLog(kind))
             {
                 return;
             }
 
-            var header = $"[{DateTime.Now:HH:mm:ss}] LogZDTool: {GetLogKindLabel(kind)}: {message}";
-            var displayText = header;
-            var copyText = header;
+            var now = DateTimeOffset.Now;
+            var scope = ScopeFor(stepOverride);
+            var kindLabel = GetLogKindLabel(kind);
+            var body = $"{kindLabel}: {message}";
+            var displayText = RuntimeLogFormat.FormatPanelLine(now, scope, body);
+            var copyText = displayText;
             if (exception is not null)
             {
                 displayText += $"{Environment.NewLine}{FormatExceptionForLog(exception)}";
                 copyText += $"{Environment.NewLine}{FormatExceptionForLog(exception, stackTraceLineLimit: 8)}";
             }
 
-            AppendRuntimeLog(displayText.Replace(Environment.NewLine, " | "));
-            _logLines.Enqueue((kind, displayText, copyText));
-
-            var removedCount = 0;
-            while (_logLines.Count > MaxUiLogCount)
+            var fileText = RuntimeLogFormat.FormatFileLine(now, scope, $"LogZDTool: {body}");
+            if (exception is not null)
             {
-                _logLines.Dequeue();
-                removedCount++;
+                // 文件里异常另起一行，不再把 [HH:mm:ss] 嵌在正文中间。
+                fileText += $"{Environment.NewLine}{FormatExceptionForLog(exception)}";
             }
 
-            AppendLogItem(kind, displayText, copyText, removedCount);
+            AppendRuntimeLog(fileText.Replace(Environment.NewLine, " | "));
+
+            var removedIndex = _logPanel.Append(ToLogEntryKind(kind), displayText, copyText, sticky);
+            AppendLogItem(kind, displayText, copyText, sticky, removedIndex);
         }
 
         /// <summary>
@@ -423,20 +512,27 @@ namespace CrossingVoidZDTool
         /// 以前每写一行日志都要 Items.Clear() 再重建满 300 个 Border，外加一次同步排版，
         /// 单行实测 400ms；一次第五步检测有上千行日志，界面就会整个僵住十几分钟。
         /// </summary>
-        private void AppendLogItem(LogKind kind, string displayText, string copyText, int removedCount)
+        private void AppendLogItem(
+            LogKind kind,
+            string displayText,
+            string copyText,
+            bool sticky,
+            int removedIndex)
         {
             if (LogItemsControl is null || LogScrollViewer is null)
             {
                 return;
             }
 
-            for (var index = 0; index < removedCount && LogItemsControl.Items.Count > 0; index++)
+            // 淘汰可能发生在中间（要跳过 Sticky 行），所以按 buffer 给的下标删，
+            // 两边才不会错位。
+            if (removedIndex >= 0 && removedIndex < LogItemsControl.Items.Count)
             {
-                DetachLogBlock(LogItemsControl.Items[0]);
-                LogItemsControl.Items.RemoveAt(0);
+                DetachLogBlock(LogItemsControl.Items[removedIndex]);
+                LogItemsControl.Items.RemoveAt(removedIndex);
             }
 
-            LogItemsControl.Items.Add(CreateLogBlock(kind, displayText, copyText));
+            LogItemsControl.Items.Add(CreateLogBlock(kind, displayText, copyText, sticky));
             RequestLogScrollToBottom();
         }
 
@@ -454,9 +550,10 @@ namespace CrossingVoidZDTool
             }
 
             LogItemsControl.Items.Clear();
-            foreach (var (kind, displayText, copyText) in _logLines)
+            foreach (var entry in _logPanel.Entries)
             {
-                LogItemsControl.Items.Add(CreateLogBlock(kind, displayText, copyText));
+                LogItemsControl.Items.Add(CreateLogBlock(
+                    ToLogKind(entry.Kind), entry.DisplayText, entry.CopyText, entry.Sticky));
             }
 
             RequestLogScrollToBottom();
@@ -495,13 +592,15 @@ namespace CrossingVoidZDTool
             LogScrollViewer?.ChangeView(null, LogScrollViewer.ScrollableHeight, null, disableAnimation: true);
         }
 
-        private Border CreateLogBlock(LogKind kind, string displayText, string copyText)
+        private Border CreateLogBlock(LogKind kind, string displayText, string copyText, bool sticky)
         {
             var block = new TextBlock
             {
                 Text = displayText,
                 TextWrapping = TextWrapping.Wrap,
                 FontFamily = new FontFamily("Consolas"),
+                // Sticky 行（批次首行、步骤标题行）加粗，一眼能从明细里挑出来。
+                FontWeight = sticky ? FontWeights.SemiBold : FontWeights.Normal,
                 IsTextSelectionEnabled = false,
                 Style = GetLogTextStyle(kind)
             };
@@ -697,6 +796,151 @@ namespace CrossingVoidZDTool
                 _ => "LogDefaultBlockStyle"
             }] as Style ?? throw new InvalidOperationException("日志容器样式资源不可用。");
         }
+
+        /// <summary>当前日志批次号；还没开过批次时是 <c>-</c>。</summary>
+        private string CurrentLogRunId => _currentLogRunId ?? RuntimeLogFormat.NoRunId;
+
+        /// <summary>
+        /// 这一行日志属于哪一次流程、哪一步。
+        /// 导入方向没有分步流程，步骤记 0（面板上也就不显示 [StN]）。
+        /// </summary>
+        private RuntimeLogScope CurrentLogScope => new(CurrentLogRunId, CurrentWorkflowStepForLog());
+
+        /// <summary>
+        /// 这一行归哪一段。步骤标题行说的是**它指的那一步**，
+        /// 不是「写这条日志时当前停在哪一步」——离开第三步时当前步已经是第四步了。
+        /// </summary>
+        private RuntimeLogScope ScopeFor(int? stepOverride) =>
+            stepOverride is { } step ? new RuntimeLogScope(CurrentLogRunId, step) : CurrentLogScope;
+
+        private int CurrentWorkflowStepForLog()
+        {
+            var sync = _applicationViewModel.UnrealProjectSync;
+            return sync.IsEngineToToolbox ? 0 : Math.Clamp(sync.WorkflowStep, 0, UnrealSyncWorkflow.MaxStep);
+        }
+
+        /// <summary>
+        /// 开一批新日志。批首是一条 Sticky 行，记下这次是哪个角色、哪个方向——
+        /// 以后再翻 runtime.log，一个 RunId 就能把这批上下文凑齐。
+        /// </summary>
+        private void BeginLogRun(string trigger)
+        {
+            var sync = _applicationViewModel.UnrealProjectSync;
+            _currentLogRunId = RuntimeLogFormat.CreateRunId(DateTimeOffset.Now);
+            var character = sync.SelectedSource?.DraftCharacter;
+            var characterText = character is null ? "未选择" : $"{character.Name}（{character.Code}）";
+            AppendLog(
+                LogKind.Info,
+                RuntimeLogFormat.FormatRunHeader(_currentLogRunId, characterText, sync.DirectionTitle),
+                sticky: true);
+            AppendDiagnosticLog(LogKind.Info, $"[Run] 批次开始：{trigger}");
+        }
+
+        /// <summary>
+        /// 盯着当前步骤的变化，进/出各写一条标题行。
+        ///
+        /// 这一步是「接不上」的正解：中间的明细会被面板挤掉，但标题行是 Sticky，
+        /// 一次跑完从面板上仍能顺着 ▶1 ■1 ▶2 ■2 … 看完整条路径。
+        /// </summary>
+        private void AttachWorkflowStepLog()
+        {
+            var sync = _applicationViewModel.UnrealProjectSync;
+            _lastLoggedWorkflowStep = 0;
+            sync.PropertyChanged += (_, e) =>
+            {
+                if (string.Equals(
+                        e.PropertyName,
+                        nameof(UnrealProjectSyncViewModel.IsEngineToToolbox),
+                        StringComparison.Ordinal))
+                {
+                    // 换方向等于换了一套东西：清掉上一条记录，换成新方向的第一步。
+                    _lastLoggedWorkflowStep = 0;
+                    LogWorkflowStepTransition(sync.WorkflowStep);
+                    return;
+                }
+
+                if (!string.Equals(
+                        e.PropertyName,
+                        nameof(UnrealProjectSyncViewModel.WorkflowStep),
+                        StringComparison.Ordinal))
+                {
+                    return;
+                }
+
+                LogWorkflowStepTransition(sync.WorkflowStep);
+            };
+
+            // 启动时先补一条当前步的开始行，否则第一段路只有「离开时」的记录。
+            LogWorkflowStepTransition(sync.WorkflowStep);
+        }
+
+        private void LogWorkflowStepTransition(int step)
+        {
+            if (step == _lastLoggedWorkflowStep)
+            {
+                return;
+            }
+
+            var sync = _applicationViewModel.UnrealProjectSync;
+            var previous = _lastLoggedWorkflowStep;
+            _lastLoggedWorkflowStep = step;
+
+            // 导入方向没有分步流程，写「第 N 步」只会让人以为走的是六步发布流程。
+            if (sync.IsEngineToToolbox)
+            {
+                return;
+            }
+
+            if (previous is >= UnrealSyncWorkflow.MinStep and <= UnrealSyncWorkflow.MaxStep)
+            {
+                AppendLog(
+                    LogKind.Info,
+                    RuntimeLogFormat.FormatStepEnd(previous, sync.WorkflowStepConclusionText(previous)),
+                    sticky: true,
+                    stepOverride: previous);
+            }
+
+            if (step is >= UnrealSyncWorkflow.MinStep and <= UnrealSyncWorkflow.MaxStep)
+            {
+                AppendLog(
+                    LogKind.Info,
+                    RuntimeLogFormat.FormatStepStart(step, sync.WorkflowStepNameFor(step)),
+                    sticky: true,
+                    stepOverride: step);
+            }
+        }
+
+        /// <summary>
+        /// 某一批流程走完时补一条结束行。
+        ///
+        /// 前五步的结束行在「离开这一步」时就写了；第六步是最后一步，没有下一步可走，
+        /// 所以它的收尾动作（蓝图置入写入成功）要自己报一次。
+        /// </summary>
+        private void LogWorkflowStepFinished(int step)
+        {
+            var sync = _applicationViewModel.UnrealProjectSync;
+            AppendLog(
+                LogKind.Info,
+                RuntimeLogFormat.FormatStepEnd(step, sync.WorkflowStepConclusionText(step)),
+                sticky: true,
+                stepOverride: step);
+        }
+
+        private static LogEntryKind ToLogEntryKind(LogKind kind) => kind switch
+        {
+            LogKind.User => LogEntryKind.User,
+            LogKind.Warning => LogEntryKind.Warning,
+            LogKind.Error => LogEntryKind.Error,
+            _ => LogEntryKind.Info,
+        };
+
+        private static LogKind ToLogKind(LogEntryKind kind) => kind switch
+        {
+            LogEntryKind.User => LogKind.User,
+            LogEntryKind.Warning => LogKind.Warning,
+            LogEntryKind.Error => LogKind.Error,
+            _ => LogKind.Info,
+        };
 
     }
 }

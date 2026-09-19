@@ -112,42 +112,30 @@ namespace CrossingVoidZDTool
 
         private async void ChooseUnrealProjectSyncEngineButton_Click(object sender, RoutedEventArgs e)
         {
-            var picker = new FileOpenPicker
-            {
-                SuggestedStartLocation = PickerLocationId.ComputerFolder
-            };
-            picker.FileTypeFilter.Add(".exe");
-            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-
-            var selectedFile = await picker.PickSingleFileAsync();
-            if (selectedFile is null)
+            var selectedFilePath = await _filePickerService.PickSingleFileAsync(
+                PickerLocationId.ComputerFolder, ".exe");
+            if (selectedFilePath is null)
             {
                 return;
             }
 
-            _applicationViewModel.UnrealProjectSync.EnginePath = selectedFile.Path;
+            _applicationViewModel.UnrealProjectSync.EnginePath = selectedFilePath;
             SaveUnrealProjectSyncSettings();
-            LogUserOperation($"选择虚幻引擎：{selectedFile.Path}");
+            LogUserOperation($"选择虚幻引擎：{selectedFilePath}");
         }
 
         private async void ChooseUnrealProjectSyncProjectButton_Click(object sender, RoutedEventArgs e)
         {
-            var picker = new FileOpenPicker
-            {
-                SuggestedStartLocation = PickerLocationId.ComputerFolder
-            };
-            picker.FileTypeFilter.Add(".uproject");
-            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-
-            var selectedFile = await picker.PickSingleFileAsync();
-            if (selectedFile is null)
+            var selectedFilePath = await _filePickerService.PickSingleFileAsync(
+                PickerLocationId.ComputerFolder, ".uproject");
+            if (selectedFilePath is null)
             {
                 return;
             }
 
-            _applicationViewModel.UnrealProjectSync.ProjectPath = selectedFile.Path;
+            _applicationViewModel.UnrealProjectSync.ProjectPath = selectedFilePath;
             SaveUnrealProjectSyncSettings();
-            LogUserOperation($"选择虚幻项目：{selectedFile.Path}");
+            LogUserOperation($"选择虚幻项目：{selectedFilePath}");
         }
 
         private void UnrealSyncSelectionCheckBox_Click(object sender, RoutedEventArgs e)

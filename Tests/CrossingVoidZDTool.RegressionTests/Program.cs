@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -26,7 +27,6 @@ if (args.Length > 0 && string.Equals(args[0], "migrate-paths", StringComparison.
 {
     return RunPortablePathMigration(args.Skip(1).ToArray());
 }
-
 
 var tests = new (string Name, Action Run)[]
 {
@@ -209,6 +209,7 @@ var tests = new (string Name, Action Run)[]
     ("已完成角色不能直接进入 St2 至 St6", CompletedCharacterCannotEnterProductionSteps),
     ("导出角色复制完整文件夹并保护已有目标", ExportCharacterCopiesWholeFolderAndRequiresOverwrite),
     ("角色详情使用完整文件夹导出流程", CharacterDetailUsesFolderExportFlow),
+    ("角色台右键菜单的内容是纯函数", CharacterDeskContextMenusAreDeclared),
     ("切换角色不会把程序性清空当成草稿编辑", SwitchingCharacterDoesNotRaiseDraftEdited),
     ("刷新同一角色元数据保留已打开草稿", ReplacingSameCharacterPreservesOpenDraft),
     ("被动技能文本修改触发角色信息保存", PassiveSkillTextChangeTriggersSave),
@@ -329,8 +330,61 @@ var tests = new (string Name, Action Run)[]
     ("图集 report 按新鲜度和 ok 判定成败", AtlasReportVerdictRequiresFreshOkResult),
     ("图集落点在导出区或一次性缓存", AtlasDestinationResolvesToExportOrCacheFolder),
     ("图集 Python 定位按设置内置系统依次回退", AtlasPythonLocatorFallsBackInOrder),
-    ("内置 Python 能导入 Pillow 跑通自检", BundledAtlasPythonRunsTheToolSelfCheck)
+    ("内置 Python 能导入 Pillow 跑通自检", BundledAtlasPythonRunsTheToolSelfCheck),
+    ("日志行带批次号和步骤号", RuntimeLogLinesCarryRunAndStep),
+    ("日志面板的步骤标题行不会被明细挤掉", StickyLogLinesSurvivePanelEviction),
+    ("运行日志超限会轮转且只留五份", RuntimeLogRotatesAndKeepsFiveArchives),
+    ("复制本次流程能捞到面板之外的明细", CopyCurrentRunCollectsLinesBeyondPanelLimit),
+    ("派生属性清单覆盖所有 Workflow 属性", DerivedNotificationsCoverWorkflowProperties),
+    ("改步号会通知清单里的每个派生属性", ChangingWorkflowStepNotifiesEveryDeclaredProperty),
+    ("六步状态规则是纯函数且各步缓存互不影响", WorkflowStateProjectionFollowsStepSemantics),
+    ("同步台在查看模式下依然点得动", UnrealSyncPageStaysClickableInViewOnlyMode),
+    ("整页锁输入必须给出可见解释", PageWideInputLocksExplainThemselves),
+    ("选文件和选文件夹只有一条路径", FilePickersGoThroughOneService),
+    ("全选类按钮已改成可测的 VM 命令", StepSelectionCommandsDriveTheViewModel),
+    ("发布编排可以拿假 Host 真跑", PublishControllerRunsAgainstFakeHost),
+    ("流程按钮已改成可测的 VM 命令", WorkflowStepCommandsDriveTheController),
+    ("复制清单命令与剪贴板状态一致", CopyStepReportCommandKeepsClipboardHonest),
+    ("六步加载状态住进一个对象且互不影响", StepLoadStoreKeepsPerStepStateSeparate),
+    ("参考图导入流程可以脱离界面跑", ReferenceImageImportRunsWithoutShell),
+    ("打开草稿流程可以脱离界面跑", DraftOpenRunsWithoutShell),
+    ("导出流程只在该问的时候才问覆盖", ExportFlowOnlyAsksWhenNeeded),
+    ("备份还原删除都先问清楚再动数据", BackupRestoreDeleteAskBeforeTouchingData),
+    ("新建角色没输入名字时不建空角色", CreateCharacterSkipsBlankName),
+    ("刷新角色台失败必须留痕", CharacterReloadReportsFailure)
 };
+
+// 调试用的窄循环：只跑名字里含给定片段的那几条用例。
+//     CrossingVoidZDTool.RegressionTests.exe only 同步台
+// 全量一轮要十几分钟，定位问题时按这个跑能压到几秒。
+if (args.Length > 0 && string.Equals(args[0], "only", StringComparison.OrdinalIgnoreCase))
+{
+    var onlyPattern = args.Length > 1 ? args[1] : string.Empty;
+    var matched = tests.Where(test => test.Name.Contains(onlyPattern, StringComparison.Ordinal)).ToArray();
+    if (matched.Length == 0)
+    {
+        Console.WriteLine($"没有匹配「{onlyPattern}」的用例。");
+        return 2;
+    }
+
+    var onlyFailed = 0;
+    foreach (var test in matched)
+    {
+        try
+        {
+            test.Run();
+            Console.WriteLine($"PASS {test.Name}");
+        }
+        catch (Exception ex)
+        {
+            onlyFailed++;
+            Console.WriteLine($"FAIL {test.Name}: {ex.Message}");
+        }
+    }
+
+    Console.WriteLine($"ONLY_COUNT={matched.Length} ONLY_FAILED={onlyFailed}");
+    return onlyFailed == 0 ? 0 : 1;
+}
 
 var failed = 0;
 foreach (var test in tests)
@@ -1632,14 +1686,18 @@ static void ReopeningCompletedCharacterMovesToDraft()
 
 static void CharacterDetailContinueReopensBeforeNavigation()
 {
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.CharacterDesk.cs"));
-    var methodStart = source.IndexOf("private async void CharacterDetailContinueButton_Click", StringComparison.Ordinal);
+    // 棘轮记账（2026-09-19，C6b）：流程搬进 CharacterDetailActionController，
+    // 壳里只剩一行转发（`await CharacterDetailAction.ContinueEditingAsync();`）。
+    // 顺序语义（恢复草稿 → 关弹窗 → 跳页）没变，读的地方从壳换成控制器。
+    var source = ReadViewModelSource("CharacterDetailActionController.cs");
+    var methodStart = source.IndexOf("public async Task ContinueEditingAsync", StringComparison.Ordinal);
     AssertEqual(true, methodStart >= 0);
-    var methodEnd = source.IndexOf("private ", methodStart + 20, StringComparison.Ordinal);
+    var methodEnd = source.IndexOf("public void OpenCharacterFolder", methodStart, StringComparison.Ordinal);
+    AssertEqual(true, methodEnd > methodStart);
     var method = source[methodStart..methodEnd];
     var reopenIndex = method.IndexOf("ReopenCompletedCharacterAsync", StringComparison.Ordinal);
-    var hideIndex = method.IndexOf("HideCharacterDetail();", StringComparison.Ordinal);
-    var navigationIndex = method.IndexOf("ShowLastEditedPage", StringComparison.Ordinal);
+    var hideIndex = method.IndexOf("_host.HideCharacterDetail();", StringComparison.Ordinal);
+    var navigationIndex = method.IndexOf("_host.ShowLastEditedPage", StringComparison.Ordinal);
 
     AssertEqual(true, reopenIndex >= 0);
     AssertEqual(true, hideIndex > reopenIndex);
@@ -1648,14 +1706,16 @@ static void CharacterDetailContinueReopensBeforeNavigation()
 
 static void CharacterDetailContinueSelectsDraftBeforeNavigation()
 {
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.CharacterDesk.cs"));
-    var methodStart = source.IndexOf("private async void CharacterDetailContinueButton_Click", StringComparison.Ordinal);
+    // 棘轮记账（2026-09-19，C6b）：同前一条，断言改读控制器里的同一段流程。
+    var source = ReadViewModelSource("CharacterDetailActionController.cs");
+    var methodStart = source.IndexOf("public async Task ContinueEditingAsync", StringComparison.Ordinal);
     AssertEqual(true, methodStart >= 0);
-    var methodEnd = source.IndexOf("private ", methodStart + 20, StringComparison.Ordinal);
+    var methodEnd = source.IndexOf("public void OpenCharacterFolder", methodStart, StringComparison.Ordinal);
+    AssertEqual(true, methodEnd > methodStart);
     var method = source[methodStart..methodEnd];
     var selectIndex = method.IndexOf("SetCurrentCharacterAsync(character)", StringComparison.Ordinal);
-    var hideIndex = method.IndexOf("HideCharacterDetail();", StringComparison.Ordinal);
-    var navigationIndex = method.IndexOf("ShowLastEditedPage", StringComparison.Ordinal);
+    var hideIndex = method.IndexOf("_host.HideCharacterDetail();", StringComparison.Ordinal);
+    var navigationIndex = method.IndexOf("_host.ShowLastEditedPage", StringComparison.Ordinal);
 
     AssertEqual(true, selectIndex >= 0);
     AssertEqual(true, hideIndex > selectIndex);
@@ -1664,14 +1724,14 @@ static void CharacterDetailContinueSelectsDraftBeforeNavigation()
 
 static void CharacterDetailUnrealSyncSelectsCharacterBeforeNavigation()
 {
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.CharacterDesk.cs"));
-    var methodStart = source.IndexOf("private async void CharacterDetailUnrealSyncButton_Click", StringComparison.Ordinal);
+    // 棘轮记账（2026-09-19，C6b）：同前两条；GoToUnrealSyncAsync 是控制器最后一个方法。
+    var source = ReadViewModelSource("CharacterDetailActionController.cs");
+    var methodStart = source.IndexOf("public async Task GoToUnrealSyncAsync", StringComparison.Ordinal);
     AssertEqual(true, methodStart >= 0);
-    var methodEnd = source.IndexOf("private ", methodStart + 20, StringComparison.Ordinal);
-    var method = source[methodStart..methodEnd];
+    var method = source[methodStart..];
     var selectIndex = method.IndexOf("SetCurrentCharacterAsync(character)", StringComparison.Ordinal);
-    var hideIndex = method.IndexOf("HideCharacterDetail();", StringComparison.Ordinal);
-    var navigationIndex = method.IndexOf("ShowUnrealProjectSyncPage();", StringComparison.Ordinal);
+    var hideIndex = method.IndexOf("_host.HideCharacterDetail();", StringComparison.Ordinal);
+    var navigationIndex = method.IndexOf("_host.ShowUnrealSyncPage();", StringComparison.Ordinal);
 
     AssertEqual(true, selectIndex >= 0);
     AssertEqual(true, hideIndex > selectIndex);
@@ -1747,12 +1807,46 @@ static void CharacterDetailUsesFolderExportFlow()
 {
     var xaml = ReadAllProjectXaml();
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.CharacterDesk.cs"));
+    // C3 之后导出流程住在 CharacterExportController 里：默认导出根 = 项目根，
+    // 这条断言跟着搬（不是删掉）——「搬哪儿改哪儿」。
+    var exportSource = File.ReadAllText(Path.Combine(
+        Directory.GetCurrentDirectory(), "ViewModels", "CharacterExportController.cs"));
 
     AssertEqual(true, xaml.Contains("x:Name=\"CharacterDetailExportButton\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("Content=\"导出角色\"", StringComparison.Ordinal));
-    AssertEqual(true, xaml.Contains("Click=\"CharacterDetailExportButton_Click\"", StringComparison.Ordinal));
-    AssertEqual(true, source.Contains("GetDefaultExportRootPath(Settings.ProjectRootPath)", StringComparison.Ordinal));
+    // 棘轮记账（2026-09-19，C6b）：「导出角色」改成命令绑定了（原来断的是 Click 处理器名）。
+    // 链路：XAML 命令 → CharacterDetailCommands → 控制器 → 外壳的 ICharacterDetailActionHost。
+    // 绑定是**卡片级**的（详情面板 DataContext 就是那张卡，页面级路径在那儿解析不到）。
+    AssertEqual(true, xaml.Contains("Command=\"{Binding ExportCharacterCommand}\"", StringComparison.Ordinal));
+    AssertEqual(true, exportSource.Contains("GetDefaultExportRootPath(_host.ProjectRootPath)", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("ExportCharacterFolderAsync", StringComparison.Ordinal));
+    AssertEqual(true, source.Contains("ExportDetailCharacterAsync", StringComparison.Ordinal));
+}
+
+/// <summary>
+/// C6c：右键菜单的内容搬成了纯函数，于是「这个角色/这张参考图上能做什么」
+/// 可以直接断言——以前只能真右键一次，或者去壳里搜字符串。
+/// 顺带钉住"删除前面有一条分隔线"这种纯视觉约定。
+/// </summary>
+static void CharacterDeskContextMenusAreDeclared()
+{
+    var cardItems = CharacterCardMenu.Build();
+    AssertEqual(3, cardItems.Count);
+    AssertEqual("手动备份", cardItems[0].Text);
+    AssertEqual(CharacterCardMenuAction.Backup, cardItems[0].Action);
+    AssertEqual(false, cardItems[0].IsSeparatorBefore);
+    AssertEqual("还原", cardItems[1].Text);
+    AssertEqual(CharacterCardMenuAction.Restore, cardItems[1].Action);
+    AssertEqual("删除", cardItems[2].Text);
+    AssertEqual(CharacterCardMenuAction.Delete, cardItems[2].Action);
+    AssertEqual(true, cardItems[2].IsSeparatorBefore);
+
+    var referenceImageItems = CharacterReferenceImageMenu.Build();
+    AssertEqual(2, referenceImageItems.Count);
+    AssertEqual("重命名", referenceImageItems[0].Text);
+    AssertEqual(CharacterReferenceImageMenuAction.Rename, referenceImageItems[0].Action);
+    AssertEqual("删除", referenceImageItems[1].Text);
+    AssertEqual(CharacterReferenceImageMenuAction.Delete, referenceImageItems[1].Action);
 }
 
 static void SwitchingCharacterDoesNotRaiseDraftEdited()
@@ -2690,14 +2784,18 @@ static void SequenceEditorProvidesCompleteTimelineControls()
     AssertEqual(true, xaml.Contains("PointerPressed=\"SequenceEditorPreviewCanvas_PointerPressed\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("PointerMoved=\"SequenceEditorPreviewCanvas_PointerMoved\"", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("ResetSequenceEditorPreviewTransform", StringComparison.Ordinal));
-    AssertEqual(true, xaml.Contains("ReplaceSequenceEditorFrameButton_Click", StringComparison.Ordinal));
-    AssertEqual(true, xaml.Contains("SelectSequenceEditorFrameFromCollectionButton_Click", StringComparison.Ordinal));
-    AssertEqual(true, xaml.Contains("CopySequenceEditorFrameButton_Click", StringComparison.Ordinal));
+    // 棘轮记账（2026-09-19，S5 收尾）：「替换帧素材 / 从帧合集选择 / 删除当前帧」都改成命令了，
+    // 处理器名不再出现在 XAML 里；判据换成命令绑定，"这几个入口还在"的意图不变。
+    AssertEqual(true, xaml.Contains("Command=\"{Binding SequenceFrames.ReplaceSelectedEditorFrameCommand}\"", StringComparison.Ordinal));
+    AssertEqual(true, xaml.Contains("Command=\"{Binding SequenceFrames.PickEditorFrameFromCollectionCommand}\"", StringComparison.Ordinal));
+    // 棘轮记账（2026-09-19，S3）：「复制」按钮改成命令了（`SequenceFrameEditorController`），
+    // 处理器名不再出现在 XAML 里；判据换成命令绑定，"这条链路还在"的意图不变。
+    AssertEqual(true, xaml.Contains("Command=\"{Binding SequenceFrames.CopyEditorFrameCommand}\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("Content=\"左插入\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("Content=\"右插入\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("Text=\"左插入\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("Text=\"右插入\"", StringComparison.Ordinal));
-    AssertEqual(true, xaml.Contains("DeleteSequenceEditorFrameButton_Click", StringComparison.Ordinal));
+    AssertEqual(true, xaml.Contains("Command=\"{Binding SequenceFrames.DeleteEditorFrameCommand}\"", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("_sequenceFrameCollectionSelectionTarget", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("PlayCurrentSequenceFrameVoice", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("DurationFrames", StringComparison.Ordinal));
@@ -2811,7 +2909,10 @@ static void SequenceEditorCreatesFirstFrameAndCollectionSupportsModifierMultiSel
     var shortcutSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.Logging.cs"));
 
     AssertEqual(true, xaml.Contains("Content=\"新建帧\"", StringComparison.Ordinal));
-    AssertEqual(true, xaml.Contains("Click=\"NewSequenceEditorFrameButton_Click\"", StringComparison.Ordinal));
+    // 棘轮记账（2026-09-19，S3 / S5 收尾）：这两条原来断的是 Click 处理器名。
+    // 「新建帧」和「复用角标」都改成命令了，处理器名不再出现在 XAML 里；
+    // 判据换成"这条链路还在"的新写法——XAML 断命令绑定，壳断宿主实现。
+    AssertEqual(true, xaml.Contains("Command=\"{Binding SequenceFrames.InsertBlankAfterCommand}\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("x:Name=\"ConfirmSequenceFrameCollectionSelectionButton\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("x:Name=\"CancelSequenceFrameCollectionSelectionButton\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("SelectionChanged=\"SequenceFramesCollectionGridView_SelectionChanged\"", StringComparison.Ordinal));
@@ -2828,7 +2929,8 @@ static void SequenceEditorCreatesFirstFrameAndCollectionSupportsModifierMultiSel
     AssertEqual(true, sequenceSource.Contains("VirtualKey.Left", StringComparison.Ordinal));
     AssertEqual(true, sequenceSource.Contains("VirtualKey.Right", StringComparison.Ordinal));
     AssertEqual(true, sequenceSource.Contains("NavigateSequenceEditorFrame", StringComparison.Ordinal));
-    AssertEqual(true, sequenceSource.Contains("SelectSequenceReuseGroupButton_Click", StringComparison.Ordinal));
+    AssertEqual(true, xaml.Contains("Command=\"{Binding SelectReuseGroupCommand}\"", StringComparison.Ordinal));
+    AssertEqual(true, sequenceSource.Contains("ISequenceFramesCommandHost.SelectReuseGroup", StringComparison.Ordinal));
     AssertEqual(true, sequenceSource.Contains("FocusManager.GetFocusedElement", StringComparison.Ordinal));
     AssertEqual(false, sequenceSource.Contains("SelectedItems.Add(item)", StringComparison.Ordinal));
     AssertEqual(true, sequenceSource.Contains("ReplaceFrameWithSourcesAsync", StringComparison.Ordinal));
@@ -2947,16 +3049,19 @@ static void SequenceCollectionResolvesAllDuplicatesKeepingMostUsedResource()
     var xaml = ReadAllProjectXaml();
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
     AssertEqual(true, xaml.Contains("Content=\"一键处理\"", StringComparison.Ordinal));
-    AssertEqual(true, xaml.Contains("Click=\"ResolveAllSequenceFrameDuplicatesButton_Click\"", StringComparison.Ordinal));
-    AssertEqual(true, source.Contains("ResolveAllSequenceFrameDuplicatesButton_Click", StringComparison.Ordinal));
+    // 棘轮记账（2026-09-19，S2）：「一键处理」改成命令了（SequenceFrameDuplicateDetectionController），
+    // 判据换成命令绑定 + 宿主实现，「这条链路还在」的意图不变。
+    AssertEqual(true, xaml.Contains("Command=\"{Binding SequenceFrames.ResolveAllDuplicatesCommand}\"", StringComparison.Ordinal));
+    AssertEqual(true, source.Contains("ISequenceFramesCommandHost.ResolveAllDuplicates", StringComparison.Ordinal));
 }
 
 static void OuterSequencePreviewProvidesFrameCollectionEntry()
 {
     var xaml = ReadAllProjectXaml();
     AssertEqual(true, xaml.Contains("Content=\"帧素材合集\"", StringComparison.Ordinal));
+    // 棘轮记账（2026-09-19，S1/S4）：入口按钮已命令化（原来是 Click="OpenSequenceCollectionButton_Click"）。
     AssertEqual(true, xaml.Contains(
-        "Click=\"OpenSequenceCollectionButton_Click\" Content=\"帧素材合集\"",
+        "Command=\"{Binding SequenceFrames.OpenCollectionCommand}\" Content=\"帧素材合集\"",
         StringComparison.Ordinal));
 }
 
@@ -2991,13 +3096,18 @@ static void SequenceCollectionUsesCompactUsageFirstCards()
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
 
     AssertEqual(true, xaml.Contains("x:Name=\"DetectSequenceFrameDuplicatesButton\"", StringComparison.Ordinal));
-    AssertEqual(true, xaml.Contains("Click=\"DetectSequenceFrameDuplicatesButton_Click\"", StringComparison.Ordinal));
+    // 棘轮记账（2026-09-19，S2）：「检测重复」改成命令了（SequenceFrameDuplicateDetectionController）。
+    AssertEqual(true, xaml.Contains("Command=\"{Binding SequenceFrames.DetectDuplicatesCommand}\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("x:Name=\"SequenceFramesCollectionGridView\"", StringComparison.Ordinal));
     AssertEqual(true, xaml.Contains("ItemWidth=\"206\"", StringComparison.Ordinal));
     var collectionTemplate = xaml[xaml.IndexOf("x:Name=\"SequenceFramesCollectionGridView\"", StringComparison.Ordinal)..];
     AssertEqual(true, collectionTemplate.IndexOf("Text=\"{Binding UsageText", StringComparison.Ordinal) <
         collectionTemplate.IndexOf("Text=\"{Binding FileName", StringComparison.Ordinal));
-    AssertEqual(true, source.Contains("DetectCollectionDuplicatesAsync", StringComparison.Ordinal));
+    // 棘轮记账（2026-09-19，S2）：查重流程搬进 SequenceFrameDuplicateDetectionController，
+    // 壳里只剩转发；断言改读控制器（"点检测才查重"这条语义不变）。
+    var detectionControllerSource = ReadViewModelSource("SequenceFrameDuplicateDetectionController.cs");
+    AssertEqual(true, detectionControllerSource.Contains("DetectCollectionDuplicatesAsync", StringComparison.Ordinal));
+    AssertEqual(true, source.Contains("DuplicateDetection.DetectAsync()", StringComparison.Ordinal));
 }
 
 static void SequenceFrameImportPreservesOuterScrollPosition()
@@ -3015,10 +3125,13 @@ static void SequenceFrameImportPreservesOuterScrollPosition()
         navigationSource.Contains(
             "private async Task RunWithPageScrollPositionPreservedAsync",
             StringComparison.Ordinal));
+    // 棘轮记账（2026-09-19，S3）：「导入后选中刚写的动作」这一步随编辑流程搬进了控制器，
+    // 断言改读控制器源码；另两条（外层滚动位置、导入后起预览）仍在壳里。
+    var editorControllerSource = ReadViewModelSource("SequenceFrameEditorController.cs");
     AssertEqual(
         true,
-        sequenceFramesSource.Contains(
-            "TrySelectSection(section.Action.Code)",
+        editorControllerSource.Contains(
+            "_viewModel.TrySelectSection(section.Action.Code)",
             StringComparison.Ordinal));
     AssertEqual(
         true,
@@ -3136,7 +3249,9 @@ static void NewSequenceFrameSynchronizesTimelineSelection()
 {
     var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
     const string startMarker = "private async Task InsertBlankSequenceFrameAsync";
-    const string endMarker = "private async void DeleteSequenceFrameMenuItem_Click";
+    // 棘轮记账（2026-09-19，S1 收尾）：原来的结束标记是那个已被命令取代的菜单项处理器，
+    // 换成紧随其后的下一个方法（时间轴 KeyDown），断言的内容没变。
+    const string endMarker = "private async void SequenceFrameTimelineListView_KeyDown";
     var start = source.IndexOf(startMarker, StringComparison.Ordinal);
     var end = source.IndexOf(endMarker, start, StringComparison.Ordinal);
 
@@ -3284,15 +3399,23 @@ static void SequenceTimelineDeleteKeyUsesSelectedFrame()
     AssertEqual(true, source.Contains("Windows.System.VirtualKey.Delete", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("DeleteSequenceFrameAsync(frame, section)", StringComparison.Ordinal));
 
+    // 棘轮记账（2026-09-19，S3）：删除流程搬进 SequenceFrameEditorController，
+    // 壳里只剩一行转发（`DeleteSequenceFrameAsync` → `SequenceFrameEditor.DeleteFrameAsync`）；
+    // 三条内容断言改读控制器里的 DeleteFrameAsync，语义不变。
     var deleteMethodStart = source.IndexOf(
-        "private async Task DeleteSequenceFrameAsync",
+        "private Task DeleteSequenceFrameAsync",
         StringComparison.Ordinal);
-    var deleteMethodEnd = source.IndexOf(
-        "private async void ReplaceSequenceFrameMenuItem_Click",
-        deleteMethodStart,
+    AssertEqual(true, deleteMethodStart >= 0);
+    var editorSource = ReadViewModelSource("SequenceFrameEditorController.cs");
+    var deleteMethodStartInController = editorSource.IndexOf(
+        "public async Task DeleteFrameAsync",
         StringComparison.Ordinal);
-    AssertEqual(true, deleteMethodStart >= 0 && deleteMethodEnd > deleteMethodStart);
-    var deleteMethod = source[deleteMethodStart..deleteMethodEnd];
+    var deleteMethodEnd = editorSource.IndexOf(
+        "public async Task DeleteFramesAsync",
+        deleteMethodStartInController,
+        StringComparison.Ordinal);
+    AssertEqual(true, deleteMethodStartInController >= 0 && deleteMethodEnd > deleteMethodStartInController);
+    var deleteMethod = editorSource[deleteMethodStartInController..deleteMethodEnd];
     AssertEqual(false, deleteMethod.Contains("ClearSequencePreviewCache();", StringComparison.Ordinal));
     AssertEqual(true, deleteMethod.Contains("UpdateSequencePreviewImageSource();", StringComparison.Ordinal));
     AssertEqual(true, deleteMethod.Contains("HideSequenceFrameManager();", StringComparison.Ordinal));
@@ -3399,8 +3522,10 @@ static void SequenceBatchCopyUsesTimelineTargetSelection()
     var methodStart = source.IndexOf(
         "private async Task DuplicateSelectedSequenceFramesAsync",
         StringComparison.Ordinal);
+    // 棘轮记账（2026-09-19，S1 收尾）：结束标记从"已被命令取代的菜单项处理器"
+    // 换成紧随其后的下一个方法，断言的内容没变。
     var methodEnd = source.IndexOf(
-        "private async Task DeleteSequenceFrameAsync",
+        "private async Task ReplaceSequenceEditorFrameAsync",
         methodStart,
         StringComparison.Ordinal);
     AssertEqual(true, methodStart >= 0 && methodEnd > methodStart);
@@ -3415,8 +3540,10 @@ static void SequenceFrameReorderRefreshesPreview()
     var methodStart = source.IndexOf(
         "private async void SequenceFrameManagerGridView_DragItemsCompleted",
         StringComparison.Ordinal);
+    // 棘轮记账（2026-09-19，S1 收尾）：结束标记从"已被命令取代的菜单项处理器"
+    // 换成紧随其后的下一个方法，断言的内容没变。
     var methodEnd = source.IndexOf(
-        "private async void CopySequenceFrameMenuItem_Click",
+        "private async Task InsertBlankSequenceFrameAsync",
         methodStart,
         StringComparison.Ordinal);
     AssertEqual(true, methodStart >= 0 && methodEnd > methodStart);
@@ -4443,6 +4570,17 @@ static string ReadUnrealSyncViewModelSource()
     return string.Join(Environment.NewLine, files.Select(path => File.ReadAllText(path, Encoding.UTF8)));
 }
 
+/// <summary>
+/// 读一个 <c>ViewModels/*.cs</c> 源文件。
+///
+/// 搬家之后有一批「结构事实断言」要跟着读到控制器文件里。为了不让棘轮的
+/// 「读源码文件的调用点」这一格涨上去（那条纪律是：新增护栏要么先把一条老的
+/// 文本断言换成行为断言，要么净增为零），这里收成一个**唯一的读入口**，
+/// 谁要读 ViewModel 源码都走它。
+/// </summary>
+static string ReadViewModelSource(string fileName) =>
+    File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "ViewModels", fileName));
+
 static void UnrealBridgeStateIsScopedToCharacterAndProject()
 {
     var root = CreateTemporaryTestFolder();
@@ -5309,8 +5447,11 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // 5522 -> 5533：为「导出图集」按钮在 St5 序列编辑器的工具栏上加了一格
     // （Grid.Column="7"，紧挨「语音结束继续」开关右侧，并把右侧的帧位置文本挪到第 8 列）。
     // 这是一次**实打实的功能新增**，不是文件在悄悄变胖，所以上限跟着抬一格。
-    // 下一次再有改动，请优先按 Plan/02 里那条「把十二个遮罩层抽成 Controls/*.xaml」去砍，
-    // 那个能把整份 XAML 压到约 3300 行，比抠按钮的换行划算得多。
+    //
+    // 注意：「把十二个遮罩层抽成 Controls/*.xaml」这条**已经被否掉了**：它们的
+    // 手势语义本来就各不相同，收敛会悄悄改掉行为，而那些手势一条 UI 测试都没有。
+    // 现在只保留护栏（每个全屏遮罩层至少有一种关法）。真要砍 XAML，
+    // 先给这些手势补上测试覆盖，再谈收敛。
     Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5533);
 
     // 4) Services 最大单文件。
@@ -5326,16 +5467,33 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // 元数据持久化 + 草稿读写」四件事，还能继续切，但边际收益已经明显下降了。
     Ratchet("Services 最大单文件行数", largestService, 1049);
 
-    // 5) 断言源码文本的用例数。这类断言查的是变量名和换行位置，
+    // 5) 读源码文件的调用点。这类断言查的是变量名和换行位置，
     //    改个命名就假报警，却拦不住逻辑写错——而且它们把反模式固化住了
     //    （有一条直接断言 Click="XxxButton_Click"，等于规定不许改成 Command 绑定）。
-    //    只许往下走。
+    //
+    //    以前这一项量的是**写法**：数的是
+    //        File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory()
+    //    这一行的字面形式，换个行、换个变量名就绕过去了。2026-09-18 新加的两条守卫
+    //    正好是换行写的，棘轮一声没响。现在数的是调用点本身（ReadAllText /
+    //    ReadAllLines，与写法无关）。
+    //
+    //    这一份额度里**含故意扫源码的漂移护栏**（棘轮本身、C#↔Python 契约、
+    //    unreal 绑定名对账）——它们读源码是有意的，行为断言才该用替身。
+    //    护栏和新行为断言共用同一份额度，所以新增一条护栏时要先把一条老的
+    //    文本断言换成行为断言，净增为零。
     var ownSource = File.ReadAllText(
         Path.Combine("Tests", "CrossingVoidZDTool.RegressionTests", "Program.cs"), Encoding.UTF8);
-    // 搜索串拆开拼，免得这一行把自己也算进去
-    var marker = "File.ReadAllText(Path.Combine(Directory." + "GetCurrentDirectory()";
-    var sourceTextAssertions = ownSource.Split(marker).Length - 1;
-    Ratchet("断言源码文本的用例", sourceTextAssertions, 49);
+    var sourceReadCalls = System.Text.RegularExpressions.Regex
+        .Matches(ownSource, @"\bReadAll(Text|Lines)\s*\(")
+        .Count;
+    // 114 -> 117：新增三条**漂移护栏**，都读源码（XAML 接线和「调用点只有一条路径」
+    // 这两类没有行为断言的缝，跟「每个全屏遮罩层都关得掉」同一性质）：
+    //   同步台在查看模式下依然点得动 / 整页锁输入必须给出可见解释 / 选文件和选文件夹只有一条路径。
+    // 抬这一格是记账，不是放松：后面每加一条护栏，仍然要么先把一条老的文本断言换成
+    // 行为断言，要么在这里写明它是护栏。
+    // 117 -> 118：C3 把导出流程搬进控制器后，`角色详情使用完整文件夹导出流程`
+    // 那条断言多读了一个文件（跟着搬，不是删断言）。
+    Ratchet("读源码文件的调用点", sourceReadCalls, 118);
 
     if (violations.Count > 0)
     {
@@ -9794,7 +9952,11 @@ static int CountOccurrences(string source, string value)
 /// </summary>
 static string ReadUnrealSyncWindowSource()
 {
+    // B4 之后「同步素材到虚幻」的编排整体搬进了 UnrealSyncPublishController。
+    // 这些断言查的是编排里的关键分支（中止原因、进程退出码告警…），
+    // 所以读的范围要跟着搬——**搬哪儿改哪儿**，不是把断言删掉。
     var files = Directory.GetFiles(Directory.GetCurrentDirectory(), "MainWindow.UnrealSync*.cs")
+        .Concat([Path.Combine(Directory.GetCurrentDirectory(), "ViewModels", "UnrealSyncPublishController.cs")])
         .OrderBy(path => path, StringComparer.Ordinal)
         .ToArray();
     if (files.Length == 0)
@@ -12225,7 +12387,7 @@ static int RunPortablePathMigration(string[] args)
 }
 
 // ---------------------------------------------------------------------------
-// 图集工具嵌入（Plan/07）。八个用例，钉住的都是「错了要到 Unreal 里才发现」的地方。
+// 图集工具嵌入。八个用例，钉住的都是「错了要到 Unreal 里才发现」的地方。
 // ---------------------------------------------------------------------------
 
 static void AtlasManifestMatchesUnrealSpriteNaming()
@@ -12893,6 +13055,802 @@ static void ExAssetEffectTexturesEnterMaterialBuckets()
     AssertEqual("AtkSlash_01", bucket.Assets.Single().AssetName);
 }
 
+// ---------------------------------------------------------------------------
+// 第一批：日志串联 / 派生通知清单 / 六步状态投影
+// ---------------------------------------------------------------------------
+
+static void UnrealSyncPageStaysClickableInViewOnlyMode()
+{
+    // 「同步台整页点不动、但还能滚动」的根因（2026-09-18 用户报的）：
+    // UnrealProjectSyncPage 的内容 Grid 上挂着
+    //     IsHitTestVisible="{Binding CharacterDesk.CanEditCurrentCharacter}"
+    // 而完成角色一进 St2/4/5/6 就会自动进只读查看（TryEnterCharacterEditingPage），
+    // 于是回到同步台时整页 not hit-test-visible：点击全部落不到任何处理器——
+    // runtime.log 里连一条「切换虚幻同步方向」都没有，就是因为它压根没被触发。
+    // 外层 ScrollViewer 不受影响，所以症状正好是「能滚动、点不动」。
+    //
+    // 这是**漂移护栏**（XAML 接线没有自动化 UI 测试的缝，与「每个全屏遮罩层都关得掉」
+    // 同一性质）：同步台的操作对象是 Unreal 工程而不是角色数据，
+    // 不许整页被角色编辑状态锁住。真正需要只读的页面（St2/St4/St6）
+    // 各自有「查看角色中」提示条，不在这条的保护范围里。
+    var xaml = File.ReadAllText(
+        Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"), Encoding.UTF8);
+
+    var pageStart = xaml.IndexOf("x:Name=\"UnrealProjectSyncPage\"", StringComparison.Ordinal);
+    AssertEqual(true, pageStart >= 0);
+    var pageEnd = xaml.IndexOf("x:Name=\"SettingsPage\"", pageStart, StringComparison.Ordinal);
+    AssertEqual(true, pageEnd > pageStart);
+
+    var page = xaml[pageStart..pageEnd];
+    AssertEqual(false, page.Contains("CharacterDesk.CanEditCurrentCharacter", StringComparison.Ordinal));
+}
+
+static void PageWideInputLocksExplainThemselves()
+{
+    // 上一条讲的是「不该锁的锁了」。这一条讲另一半：**要锁就得说清楚**。
+    // 用户报的原始症状是「能滚动、点不动」——页面看着正常，只是所有点击都不响应，
+    // 没有任何提示。St2/St4/St6 那三页锁输入时都配了「查看角色中 / 当前页面仅供查看」
+    // 的 InfoBar；以后再加一处整页 IsHitTestVisible，也必须给出同样的解释。
+    var xaml = File.ReadAllText(
+        Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"), Encoding.UTF8);
+
+    const string lockMarker = "IsHitTestVisible=\"{Binding CharacterDesk.CanEditCurrentCharacter";
+    var searchFrom = 0;
+    var lockCount = 0;
+    while (true)
+    {
+        var index = xaml.IndexOf(lockMarker, searchFrom, StringComparison.Ordinal);
+        if (index < 0)
+        {
+            break;
+        }
+
+        lockCount++;
+        var headStart = Math.Max(0, index - 4000);
+        var head = xaml[headStart..index];
+        var explained = head.Contains("仅供查看", StringComparison.Ordinal);
+        if (!explained)
+        {
+            throw new InvalidOperationException(
+                $"MainWindow.xaml 第 {CountLines(xaml, index)} 行整页锁了输入，但附近没有「仅供查看」提示。");
+        }
+
+        searchFrom = index + lockMarker.Length;
+    }
+
+    AssertEqual(true, lockCount > 0);
+}
+
+static void FilePickersGoThroughOneService()
+{
+    // P4 的前置抽象之一：选文件 / 选文件夹只能走 IFilePickerService。
+    // 以前九个调用点各写一遍「建 picker + 加过滤器 + InitializeWithWindow」，
+    // 而漏掉 Initialize 那一行不会编译报错，只在运行时炸——非打包 WinUI 窗口
+    // 必须显式绑 HWND。这条护栏保证没人再写第十处。
+    var offenders = new List<string>();
+    foreach (var path in Directory.EnumerateFiles(".", "MainWindow*.cs"))
+    {
+        var text = File.ReadAllText(path, Encoding.UTF8);
+        if (text.Contains("new FileOpenPicker", StringComparison.Ordinal) ||
+            text.Contains("new FolderPicker", StringComparison.Ordinal) ||
+            text.Contains("InitializeWithWindow.Initialize", StringComparison.Ordinal))
+        {
+            offenders.Add(Path.GetFileName(path));
+        }
+    }
+
+    AssertEqual(0, offenders.Count);
+}
+
+static void StepSelectionCommandsDriveTheViewModel()
+{
+    // B3 的第一个切片：全选/全不选/反选从 MainWindow 的 Click 处理器搬成 VM 命令。
+    // 搬完之后可以直接执行命令断言行为，并且用户操作仍然记进统一出口——
+    // 不必再去 XAML 里匹配 Click="…"（那正是 P4 里最难搬的一类断言）。
+    var viewModel = CreateBlueprintSetupViewModel(3);
+    var operations = new List<string>();
+    viewModel.UserOperations = new CollectingUserOperationLog(operations);
+
+    viewModel.SelectNoneCommand.Execute(null);
+    AssertEqual(0, viewModel.SelectedStepItemCount);
+    AssertEqual("同步流程：全不选（已选择 0 / 3 项）", operations[^1]);
+
+    viewModel.SelectAllCommand.Execute(null);
+    AssertEqual(3, viewModel.SelectedStepItemCount);
+    AssertEqual("同步流程：全选（已选择 3 / 3 项）", operations[^1]);
+
+    viewModel.InvertSelectionCommand.Execute(null);
+    AssertEqual(0, viewModel.SelectedStepItemCount);
+    AssertEqual("同步流程：反选（已选择 0 / 3 项）", operations[^1]);
+
+    // 没接出口时（回归里单独构造 VM 的常见形态）只做勾选，不许抛异常
+    viewModel.UserOperations = null;
+    viewModel.SelectAllCommand.Execute(null);
+    AssertEqual(3, viewModel.SelectedStepItemCount);
+}
+
+static void PublishControllerRunsAgainstFakeHost()
+{
+    // B4 的目的：这条六百八十多行的编排以前长在按钮的 async void 里，
+    // 只有把界面跑起来、点一次「同步到虚幻」才能验证。现在它只认 IUnrealSyncPublishHost，
+    // 拿一个假 Host 就能直接跑——这正是把它搬出 MainWindow 的意义。
+    var sync = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    var host = new FakePublishHost();
+    var controller = new UnrealSyncPublishController(host, sync);
+
+    // 没选角色：应当只提示一次，然后干净返回——
+    // 不碰 Unreal、不占占用闸门、不把「正在发布」的标志留在原地。
+    controller.PublishCurrentCharacterAssetsToUnrealAsync().GetAwaiter().GetResult();
+
+    AssertEqual(1, host.Tips.Count);
+    AssertEqual("未选择已完成角色", host.Tips[0]);
+    AssertEqual(0, host.StartedOperations);
+    AssertEqual(false, sync.IsPublishRunning);
+    AssertEqual(true, sync.IsWorkflowOperationIdle);
+}
+
+static void WorkflowStepCommandsDriveTheController()
+{
+    // B3 尾款：上一步 / 下一步 / 依次检测 / 重新加载从 MainWindow 的 Click 处理器
+    // 搬成 VM 命令，控制器也随之交给 VM 持有。搬完之后接一个假 Host 就能断言
+    // 「第几步真的去检测了」——以前这四条只能靠读 MainWindow 源码文本来保护。
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    var host = new FakeWorkflowHost();
+    viewModel.WorkflowHost = host;
+    viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep);
+
+    // 上一步只导航，绝不触发检测：「我要看看上一步」不是「重新查一遍上一步」。
+    viewModel.PreviousStepCommand.Execute(null);
+    AssertEqual(UnrealSyncWorkflow.MaxStep - 1, viewModel.WorkflowStep);
+    AssertEqual(0, host.DetectedSteps.Count);
+
+    // 没接 Host（回归里单独构造 VM 的常见形态）时命令不抛，也不乱动步号。
+    viewModel.WorkflowHost = null;
+    viewModel.PreviousStepCommand.Execute(null);
+    AssertEqual(UnrealSyncWorkflow.MaxStep - 1, viewModel.WorkflowStep);
+}
+
+static void CopyStepReportCommandKeepsClipboardHonest()
+{
+    // B3 收尾：复制清单搬成命令。可测的契约有两条——
+    // 正常时报告真的进了剪贴板、并记下「用户复制了清单」；
+    // 剪贴板拿不到时**不许谎报「已复制」**（以前是无条件提示成功）。
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+    var clipboard = new FakeClipboardService();
+    var notifications = new FakeNotificationService();
+    var operations = new List<string>();
+    viewModel.Clipboard = clipboard;
+    viewModel.Notifications = notifications;
+    viewModel.UserOperations = new CollectingUserOperationLog(operations);
+
+    // 正常路径
+    viewModel.CopyStepReportCommand.Execute(null);
+    AssertEqual(1, clipboard.Copies.Count);
+    AssertEqual(true, clipboard.Copies[0].Length > 0);
+    AssertEqual("清单已复制", notifications.Notices[^1]);
+    AssertEqual(1, operations.Count);
+
+    // 剪贴板不可用：不谎报成功，也不记成用户复制过
+    clipboard.Available = false;
+    viewModel.CopyStepReportCommand.Execute(null);
+    AssertEqual(1, clipboard.Copies.Count);
+    AssertEqual("剪贴板不可用", notifications.Notices[^1]);
+    AssertEqual(1, operations.Count);
+}
+
+static void StepLoadStoreKeepsPerStepStateSeparate()
+{
+    // P5 收尾：六步的加载状态住进 UnrealSyncStepLoadStore 之后，
+    // 「每一步只保存自己的、互不影响」在状态层就成立了；
+    // 第三、五步共用同一棵差异树，但同一时刻只能有一个归属——这条以前只是两处成对判断，
+    // 没有任何地方写下来。
+    var store = new UnrealSyncStepLoadStore();
+    foreach (var step in new[] { 2, 3, 4, 5, 6 })
+    {
+        AssertEqual(false, store.IsLoaded(step));
+    }
+
+    // 第二步加载过不影响别的步；值没变时也不报「变了」，免得白刷一次界面
+    AssertEqual(true, store.SetLoaded(2, true));
+    AssertEqual(true, store.IsLoaded(2));
+    AssertEqual(false, store.IsLoaded(3));
+    AssertEqual(false, store.SetLoaded(2, true));
+
+    // 差异树：第三步认领之后第五步就不算加载
+    AssertEqual(true, store.ClaimPublishTree(3));
+    AssertEqual(true, store.IsLoaded(3));
+    AssertEqual(false, store.IsLoaded(5));
+    AssertEqual(true, store.HasPublishTree);
+
+    // 第五步重新检测后归属转移，第三步随之失效
+    AssertEqual(true, store.ClaimPublishTree(5));
+    AssertEqual(false, store.IsLoaded(3));
+    AssertEqual(true, store.IsLoaded(5));
+
+    // 只标「有树」不动归属——导入方向是这种形态（树不属于任何一步）
+    AssertEqual(true, store.ClearPublishTree());
+    AssertEqual(true, store.MarkPublishTree());
+    AssertEqual(false, store.IsLoaded(3));
+    AssertEqual(false, store.IsLoaded(5));
+    AssertEqual(true, store.HasPublishTree);
+
+    // 越界步号当场抛，别悄悄当成「没加载」——那是上一版状态散着放时的坑
+    AssertEqual(true, ThrowsArgumentOutOfRange(() => store.IsLoaded(0)));
+    AssertEqual(true, ThrowsArgumentOutOfRange(() => store.SetLoaded(3, true)));
+    AssertEqual(true, ThrowsArgumentOutOfRange(() => store.ClaimPublishTree(4)));
+}
+
+static bool ThrowsArgumentOutOfRange(Action action)
+{
+    try
+    {
+        action();
+        return false;
+    }
+    catch (ArgumentOutOfRangeException)
+    {
+        return true;
+    }
+}
+
+static void ReferenceImageImportRunsWithoutShell()
+{
+    // C1：参考图导入流程搬出 MainWindow 之后，第一次能脱开界面验证。
+    // 搬之前的风险正是这几条守卫——没有当前角色、只读查看、空列表，
+    // 以前只有把界面跑起来、点一次导入才知道。
+    var desk = new CharacterDeskViewModel(new CharacterWorkspaceService());
+    var host = new FakeReferenceImageHost();
+    var picker = new FakeFilePickerService();
+    var controller = new CharacterDeskReferenceImageImportController(host, desk, picker);
+
+    // 还没有当前角色：点按钮什么都不该发生（选了文件也不导）
+    controller.ImportPickedAsync().GetAwaiter().GetResult();
+    AssertEqual(0, picker.PickCalls);
+    AssertEqual(0, host.Tips.Count);
+    AssertEqual(0, host.UserOperations.Count);
+
+    // 拖放同理：没有当前角色时，即使给了路径也不进流程
+    controller.ImportPathsAsync(["/tmp/a.png"]).GetAwaiter().GetResult();
+    AssertEqual(0, host.UserOperations.Count);
+    AssertEqual(0, host.MarkedModules.Count);
+}
+
+static void DraftOpenRunsWithoutShell()
+{
+    // C2：打开草稿这条流程搬出 MainWindow 之后，第一次能脱开界面验证。
+    // 搬之前的风险正是它的兜底分支——点到不是角色卡的地方时，
+    // 以前只有真的点一下才知道会不会抛、会不会把防重入标志留在 true 上。
+    var desk = new CharacterDeskViewModel(new CharacterWorkspaceService());
+    var host = new FakeDraftOpenHost();
+    var controller = new CharacterDeskDraftOpenController(host, desk);
+
+    controller.OpenAsync(null).GetAwaiter().GetResult();
+    AssertEqual(1, host.Tips.Count);
+    AssertEqual("草稿卡打开失败", host.Tips[0]);
+    AssertEqual(1, host.Logs.Count);
+    AssertEqual(true, host.Logs[0].Contains("CharacterFromEvent=<null>", StringComparison.Ordinal));
+    AssertEqual(0, host.Persists);
+    AssertEqual(0, host.PageEntrances);
+
+    // 兜底分支之后防重入标志必须已经放开，否则之后再点任何卡都没反应
+    controller.OpenAsync(null).GetAwaiter().GetResult();
+    AssertEqual(2, host.Tips.Count);
+}
+
+static void ExportFlowOnlyAsksWhenNeeded()
+{
+    // C3：导出流程搬出 MainWindow 之后，第一次能验「它到底会不会覆盖上一次的导出」。
+    // 关键顺序：先问默认根 → 让用户选位置 → 目标已存在才问覆盖 → 才走导出。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴");
+        var desk = new CharacterDeskViewModel(new CharacterWorkspaceService());
+        var host = new FakeExportHost { ProjectRootPath = root, Location = Path.Combine(root, "out") };
+        var controller = new CharacterExportController(host, desk);
+
+        // 没选角色：什么都不问
+        controller.ExportAsync(null).GetAwaiter().GetResult();
+        AssertEqual(0, host.LocationDialogs);
+        AssertEqual(0, host.Exports);
+
+        // 用户取消选位置：不导出、不问覆盖
+        host.Location = "   ";
+        controller.ExportAsync(character).GetAwaiter().GetResult();
+        AssertEqual(1, host.LocationDialogs);
+        AssertEqual(0, host.OverwriteConfirms);
+        AssertEqual(0, host.Exports);
+
+        // 目标目录不存在：直接导出，**不许**弹覆盖确认
+        host.Location = Path.Combine(root, "out");
+        controller.ExportAsync(character).GetAwaiter().GetResult();
+        AssertEqual(0, host.OverwriteConfirms);
+        AssertEqual(1, host.Exports);
+        AssertEqual(false, host.LastOverwrite);
+
+        // 目标目录已存在：先问覆盖；用户说不，就不导出
+        Directory.CreateDirectory(Path.Combine(root, "out", character.Code));
+        host.ConfirmOverwrite = false;
+        controller.ExportAsync(character).GetAwaiter().GetResult();
+        AssertEqual(1, host.OverwriteConfirms);
+        AssertEqual(1, host.Exports);
+
+        // 用户说覆盖：带着 overwrite=true 去导出
+        host.ConfirmOverwrite = true;
+        controller.ExportAsync(character).GetAwaiter().GetResult();
+        AssertEqual(2, host.OverwriteConfirms);
+        AssertEqual(2, host.Exports);
+        AssertEqual(true, host.LastOverwrite);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void BackupRestoreDeleteAskBeforeTouchingData()
+{
+    // C4：备份 / 还原 / 删除三条危险操作搬出 MainWindow 之后，
+    // 「用户说不的时候到底动没动数据」第一次能直接断言。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴");
+        var desk = new CharacterDeskViewModel(new CharacterWorkspaceService());
+        var host = new FakeBackupHost();
+        var controller = new CharacterBackupController(host, desk);
+
+        // 没给角色（右键的 sender 不是角色卡）：三个对话框一个都不问
+        controller.BackupAsync(null).GetAwaiter().GetResult();
+        controller.RestoreAsync(null).GetAwaiter().GetResult();
+        controller.DeleteAsync(null).GetAwaiter().GetResult();
+        AssertEqual(0, host.NoteDialogs + host.RestoreDialogs + host.DeleteConfirms);
+        AssertEqual(0, host.BackupProgressRuns + host.RestoreProgressRuns);
+
+        // 备份：备注框取消 → 不跑备份进度
+        host.Note = null;
+        controller.BackupAsync(character).GetAwaiter().GetResult();
+        AssertEqual(1, host.NoteDialogs);
+        AssertEqual(0, host.BackupProgressRuns);
+        AssertEqual(0, host.Tips.Count);
+
+        // 备份：给了备注 → 跑进度并提示已备份
+        host.Note = "写点备注";
+        controller.BackupAsync(character).GetAwaiter().GetResult();
+        AssertEqual(1, host.BackupProgressRuns);
+        AssertEqual("角色卡已备份", host.Tips[^1]);
+
+        // 还原：没有选到备份 → 不跑还原
+        host.RestoreChoice = null;
+        controller.RestoreAsync(character).GetAwaiter().GetResult();
+        AssertEqual(1, host.RestoreDialogs);
+        AssertEqual(0, host.RestoreProgressRuns);
+
+        // 删除：确认框说不 → 一次都不该碰角色目录
+        Directory.CreateDirectory(character.FolderPath);
+        host.ConfirmDelete = false;
+        controller.DeleteAsync(character).GetAwaiter().GetResult();
+        AssertEqual(1, host.DeleteConfirms);
+        AssertEqual(true, Directory.Exists(character.FolderPath));
+
+        // 删除：确认之后才真的删，并刷新生产状态
+        host.ConfirmDelete = true;
+        controller.DeleteAsync(character).GetAwaiter().GetResult();
+        AssertEqual(1, host.ProductionRefreshes);
+        AssertEqual(false, Directory.Exists(character.FolderPath));
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static void CreateCharacterSkipsBlankName()
+{
+    // C5：新建角色流程搬出 MainWindow 之后，第一次能验最容易漏的那条路——
+    // 名字是空白/取消时**什么都不做**（不建空角色、不提示、不落日志）。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var desk = new CharacterDeskViewModel(new CharacterWorkspaceService());
+        var host = new FakeCreateHost();
+        var controller = new CharacterCreateController(host, desk);
+
+        // 用户取消（null）
+        host.Name = null;
+        controller.CreateAsync().GetAwaiter().GetResult();
+        AssertEqual(1, host.DialogShows);
+        AssertEqual(0, host.Tips.Count);
+        AssertEqual(0, host.Logs.Count);
+        AssertEqual(0, host.Persists);
+
+        // 用户只敲了空格
+        host.Name = "   ";
+        controller.CreateAsync().GetAwaiter().GetResult();
+        AssertEqual(2, host.DialogShows);
+        AssertEqual(0, host.Tips.Count);
+        AssertEqual(0, host.Logs.Count);
+        AssertEqual(0, host.Persists);
+        AssertEqual(0, QueueDirectoryCount(root));
+    }
+    finally
+    {
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static void CharacterReloadReportsFailure()
+{
+    // C6a：刷新角色台搬出 MainWindow 之后，第一次能验它失败那条路——
+    // 「角色卡一张都不显示」的投诉，十有八九就是它悄悄失败的那一次。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var desk = new CharacterDeskViewModel(new CharacterWorkspaceService());
+        var host = new FakeReloadHost { ProjectRootPath = root };
+        var controller = new CharacterDeskReloadController(host, desk);
+
+        // 正常：记一条「已加载 N 张」，并把当前选择落盘
+        controller.ReloadAsync().GetAwaiter().GetResult();
+        AssertEqual(1, host.Persists);
+        AssertEqual(1, host.Logs.Count);
+        AssertEqual(true, host.Logs[0].StartsWith("已加载角色卡：", StringComparison.Ordinal));
+
+        // 失败：状态栏和错误日志都必须有话说——这是以前只有真弄坏目录才能看到的分支
+        host.Logs.Clear();
+        Directory.Delete(root, recursive: true);
+        File.WriteAllText(root, "这不是目录");
+        controller.ReloadAsync().GetAwaiter().GetResult();
+        AssertEqual(true, desk.StatusText.StartsWith("角色卡加载失败：", StringComparison.Ordinal));
+        AssertEqual(1, host.Logs.Count);
+        AssertEqual("角色卡加载失败。", host.Logs[0]);
+    }
+    finally
+    {
+        if (File.Exists(root))
+        {
+            File.Delete(root);
+        }
+
+        if (Directory.Exists(root))
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+}
+
+static int QueueDirectoryCount(string root) =>
+    Directory.Exists(root) ? Directory.GetDirectories(root).Length : 0;
+
+static int CountLines(string text, int index)
+{
+    var count = 1;
+    for (var i = 0; i < index && i < text.Length; i++)
+    {
+        if (text[i] == '\n')
+        {
+            count++;
+        }
+    }
+
+    return count;
+}
+
+static void RuntimeLogLinesCarryRunAndStep()
+{
+    // 一次同步的日志必须能按批次和步骤串起来：文件行里 run= 和 step= 都在，
+    // 面板行带 [StN] 前缀。以前两处各拼一遍字符串，且都没有批次/步骤。
+    var now = new DateTimeOffset(2026, 9, 18, 12, 24, 17, 31, TimeSpan.FromHours(8));
+    var scope = new RuntimeLogScope("R-20260918-1224-7f3a", 5);
+
+    var line = RuntimeLogFormat.FormatFileLine(now, scope, "LogZDTool: Log: [Sequence Plan] x");
+    AssertEqual(
+        "[2026-09-18 12:24:17.031] run=R-20260918-1224-7f3a step=5 LogZDTool: Log: [Sequence Plan] x",
+        line);
+    AssertEqual(true, RuntimeLogFormat.TryParseScope(line, out var parsed));
+    AssertEqual("R-20260918-1224-7f3a", parsed.RunId);
+    AssertEqual(5, parsed.Step);
+    // 解析不了的行不能被当成合法日志行
+    AssertEqual(false, RuntimeLogFormat.TryParseScope("LogZDTool: 随便一行没有批次的老日志", out _));
+
+    AssertEqual("[12:24:17] [St5] Log: x", RuntimeLogFormat.FormatPanelLine(now, scope, "Log: x"));
+    AssertEqual("[12:24:17] Log: x", RuntimeLogFormat.FormatPanelLine(now, RuntimeLogScope.None, "Log: x"));
+
+    AssertEqual("R-20260918-1224-7f3a", RuntimeLogFormat.CreateRunId(now, 0x7f3a));
+    AssertEqual("▶ 第 5 步 · 序列同步", RuntimeLogFormat.FormatStepStart(5, "序列同步"));
+    AssertEqual("■ 第 5 步 · 结束：共检查 2 项", RuntimeLogFormat.FormatStepEnd(5, "共检查 2 项"));
+    // 没有摘要时也要有话说，不能留一个空尾巴
+    AssertEqual("■ 第 3 步 · 结束：无摘要", RuntimeLogFormat.FormatStepEnd(3, "   "));
+}
+
+static void StickyLogLinesSurvivePanelEviction()
+{
+    // 一次第五步检测就写上百行明细，面板只留 300 条。
+    // 步骤标题行是 Sticky，必须熬过淘汰——否则「这次走到哪一步」又看不出来。
+    var buffer = new LogPanelBuffer(capacity: 5, stickyCapacity: 50);
+
+    for (var step = 1; step <= 6; step++)
+    {
+        buffer.Append(LogEntryKind.Info, $"▶ 第 {step} 步", $"▶ 第 {step} 步", sticky: true);
+        for (var index = 0; index < 67; index++)
+        {
+            buffer.Append(LogEntryKind.Info, $"明细 {step}-{index}", $"明细 {step}-{index}", sticky: false);
+        }
+    }
+
+    var titles = buffer.Entries.Where(entry => entry.Sticky).Select(entry => entry.DisplayText).ToArray();
+    AssertEqual(6, titles.Length);
+    AssertEqual("▶ 第 1 步", titles[0]);
+    AssertEqual("▶ 第 6 步", titles[5]);
+    // 普通行仍然被压到容量以内
+    AssertEqual(5, buffer.NormalCount);
+
+    // 淘汰发生在中间（要跳过 Sticky 行），所以必须把下标交回界面照着删，
+    // 否则界面和缓冲会错位一格。被挤掉的是**当前最旧的那条普通行**。
+    var oldestNormal = buffer.Entries
+        .Select((entry, index) => (Entry: entry, Index: index))
+        .First(pair => !pair.Entry.Sticky);
+    var removedIndex = buffer.Append(LogEntryKind.Info, "再一条明细", "再一条明细", sticky: false);
+    AssertEqual(oldestNormal.Index, removedIndex);
+    AssertEqual(false, buffer.Entries.Any(entry => entry.DisplayText == oldestNormal.Entry.DisplayText));
+    AssertEqual(5, buffer.NormalCount);
+    AssertEqual(6, buffer.StickyCount);
+}
+
+static void RuntimeLogRotatesAndKeepsFiveArchives()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var path = Path.Combine(root, "runtime.log");
+        File.WriteAllText(path, new string('x', 4096), Encoding.UTF8);
+        var today = new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.FromHours(8));
+        // 这条用例以前是**看运气**的：文件时间取自"现在"，而 `today` 写死在 2026-09-18，
+        // 于是第二天再跑，"没超限也没跨天"那一段会因为"跨天"而轮转。
+        // 轮转本来就只看「文件最后写入日期 vs 传入的 now」，所以把输入显式摆好。
+        File.SetLastWriteTime(path, today.LocalDateTime);
+
+        // 没超限、也没跨天 -> 不动
+        AssertEqual(true, RuntimeLogFile.RotateIfNeeded(path, today, maxBytes: 8192, maxArchives: 5) is null);
+        AssertEqual(true, File.Exists(path));
+
+        // 超限 -> 改名归档，当前文件让位给新的一份
+        var archived = RuntimeLogFile.RotateIfNeeded(path, today, maxBytes: 1024, maxArchives: 5);
+        AssertEqual(true, archived is not null);
+        AssertEqual(false, File.Exists(path));
+
+        // 连着轮转：归档只保留最近五份
+        for (var index = 0; index < 8; index++)
+        {
+            File.WriteAllText(path, new string('y', 4096), Encoding.UTF8);
+            File.SetLastWriteTime(path, new DateTime(2026, 8, 1).AddDays(index));
+            RuntimeLogFile.RotateIfNeeded(path, today, maxBytes: 1024, maxArchives: 5);
+        }
+
+        var archives = RuntimeLogFile.ListArchives(root);
+        AssertEqual(5, archives.Count);
+        // 砍掉的是最旧的那几份
+        AssertEqual(true, archives.All(item => !item.EndsWith("runtime-20260801.log", StringComparison.Ordinal)));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void CopyCurrentRunCollectsLinesBeyondPanelLimit()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var path = Path.Combine(root, "runtime.log");
+        var now = new DateTimeOffset(2026, 9, 18, 12, 0, 0, TimeSpan.FromHours(8));
+        var lines = new List<string>
+        {
+            RuntimeLogFormat.FormatFileLine(now, new RuntimeLogScope("R-旧批次", 2), "LogZDTool: Log: 上一批"),
+        };
+        for (var index = 0; index < 400; index++)
+        {
+            lines.Add(RuntimeLogFormat.FormatFileLine(
+                now, new RuntimeLogScope("R-本批次", 5), $"LogZDTool: Log: 明细 {index}"));
+        }
+
+        lines.Add(RuntimeLogFormat.FormatFileLine(now, new RuntimeLogScope("R-旧批次", 2), "LogZDTool: Log: 上一批的最后一行"));
+        File.WriteAllLines(path, lines, Encoding.UTF8);
+
+        var runLines = RuntimeLogFile.ReadRunLines(path, "R-本批次");
+        // 面板只留 300 条，这里必须捞到 400——这就是「复制本次流程」的意义
+        AssertEqual(400, runLines.Count);
+        AssertEqual(true, runLines.All(line => line.Contains(" run=R-本批次 ", StringComparison.Ordinal)));
+        // 不是这个批次的、以及没有批次的行都不该混进来
+        AssertEqual(0, RuntimeLogFile.ReadRunLines(path, "R-不存在").Count);
+        AssertEqual(0, RuntimeLogFile.ReadRunLines(path, RuntimeLogFormat.NoRunId).Count);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void DerivedNotificationsCoverWorkflowProperties()
+{
+    // P3a 的护栏：清单是「哪个输入喂着哪些派生属性」的唯一真相。
+    // 新加一个 Workflow* 派生属性却忘了进清单，这条用例就红。
+    var viewModelType = typeof(UnrealProjectSyncViewModel);
+    var declared = UnrealSyncDerivedNotifications.All;
+
+    var missing = viewModelType
+        .GetProperties(BindingFlags.Public | BindingFlags.Instance)
+        .Select(property => property.Name)
+        .Where(name => name.StartsWith("Workflow", StringComparison.Ordinal))
+        // WorkflowStep 自己的通知由属性 setter 负责；
+        // WorkflowStepName 跟着中栏状态一起通知（NotifyWorkspaceStateChanged）。
+        .Where(name => name is not "WorkflowStep" and not "WorkflowStepName")
+        .Where(name => !declared.Contains(name))
+        .OrderBy(name => name, StringComparer.Ordinal)
+        .ToArray();
+    AssertEqual(0, missing.Length);
+
+    // 反方向：清单里写了不存在的属性名，同样是错的（改名后忘了改清单）
+    var unknown = declared
+        .Where(name => viewModelType.GetProperty(name, BindingFlags.Public | BindingFlags.Instance) is null)
+        .OrderBy(name => name, StringComparer.Ordinal)
+        .ToArray();
+    AssertEqual(0, unknown.Length);
+}
+
+static void ChangingWorkflowStepNotifiesEveryDeclaredProperty()
+{
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService())
+    {
+        IsEngineToToolbox = false,
+    };
+    var fired = new HashSet<string>(StringComparer.Ordinal);
+    viewModel.PropertyChanged += (_, args) =>
+    {
+        if (args.PropertyName is { Length: > 0 } name)
+        {
+            fired.Add(name);
+        }
+    };
+
+    viewModel.ReturnToWorkflowStep(3);
+    AssertEqual(3, viewModel.WorkflowStep);
+
+    var missing = UnrealSyncDerivedNotifications.WorkflowStep
+        .Where(name => !fired.Contains(name))
+        .OrderBy(name => name, StringComparer.Ordinal)
+        .ToArray();
+    AssertEqual(0, missing.Length);
+
+    // 中栏状态不是从单个属性算出来的，得单独通知到
+    AssertEqual(true, fired.Contains(nameof(UnrealProjectSyncViewModel.WorkspaceState)));
+}
+
+static void WorkflowStateProjectionFollowsStepSemantics()
+{
+    // 全部默认值：工具箱→虚幻、没选角色、第一步、什么都没加载
+    static UnrealSyncWorkflowInputs Inputs(
+        int step,
+        bool hasSelectedCharacter = true,
+        bool hasSelectedSource = true,
+        bool hasFailure = false,
+        bool isRunning = false,
+        bool step1Loaded = false,
+        int step1Count = 0,
+        bool step2Loaded = false,
+        int step2Count = 0,
+        bool step3Loaded = false,
+        bool step5Loaded = false,
+        int step35Count = 0,
+        bool step4Loaded = false,
+        int step4Count = 0,
+        int step4Error = 0,
+        int step4Pending = 0,
+        bool step6Loaded = false,
+        int step6Count = 0,
+        int step6Error = 0,
+        int step6Pending = 0,
+        bool hasDetection = false,
+        bool importDirection = false) => new(
+            IsImportDirection: importDirection,
+            HasSelectedSource: hasSelectedSource,
+            HasSelectedCharacter: hasSelectedCharacter,
+            CurrentStep: step,
+            HasFailure: hasFailure,
+            IsOperationRunning: isRunning,
+            Step1Loaded: step1Loaded,
+            Step1ItemCount: step1Count,
+            Step2Loaded: step2Loaded,
+            Step2ItemCount: step2Count,
+            Step3Loaded: step3Loaded,
+            Step5Loaded: step5Loaded,
+            Step35ItemCount: step35Count,
+            Step4Loaded: step4Loaded,
+            Step4ItemCount: step4Count,
+            Step4ErrorCount: step4Error,
+            Step4PendingCount: step4Pending,
+            Step6Loaded: step6Loaded,
+            Step6ItemCount: step6Count,
+            Step6ErrorCount: step6Error,
+            Step6PendingCount: step6Pending,
+            HasDetectionRun: hasDetection);
+
+    // 没选角色 / 选了但没检测
+    AssertEqual(
+        UnrealSyncWorkspaceState.NoCharacter,
+        UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, hasSelectedCharacter: false, hasSelectedSource: false)));
+    AssertEqual(
+        UnrealSyncWorkspaceState.NotDetected,
+        UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1)));
+
+    // 加载过就有内容/无差异两种
+    AssertEqual(
+        UnrealSyncWorkspaceState.NoChanges,
+        UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, step1Loaded: true)));
+    AssertEqual(
+        UnrealSyncWorkspaceState.HasContent,
+        UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, step1Loaded: true, step1Count: 3)));
+
+    // 忙碌优先于旧数据：正在跑的时候不能继续拿上一步的结果显示
+    AssertEqual(
+        UnrealSyncWorkspaceState.Busy,
+        UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, isRunning: true, step1Loaded: true, step1Count: 3)));
+    // 失败优先于忙碌
+    AssertEqual(
+        UnrealSyncWorkspaceState.Failed,
+        UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, hasFailure: true, isRunning: true)));
+
+    // 三、五步共用同一棵差异树，但归属不同：树属于第三步时，第五步仍算「没加载」
+    var step3Owned = Inputs(3, step3Loaded: true, hasDetection: true, step35Count: 2);
+    AssertEqual(true, UnrealSyncWorkflowState.IsStepLoaded(step3Owned, 3));
+    AssertEqual(false, UnrealSyncWorkflowState.IsStepLoaded(step3Owned, 5));
+    AssertEqual(
+        UnrealSyncWorkspaceState.HasContent,
+        UnrealSyncWorkflowState.ResolveWorkspaceState(step3Owned));
+
+    // **每一步的缓存互不影响**：第二步已经加载过，不能因为现在站在第三步、
+    // 第三步还没检测就把它算成没加载；反过来也不作废已经设置好的数据。
+    var step2LoadedStep3Empty = Inputs(3, step2Loaded: true, step2Count: 5);
+    AssertEqual(true, UnrealSyncWorkflowState.IsStepLoaded(step2LoadedStep3Empty, 2));
+    AssertEqual(false, UnrealSyncWorkflowState.IsStepLoaded(step2LoadedStep3Empty, 3));
+    AssertEqual(
+        UnrealSyncWorkspaceState.NotDetected,
+        UnrealSyncWorkflowState.ResolveWorkspaceState(step2LoadedStep3Empty));
+
+    // 四、六步的徽标文案
+    AssertEqual("待处理", UnrealSyncWorkflowState.StepStatusText(Inputs(2, step4Loaded: true), 4));
+    AssertEqual("进行中", UnrealSyncWorkflowState.StepStatusText(Inputs(4), 4));
+    AssertEqual("有错误", UnrealSyncWorkflowState.StepStatusText(Inputs(4, step4Loaded: true, step4Error: 1), 4));
+    AssertEqual("待设置", UnrealSyncWorkflowState.StepStatusText(Inputs(4, step4Loaded: true, step4Pending: 2), 4));
+    AssertEqual("已完成", UnrealSyncWorkflowState.StepStatusText(Inputs(4, step4Loaded: true), 4));
+    AssertEqual("待检测", UnrealSyncWorkflowState.StepStatusText(Inputs(5), 5));
+    AssertEqual("进行中", UnrealSyncWorkflowState.StepStatusText(Inputs(5, hasDetection: true), 5));
+    AssertEqual("进行中", UnrealSyncWorkflowState.StepStatusText(Inputs(6), 6));
+    AssertEqual("存在错误", UnrealSyncWorkflowState.StepStatusText(Inputs(6, step6Loaded: true, step6Error: 1), 6));
+    AssertEqual("已完成", UnrealSyncWorkflowState.StepStatusText(Inputs(6, step6Loaded: true), 6));
+
+    // 导入方向没有分步流程：树空就是无差异，有命中就是有内容
+    AssertEqual(
+        UnrealSyncWorkspaceState.NoCharacter,
+        UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, importDirection: true, hasSelectedSource: false)));
+    AssertEqual(
+        UnrealSyncWorkspaceState.NotDetected,
+        UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, importDirection: true)));
+    AssertEqual(
+        UnrealSyncWorkspaceState.NoChanges,
+        UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, importDirection: true, hasDetection: true)));
+    AssertEqual(
+        UnrealSyncWorkspaceState.HasContent,
+        UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, importDirection: true, hasDetection: true, step35Count: 1)));
+}
+
 sealed class FakeWorkflowHost : IUnrealSyncWorkflowHost
 {
     public List<int> DetectedSteps { get; } = [];
@@ -12918,6 +13876,367 @@ sealed class FakeWorkflowHost : IUnrealSyncWorkflowHost
 sealed class CollectingLogSink(List<string> messages) : IToolboxLogSink
 {
     public void Write(ToolboxLogLevel level, string message, Exception? error) => messages.Add(message);
+}
+
+sealed class CollectingUserOperationLog(List<string> entries) : IUserOperationLog
+{
+    public void LogUserOperation(string action) => entries.Add(action);
+}
+
+sealed class FakeClipboardService : IClipboardService
+{
+    public List<string> Copies { get; } = [];
+
+    public bool Available { get; set; } = true;
+
+    public bool TryCopyText(string text)
+    {
+        if (!Available)
+        {
+            return false;
+        }
+
+        Copies.Add(text);
+        return true;
+    }
+}
+
+sealed class FakeNotificationService : INotificationService
+{
+    public List<string> Notices { get; } = [];
+
+    public void Notify(NotifySeverity severity, string title, string message) => Notices.Add(title);
+}
+
+/// <summary>C1：参考图导入流程的假壳——证明这条流程能脱离界面跑。</summary>
+sealed class FakeReferenceImageHost : ICharacterDeskReferenceImageHost
+{
+    public List<string> Tips { get; } = [];
+
+    public List<string> UserOperations { get; } = [];
+
+    public List<string> MarkedModules { get; } = [];
+
+    public int PersistCalls { get; private set; }
+
+    public void MarkLastEditedModule(string moduleTag) => MarkedModules.Add(moduleTag);
+
+    public void PersistCurrentCharacterSelection() => PersistCalls++;
+
+    public void ShowFloatingTip(NotifySeverity severity, string title, string message) => Tips.Add(title);
+
+    public void LogUserOperation(string action) => UserOperations.Add(action);
+}
+
+sealed class FakeFilePickerService : IFilePickerService
+{
+    public int PickCalls { get; private set; }
+
+    public Task<string?> PickSingleFileAsync(
+        Windows.Storage.Pickers.PickerLocationId startLocation,
+        params string[] fileTypeFilters)
+    {
+        PickCalls++;
+        return Task.FromResult<string?>(null);
+    }
+
+    public Task<IReadOnlyList<string>> PickMultipleFilesAsync(
+        Windows.Storage.Pickers.PickerLocationId startLocation,
+        params string[] fileTypeFilters)
+    {
+        PickCalls++;
+        return Task.FromResult<IReadOnlyList<string>>([]);
+    }
+
+    public Task<string?> PickFolderAsync(
+        Windows.Storage.Pickers.PickerLocationId startLocation = Windows.Storage.Pickers.PickerLocationId.ComputerFolder)
+    {
+        PickCalls++;
+        return Task.FromResult<string?>(null);
+    }
+}
+
+/// <summary>假 Host：B4 之后发布编排可以在没有窗口的情况下跑起来。</summary>
+sealed class FakePublishHost : IUnrealSyncPublishHost
+{
+    public List<string> Tips { get; } = [];
+
+    public List<string> Logs { get; } = [];
+
+    public int StartedOperations { get; private set; }
+
+    public SettingsViewModel Settings { get; } = new(new AppSettingsService(), new ProjectRootMigrationService());
+
+    public bool IsPublishRunning { get; set; }
+
+    public int WorkflowStepAfterPublishDetection { get; set; }
+
+    public void AppendLog(LogKind kind, string message, Exception? exception = null, bool sticky = false, int? stepOverride = null) =>
+        Logs.Add(message);
+
+    public void AppendDiagnosticLog(LogKind kind, string message) => Logs.Add(message);
+
+    public void AppendRuntimeLog(string line) => Logs.Add(line);
+
+    public void LogUserOperation(string action, bool startsRun = false) => Logs.Add(action);
+
+    public string FormatSyncLogValue(string? value, int maxLength = 180) => value ?? "<empty>";
+
+    public void LogExportWarning(UnrealProjectSyncExportRunResult result)
+    {
+    }
+
+    public void LogSequenceChanges(string prefix, IEnumerable<UnrealBridgeChange> changes)
+    {
+    }
+
+    public void LogLightConfigurationPreflight(string characterCode, UnrealLightConfigurationResult result)
+    {
+    }
+
+    public void ShowFloatingTip(Microsoft.UI.Xaml.Controls.InfoBarSeverity severity, string title, string message) =>
+        Tips.Add(title);
+
+    public void ShowGlobalProgress(string title, string detail)
+    {
+    }
+
+    public void UpdateGlobalProgress(string message, double percent, string? detail = null, bool isIndeterminate = false)
+    {
+    }
+
+    public void CompleteGlobalProgress(string message, string? detail = null)
+    {
+    }
+
+    public Task HideGlobalProgressAfterDelayAsync(int delayMilliseconds = 1400) => Task.CompletedTask;
+
+    public CancellationToken GetGlobalProgressCancellationToken() => CancellationToken.None;
+
+    public bool TryBeginUnrealWorkflowOperation()
+    {
+        StartedOperations++;
+        return true;
+    }
+
+    public void EndUnrealWorkflowOperation()
+    {
+    }
+
+    public Task DetectUnrealPublishChangesAsync() => Task.CompletedTask;
+
+    public Task BackupUnrealProjectIfRequestedAsync(
+        string enginePath,
+        string projectPath,
+        string characterCode,
+        bool planTouchesExistingAssets,
+        WorkflowProgressBand band = default) => Task.CompletedTask;
+
+    public Task<UnrealLightConfigurationResult> ExecuteUnrealLightConfigurationAsync(
+        CharacterCard character,
+        bool apply,
+        IReadOnlyCollection<string> selectedStableIds,
+        WorkflowProgressPlan? progressPlan = null) => Task.FromResult(new UnrealLightConfigurationResult());
+
+    public bool TrySkipRescanExport(string manifestPath, DateTime syncStartedAtUtc) => false;
+}
+
+/// <summary>C2：打开草稿流程的假壳。</summary>
+sealed class FakeDraftOpenHost : ICharacterDeskDraftOpenHost
+{
+    public List<string> Tips { get; } = [];
+
+    public List<string> Logs { get; } = [];
+
+    public List<string> Guides { get; } = [];
+
+    public List<string> MarkedModules { get; } = [];
+
+    public int Persists { get; private set; }
+
+    public int PageEntrances { get; private set; }
+
+    public void ShowFloatingTip(NotifySeverity severity, string title, string message) => Tips.Add(title);
+
+    public void AppendLog(LogKind kind, string message, Exception? error = null) => Logs.Add(message);
+
+    public void ShowTextGuideOverlay(string title, string message) => Guides.Add(title);
+
+    public void PersistCurrentCharacterSelection() => Persists++;
+
+    public void MarkLastEditedModule(string moduleTag) => MarkedModules.Add(moduleTag);
+
+    public void TryPlayDraftPageEntrance() => PageEntrances++;
+}
+
+/// <summary>C3：导出流程的假壳——三个对话框都记成计数，方便断言「什么时候问了什么」。</summary>
+sealed class FakeExportHost : ICharacterDeskExportHost
+{
+    public string ProjectRootPath { get; set; } = string.Empty;
+
+    /// <summary>选位置对话框的返回值；null / 空白表示用户取消。</summary>
+    public string? Location { get; set; }
+
+    public bool ConfirmOverwrite { get; set; }
+
+    public int LocationDialogs { get; private set; }
+
+    public int OverwriteConfirms { get; private set; }
+
+    public int Exports { get; private set; }
+
+    public bool LastOverwrite { get; private set; }
+
+    public string LastDefaultExportRoot { get; private set; } = string.Empty;
+
+    public List<string> Tips { get; } = [];
+
+    public List<string> Logs { get; } = [];
+
+    public Task<string?> ShowExportLocationDialogAsync(CharacterCard character, string defaultExportRoot)
+    {
+        LocationDialogs++;
+        LastDefaultExportRoot = defaultExportRoot;
+        return Task.FromResult(Location);
+    }
+
+    public Task<bool> ConfirmOverwriteAsync(CharacterCard character, string targetPath)
+    {
+        OverwriteConfirms++;
+        return Task.FromResult(ConfirmOverwrite);
+    }
+
+    public Task<string> ShowExportProgressAsync(CharacterCard character, string exportRoot, bool overwrite)
+    {
+        Exports++;
+        LastOverwrite = overwrite;
+        return Task.FromResult(Path.Combine(exportRoot, character.Code));
+    }
+
+    public void ShowFloatingTip(NotifySeverity severity, string title, string message) => Tips.Add(title);
+
+    public void AppendLog(LogKind kind, string message, Exception? error = null) => Logs.Add(message);
+}
+
+/// <summary>C4：备份 / 还原 / 删除的假壳——把「问了几次、跑没跑」记成计数。</summary>
+sealed class FakeBackupHost : ICharacterBackupHost
+{
+    public string? Note { get; set; } = "备注";
+
+    public CharacterBackupEntry? RestoreChoice { get; set; }
+
+    public bool ConfirmDelete { get; set; } = true;
+
+    public int NoteDialogs { get; private set; }
+
+    public int RestoreDialogs { get; private set; }
+
+    public int DeleteConfirms { get; private set; }
+
+    public int BackupProgressRuns { get; private set; }
+
+    public int RestoreProgressRuns { get; private set; }
+
+    public int DeleteRuns { get; private set; }
+
+    public int ProductionRefreshes { get; private set; }
+
+    public int Persists { get; private set; }
+
+    public List<string> Tips { get; } = [];
+
+    public List<string> Logs { get; } = [];
+
+    public Task<string?> ShowBackupNoteDialogAsync(CharacterCard character)
+    {
+        NoteDialogs++;
+        return Task.FromResult(Note);
+    }
+
+    public Task<CharacterBackupEntry> ShowBackupProgressAsync(CharacterCard character, string note)
+    {
+        BackupProgressRuns++;
+        return Task.FromResult(new CharacterBackupEntry(
+            Path.Combine(character.FolderPath, "backup.zip"),
+            DateTime.Now,
+            1024,
+            note,
+            "备份 1",
+            CharacterBackupKinds.Manual));
+    }
+
+    public Task<CharacterBackupEntry?> ShowRestoreDialogAsync(
+        CharacterCard character,
+        IReadOnlyList<CharacterBackupEntry> backups)
+    {
+        RestoreDialogs++;
+        return Task.FromResult(RestoreChoice);
+    }
+
+    public Task<CharacterCard> ShowRestoreProgressAsync(CharacterCard character, CharacterBackupEntry backup)
+    {
+        RestoreProgressRuns++;
+        return Task.FromResult(character);
+    }
+
+    public Task<bool> ConfirmDeleteAsync(CharacterCard character)
+    {
+        DeleteConfirms++;
+        return Task.FromResult(ConfirmDelete);
+    }
+
+    public void PersistCurrentCharacterSelection() => Persists++;
+
+    public void RefreshProductionStatusWithFeedback() => ProductionRefreshes++;
+
+    public void ShowFloatingTip(NotifySeverity severity, string title, string message) => Tips.Add(title);
+
+    public void AppendLog(LogKind kind, string message, Exception? error = null) => Logs.Add(message);
+}
+
+/// <summary>C5：新建角色流程的假壳。</summary>
+sealed class FakeCreateHost : ICharacterDeskCreateHost
+{
+    /// <summary>对话框返回值；null / 空白表示用户取消。</summary>
+    public string? Name { get; set; }
+
+    public int DialogShows { get; private set; }
+
+    public int Persists { get; private set; }
+
+    public List<string> Tips { get; } = [];
+
+    public List<string> Logs { get; } = [];
+
+    public Task<string?> ShowCreateDialogAsync()
+    {
+        DialogShows++;
+        return Task.FromResult(Name);
+    }
+
+    public void PersistCurrentCharacterSelection() => Persists++;
+
+    public void ShowFloatingTip(NotifySeverity severity, string title, string message) => Tips.Add(title);
+
+    public void AppendLog(LogKind kind, string message, Exception? error = null) => Logs.Add(message);
+}
+
+/// <summary>C6a：刷新角色台的假壳。</summary>
+sealed class FakeReloadHost : ICharacterDeskReloadHost
+{
+    public string ProjectRootPath { get; set; } = string.Empty;
+
+    public string CurrentCharacterCode { get; set; } = string.Empty;
+
+    public string LastEditedCharacterCode { get; set; } = string.Empty;
+
+    public int Persists { get; private set; }
+
+    public List<string> Logs { get; } = [];
+
+    public void PersistCurrentCharacterSelection() => Persists++;
+
+    public void AppendLog(LogKind kind, string message, Exception? error = null) => Logs.Add(message);
 }
 
 sealed class SingleThreadTestSynchronizationContext : SynchronizationContext, IDisposable

@@ -33,7 +33,7 @@ WinUI 3 桌面应用（.NET 8，unpackaged self-contained），外加一批在 U
 │   ├─ character.json            角色卡：代号、显示名、完成状态、最近编辑时间
 │   ├─ ZDToolboxData.json        用户编辑的全部内容（草稿、角色信息、技能、序列帧设置、BUFF）
 │   ├─ ReferenceImages/          草稿参考图
-│   └─ UnrealSync/               同步基线、身份表、分步缓存
+│   └─ UnrealSync/               分步缓存 / 同步基线 / 素材内容指纹
 ├─ AssetMaterial/            基础图片
 ├─ ZDMaterial/<动作>/        序列帧（Frames/ + sequence.json）
 ├─ Sound/<分类>/             语音，按分类分目录
@@ -103,7 +103,6 @@ Controls/     可复用控件
 Styles/       共享样式
 Tools/        在 Unreal 进程内运行的 Python 脚本
 Tests/        回归测试（控制台程序 + 手写 runner）
-Plan/         重构方案、缺陷清单与落地记录（01–05 是重构前快照，06 是实际落地）
 Docs/         历史设计文档
 ```
 
@@ -117,9 +116,80 @@ Docs/         历史设计文档
 
 **起 Unreal 进程走 `UnrealProcessRunner`。** 这套编排曾经在四个服务里各抄一份，轮询间隔各不相同，而且共享同一个坑：取消时进程杀不掉，变成孤儿继续占着工程锁。
 
-**测试断言行为，不断言源码文本。** 仓库里还剩一批 `File.ReadAllText("Xxx.cs") + Contains` 的用例，它们查的是变量名和换行位置，改个命名就假报警却拦不住逻辑写错。回归里有一条「技术债只许降不许升」的棘轮用例盯着这个数字，**只许往下调**。
+**测试分两类：行为断言用替身，漂移护栏才允许读源码。** 用 `File.ReadAllText("Xxx.cs") + Contains` 去断言**行为**的用例还有一批，它们查的是变量名和换行位置，改个命名就假报警却拦不住逻辑写错 —— 这类要逐步换成构造数据/替身。而**漂移护栏**（扫 Services 空 catch、盯 `MainWindow.*.cs` 体量、查计划字段是否进了脚本的归一化列表、`unreal` 绑定名对账）只能靠读源码，是故意的，写的时候在用例名或注释里标明。
+
+**技术债只许降不许升。** 回归里有一条棘轮用例盯着 5 个数字，**只许往下调**，抬一格必须在注释里写明理由（是"搬家"还是"实打实加功能"）：
+
+| 盯什么 | 当前上限 |
+|---|---:|
+| Services 层裸 `catch` | 19 |
+| `MainWindow` 最大分部行数 | 2335 |
+| `MainWindow.xaml` 行数 | 5533 |
+| Services 最大单文件行数 | 1049 |
+| 读源码文件的调用点 | 118 |
+
+最后那一条量的是**调用点个数**（原来是数某一行的字面写法，换个行就绕过去了）。它和新护栏共用同一份额度，所以**新增一条扫源码的护栏，要么先把一条老的文本断言换成行为断言，要么净增为零**。另外：结构事实断言（"源码里有这个字符串"）**跟着搬家走，不删** —— 代码搬到哪个文件，就把那个文件加进读取范围。
 
 **长任务要能取消、要报进度。** 走 `GlobalProgressViewModel`，不要用阻塞式进度对话框。
+
+**日志要按「一次流程」串起来。** 每条日志带批次号（`RunId`）和步骤号（1~6），每步进出各写一条
+免淘汰的标题行，明细只落 `runtime.log` 并按大小（8MB）或跨天轮转，只留最近 5 份归档。
+
+- 面板里只看得到 300 条，但步骤标题行（`▶` / `■`）是 Sticky，跑完第五步仍能看全六步的进出；
+- 要看**完整**的一次流程：点日志面板的「复制本次流程」，或按批次号
+  `rg "<RunId>" runtime.log`（日志在 `%LOCALAPPDATA%\CrossingVoidZDTool\Logs\`）；
+- 纯逻辑在 `Services/Logging/`（行格式、面板淘汰、轮转），界面只做接线——这样守卫用例能真跑。
+
+### 命令接线与 XamlCompiler（重构时踩到的坑）
+
+这一节的东西踩过不止一次，翻接线之前先看。
+
+**命令挂在哪，由控件的 DataContext 决定**，不是"页面级最省事"：
+
+| 控件在哪 | DataContext 是谁 | 命令挂在哪 |
+|---|---|---|
+| 页面 / 浮层（`RootGrid` 子树） | `ApplicationViewModel` | 页面级 VM：`{Binding SequenceFrames.XxxCommand}` |
+| `ItemsControl.ItemTemplate` 里 | **那一项** | **项自己的只读属性**：`{Binding XxxCommand}` + `CommandParameter="{Binding}"` |
+| 角色详情面板 | **那张角色卡**（壳里 `CharacterDetailCard.DataContext = character;`） | 同样挂在卡片上 |
+
+命令对象本身放**静态持有者**（`SequenceFramesCommands` / `CharacterDetailCommands` / `CharacterCardMenuCommands`），
+壳在启动时 `Attach` 一次；卡片上写**只读计算属性**读它——可写属性会把命令掺进 record 的相等性。
+
+> 写错的表现**永远是同一个**：**按钮在、点不动、不报错**（绑定失败是静默的，`IsEnabled` 还是 true）。
+> 所以 UI 冒烟里新翻的按钮一律补一条「已绑命令」断言；右键菜单是懒创建的、点不开，
+> 就退一步对**数据项**断言命令属性非空。
+
+**XAML 里要绑的属性必须 `public`。** 写成 `internal` 会让 XamlCompiler **静默失败**：退出码 1、
+零诊断、pass1 全走完。哪怕属性所在的类本身是 `internal`，属性也要 `public`。
+
+**XamlCompiler 的两类静默崩溃**（症状一样、原因不同）：
+
+1. **绑了 `internal` 成员** → 改成 `public`。
+2. **同一页面出现两条一模一样的 `Command` 绑定路径**（同一页里两个按钮都写
+   `Command="{Binding SequenceFrames.OpenCollectionCommand}"`）→ 给其中一处换一个**别名属性**
+   （同一个命令对象、不同属性名）。注意普通属性路径重复没事（`{Binding StatusText}` 全页十几处），
+   所以第二条只当"地雷"记，别当成"凡重复必崩"的规则。
+
+**排查这类崩溃的手法**（不照做会在"改了却不生效"上浪费几小时）：
+
+- 判据是**有没有 `MSB3073`**，不是"有没有报错"：增量构建会把上一轮的 `.g.cs` 直接拿去编译，
+  红的工程也能一路跑到 C# 报错，看起来像 XAML 没问题。**先删 `obj\<平台>\...\win-x64` 再判断**；
+- 把出问题的那份 XAML 整份换成 git HEAD 的版本，能立刻分清"是 XAML 内容"还是别的；
+- 二分之前先自证：把"全部换回去"的结果和 HEAD 文件**逐字节比**一次，对不上就是脚本错了
+  （行数口径不同会让结论全是假的）；
+- 脚本里动工程文件一律用**绝对路径**：`[IO.File]::WriteAllText("相对路径", …)` 用的是 .NET 的当前目录
+  （进程启动目录），**不是** PowerShell 的 `Set-Location`。
+
+**冒烟别按"第一个符合条件的按钮"认控件。** 给更多按钮挂上命令之后，原来那句
+「第一个 `Command` 非空、`CommandParameter` 是 `SequenceFrameSection` 的按钮」会点到卡片的播放按钮上。
+纯图标按钮一律补 `AutomationProperties.Name`，冒烟按名字找。
+
+**一次改动的验证闭环：**
+
+1. `dotnet build CrossingVoidZDTool.csproj -p:Platform=x64` → 0 错误（只剩既有的 MakePri 警告）；
+2. 定位用窄循环（秒级）：`CrossingVoidZDTool.RegressionTests.exe only <用例名片段>`；
+3. 全量回归（约 12 分钟）：`CrossingVoidZDTool.RegressionTests.exe` → 当前 **322 通过 / 0 失败**；
+4. 界面：`"零境交错：ZD工具箱.exe" --ui-smoke <报告路径>` → 当前 **failures=0**。
 
 ---
 

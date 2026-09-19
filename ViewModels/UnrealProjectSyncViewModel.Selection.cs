@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using CrossingVoidZDTool.Services;
 using Microsoft.UI.Xaml;
 
 namespace CrossingVoidZDTool.ViewModels;
@@ -58,6 +59,38 @@ internal sealed partial class UnrealProjectSyncViewModel
     public void InvertStepSelection()
     {
         ApplyStepSelection(current => !current);
+    }
+
+    /// <summary>
+    /// 「用户点了什么」的出口。由壳在启动时接上（和 <c>ToolboxLog.SetSink</c> 同一时机）；
+    /// 单独构造的 VM（回归用例）拿不到它，就只做勾选、不记那一笔日志。
+    /// </summary>
+    internal IUserOperationLog? UserOperations { get; set; }
+
+    // 右栏这三个按钮以前是 MainWindow 的 Click 处理器：调一次 VM 方法 + 记一条用户操作。
+    // 命令搬进 VM 之后，界面只剩一行 Command 绑定——回归可以直接执行命令断言行为，
+    // 不必再去 XAML 里匹配 Click="…"（那正是 P4 里最难搬的一类断言）。
+    private RelayCommand? _selectAllCommand;
+    private RelayCommand? _selectNoneCommand;
+    private RelayCommand? _invertSelectionCommand;
+
+    public RelayCommand SelectAllCommand => _selectAllCommand ??=
+        new RelayCommand(() => RunStepSelectionCommand(selected: true, actionText: "全选"));
+
+    public RelayCommand SelectNoneCommand => _selectNoneCommand ??=
+        new RelayCommand(() => RunStepSelectionCommand(selected: false, actionText: "全不选"));
+
+    public RelayCommand InvertSelectionCommand => _invertSelectionCommand ??=
+        new RelayCommand(() =>
+        {
+            InvertStepSelection();
+            UserOperations?.LogUserOperation($"同步流程：反选（{StepSelectionText}）");
+        });
+
+    private void RunStepSelectionCommand(bool selected, string actionText)
+    {
+        SetStepSelection(selected);
+        UserOperations?.LogUserOperation($"同步流程：{actionText}（{StepSelectionText}）");
     }
 
     /// <summary>

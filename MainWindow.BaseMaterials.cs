@@ -335,18 +335,8 @@ namespace CrossingVoidZDTool
 
         private async Task<string?> PickImageAsync()
         {
-            var picker = new FileOpenPicker
-            {
-                SuggestedStartLocation = PickerLocationId.PicturesLibrary
-            };
-            picker.FileTypeFilter.Add(".png");
-            picker.FileTypeFilter.Add(".jpg");
-            picker.FileTypeFilter.Add(".jpeg");
-            picker.FileTypeFilter.Add(".webp");
-            picker.FileTypeFilter.Add(".bmp");
-            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-            var file = await picker.PickSingleFileAsync();
-            return file?.Path;
+            return await _filePickerService.PickSingleFileAsync(
+                PickerLocationId.PicturesLibrary, ".png", ".jpg", ".jpeg", ".webp", ".bmp");
         }
 
         private async Task<Rectangle?> GetOptionalBaseMaterialCropAsync(BaseMaterialKind kind, string sourcePath)

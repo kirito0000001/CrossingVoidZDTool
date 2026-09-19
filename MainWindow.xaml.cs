@@ -32,6 +32,7 @@ namespace CrossingVoidZDTool
         private readonly BaseMaterialService _baseMaterialService = new();
         private readonly VoiceMaterialService _voiceMaterialService = new();
         private readonly ProductionStatusService _productionStatusService = new();
+        private readonly IFilePickerService _filePickerService;
         private readonly Stopwatch _globalProgressStopwatch = new();
         private readonly DispatcherQueueTimer _globalProgressElapsedTimer;
         private readonly DispatcherQueueTimer _draftSaveTimer;
@@ -41,8 +42,12 @@ namespace CrossingVoidZDTool
         private readonly DispatcherQueueTimer _sequencePreviewTimer;
         private readonly DispatcherQueueTimer _baseMaterialRefreshTimer;
         private readonly Dictionary<InfoBar, DispatcherQueueTimer> _floatingTipTimers = new();
-        private readonly Queue<(LogKind Kind, string DisplayText, string CopyText)> _logLines = new();
+        private readonly LogPanelBuffer _logPanel = new(MaxUiLogCount);
         private const int MaxUiLogCount = 300;
+        /// <summary>当前日志批次。会跑检测/写入的动作开新批次，其余沿用。</summary>
+        private string? _currentLogRunId;
+        /// <summary>上一条记进日志的步骤号，用来判定「进/出某一步」。</summary>
+        private int _lastLoggedWorkflowStep;
         private bool _logScrollToBottomPending;
         private readonly Queue<(DateTime Timestamp, string Text)> _recentOperations = new();
         private const int MaxRecentOperationCount = 50;
@@ -87,7 +92,6 @@ namespace CrossingVoidZDTool
         private double _sequenceEditorPreviewScale = 1;
         private bool _isPanningSequenceEditorPreview;
         private bool _isReorderingSequenceFrames;
-        private bool _isDeletingSequenceFrame;
         private bool _isSynchronizingSequenceFrameSelection;
         private bool _isSelectingSequenceFrameCopyTarget;
         private IReadOnlyList<SequenceFrameItem> _pendingSequenceFramesToDuplicate = [];
@@ -97,7 +101,6 @@ namespace CrossingVoidZDTool
         private int _baseMaterialInternalWriteDepth;
         private CancellationTokenSource? _globalProgressCancellation;
         private TaskCompletionSource<string?>? _characterCreateDialogCompletion;
-        private bool _isOpeningDraftCharacterCard;
 
         public MainWindow()
         {
@@ -113,7 +116,23 @@ namespace CrossingVoidZDTool
             // Services 层从这里开始能写日志。在此之前它整层没有任何日志出口，
             // 约九十处 catch 全是静默的，出问题只能靠猜。
             ToolboxLog.SetSink(new ToolboxLogBridge(this));
+            // 界面层能记「用户点了什么」之后，立即把出口交给同步台 VM——
+            // 右栏那几个命令已经搬进 VM，它们记的用户操作要落回同一处日志。
+            _applicationViewModel.UnrealProjectSync.UserOperations = this;
+            // 六步流程的编排（上一步/下一步/依次检测/重新加载）现在归 VM 的命令所有，
+            // 它要的界面能力也在这里一次交给它。
+            _applicationViewModel.UnrealProjectSync.WorkflowHost = this;
+            _applicationViewModel.UnrealProjectSync.Notifications = this;
+            _applicationViewModel.UnrealProjectSync.Clipboard = this;
+            // S0/S1：St5 动作卡上的命令随卡片携带，先把壳能力交给它。
+            // 漏了这一行，卡片上的 Command 就是 null——按钮看着在、点不动，而且没有任何报错。
+            _applicationViewModel.SequenceFrames.AttachCommandHost(this);
+            // C6b：角色详情那五个按钮的命令。流程在 CharacterDetailActionController 里，
+            // 命令挂在全局持有者上，由**角色卡**读它给 XAML 绑（`{Binding ContinueEditingCommand}`）
+            // ——详情面板的 DataContext 是那张卡，不是页面级 VM。
+            CharacterDetailCommands.Attach(CharacterDetailAction);
             _dialogService = new WinUiDialogService(() => RootGrid.XamlRoot);
+            _filePickerService = new WinUiFilePickerService(() => WindowNative.GetWindowHandle(this));
             InitializeVoicePlayback();
             RegisterSettingsShortcuts();
             RegisterSequenceFrameEditorShortcuts();
@@ -169,6 +188,9 @@ namespace CrossingVoidZDTool
             UpdateLogOptionEnabledState();
             UpdateAuxiliaryDisplayVisibility();
             AppendLog(LogKind.Info, "程序启动，已检查整体项目目录。");
+            // 步骤标题行从这里开始记：进/出某一步各一条 Sticky 行，
+            // 中间几百条明细被面板挤掉也不影响从面板看出走完全程。
+            AttachWorkflowStepLog();
             _ = LoadCharacterCardsAsync();
             ShowCharacterDeskPage();
         }

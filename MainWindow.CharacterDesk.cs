@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using CrossingVoidZDTool.Services;
+using CrossingVoidZDTool.ViewModels;
 using CrossingVoidZDTool.Views;
 using Microsoft.UI.Dispatching;
 using Microsoft.UI.Xaml;
@@ -23,49 +24,64 @@ using WinRT.Interop;
 
 namespace CrossingVoidZDTool
 {
-    public sealed partial class MainWindow
+    public sealed partial class MainWindow : ICharacterDeskReferenceImageHost, ICharacterDeskDraftOpenHost, ICharacterDeskExportHost, ICharacterBackupHost, ICharacterDeskCreateHost, ICharacterDeskReloadHost, ICharacterDetailActionHost
     {
         private CharacterCard? _characterDetailCharacter;
 
+        /// <summary>UI 冒烟用：当前选中的角色代号（没选就是 null）。</summary>
+        internal string? CharacterDeskCurrentCode => CharacterDesk.CurrentCharacter?.Code;
+
+        /// <summary>UI 冒烟用：角色详情弹窗是不是开着。</summary>
+        internal bool IsCharacterDetailOpen => _characterDetailCharacter is not null;
+
+        /// <summary>UI 冒烟用：草稿（St1 的设计理念页）是不是已经打开。</summary>
+        internal bool CharacterDeskIsDraftOpen => CharacterDesk.IsDraftOpen;
+
         private async Task LoadCharacterCardsAsync()
         {
-            try
-            {
-                await CharacterDesk.LoadCharactersAsync(
-                    Settings.ProjectRootPath,
-                    Settings.CurrentCharacterCode,
-                    Settings.LastEditedCharacterCode);
-                PersistCurrentCharacterSelection();
-                AppendLog(LogKind.Info, $"已加载角色卡：{CharacterDesk.Characters.Count} 张。");
-            }
-            catch (Exception ex)
-            {
-                CharacterDesk.StatusText = $"角色卡加载失败：{ex.Message}";
-                AppendLog(LogKind.Error, "角色卡加载失败。", ex);
-            }
+            await CharacterReload.ReloadAsync();
         }
+
+        // C6a：刷新角色台这条流程搬进 CharacterDeskReloadController，
+        // 启动时和点刷新图标走的是同一条（以前也是，现在连失败留痕都能测）。
+        private CharacterDeskReloadController? _characterReload;
+
+        private CharacterDeskReloadController CharacterReload =>
+            _characterReload ??= new CharacterDeskReloadController(this, CharacterDesk);
+
+        string ICharacterDeskReloadHost.ProjectRootPath => Settings.ProjectRootPath;
+
+        // 设置里这两个可能没有值（还没选过角色），接口按「可能为空」声明。
+        string ICharacterDeskReloadHost.CurrentCharacterCode => Settings.CurrentCharacterCode ?? string.Empty;
+
+        string ICharacterDeskReloadHost.LastEditedCharacterCode => Settings.LastEditedCharacterCode ?? string.Empty;
+
+        void ICharacterDeskReloadHost.PersistCurrentCharacterSelection() => PersistCurrentCharacterSelection();
+
+        void ICharacterDeskReloadHost.AppendLog(LogKind kind, string message, Exception? error) =>
+            AppendLog(kind, message, error);
 
         private async void AddCharacterButton_Click(object sender, RoutedEventArgs e)
         {
-            var characterName = await ShowCharacterCreateDialogAsync();
-            if (string.IsNullOrWhiteSpace(characterName))
-            {
-                return;
-            }
-
-            try
-            {
-                var character = await CharacterDesk.CreateCharacterAsync(characterName);
-                PersistCurrentCharacterSelection();
-                ShowFloatingTip(InfoBarSeverity.Success, "角色卡已创建", $"{character.Name} / {character.Code}");
-                AppendLog(LogKind.User, $"创建角色卡：{character.Name} / {character.Code}");
-            }
-            catch (Exception ex)
-            {
-                CharacterDesk.StatusText = $"创建角色失败：{ex.Message}";
-                AppendLog(LogKind.Error, "创建角色卡失败。", ex);
-            }
+            await CharacterCreate.CreateAsync();
         }
+
+        // C5：新建角色这条流程搬进 CharacterCreateController；
+        // 浮层 + 卡片缩放动画 + 等待用户输入全部留在壳里。
+        private CharacterCreateController? _characterCreate;
+
+        private CharacterCreateController CharacterCreate =>
+            _characterCreate ??= new CharacterCreateController(this, CharacterDesk);
+
+        Task<string?> ICharacterDeskCreateHost.ShowCreateDialogAsync() => ShowCharacterCreateDialogAsync();
+
+        void ICharacterDeskCreateHost.PersistCurrentCharacterSelection() => PersistCurrentCharacterSelection();
+
+        void ICharacterDeskCreateHost.ShowFloatingTip(NotifySeverity severity, string title, string message) =>
+            ((INotificationService)this).Notify(severity, title, message);
+
+        void ICharacterDeskCreateHost.AppendLog(LogKind kind, string message, Exception? error) =>
+            AppendLog(kind, message, error);
 
         private Task<string?> ShowCharacterCreateDialogAsync()
         {
@@ -311,117 +327,78 @@ namespace CrossingVoidZDTool
             e.Handled = true;
         }
 
-        private async void CharacterDetailContinueButton_Click(object sender, RoutedEventArgs e)
+        // C6b：详情五个动作的流程在 CharacterDetailActionController，
+        // **接线已经翻完**——按钮 command 绑 `CharacterDesk.*Command`（命令在
+        // `CharacterDetailCommands` 里拿着控制器），所以这里不再有 Click 处理器。
+        private CharacterDetailActionController? _characterDetailAction;
+
+        private CharacterDetailActionController CharacterDetailAction =>
+            _characterDetailAction ??= new CharacterDetailActionController(this, CharacterDesk);
+
+        CharacterCard? ICharacterDetailActionHost.DetailCharacter => _characterDetailCharacter;
+
+        void ICharacterDetailActionHost.HideCharacterDetail() => HideCharacterDetail();
+
+        void ICharacterDetailActionHost.ShowDesignPage() => ShowSt1DesignPage();
+
+        void ICharacterDetailActionHost.ShowUnrealSyncPage() => ShowUnrealProjectSyncPage();
+
+        void ICharacterDetailActionHost.ReplaceDetailCharacter(CharacterCard character) =>
+            _characterDetailCharacter = character;
+
+        void ICharacterDetailActionHost.LogUserOperation(string action) => LogUserOperation(action);
+
+        void ICharacterDetailActionHost.PersistCurrentCharacterSelection() => PersistCurrentCharacterSelection();
+
+        void ICharacterDetailActionHost.ShowLastEditedPage(string? moduleTag) => ShowLastEditedPage(moduleTag);
+
+        Task ICharacterDetailActionHost.ExportDetailCharacterAsync(CharacterCard character) =>
+            Export.ExportAsync(character);
+
+        void ICharacterDetailActionHost.ShowMaterialPage() => ShowSt2MaterialPage();
+
+        string? ICharacterDetailActionHost.LastEditedModuleTag => GetLastEditedModuleTag();
+
+        void ICharacterDetailActionHost.OpenInFileExplorer(string folderPath)
         {
-            if (_characterDetailCharacter is not { } character)
+            Directory.CreateDirectory(folderPath);
+            Process.Start(new ProcessStartInfo
             {
-                return;
-            }
-
-            CharacterDesk.SetViewOnly(false);
-
-            if (character.IsCompleted)
-            {
-                try
-                {
-                    character = await CharacterDesk.ReopenCompletedCharacterAsync(character);
-                    _characterDetailCharacter = character;
-                    PersistCurrentCharacterSelection();
-                    LogUserOperation($"恢复角色草稿：{character.Name} / {character.Code}");
-                }
-                catch (Exception ex)
-                {
-                    ShowFloatingTip(InfoBarSeverity.Error, "恢复草稿失败", ex.Message);
-                    AppendLog(LogKind.Error, "恢复已完成角色为草稿失败。", ex);
-                    return;
-                }
-            }
-            else
-            {
-                try
-                {
-                    await CharacterDesk.SetCurrentCharacterAsync(character);
-                    PersistCurrentCharacterSelection();
-                    LogUserOperation($"继续编辑角色：{character.Name} / {character.Code}");
-                }
-                catch (Exception ex)
-                {
-                    ShowFloatingTip(InfoBarSeverity.Error, "选择角色失败", ex.Message);
-                    AppendLog(LogKind.Error, "继续编辑时选择角色失败。", ex);
-                    return;
-                }
-            }
-
-            HideCharacterDetail();
-            var lastEditedModuleTag = GetLastEditedModuleTag();
-            if (string.Equals(lastEditedModuleTag, ToolboxModuleKey.CharacterDesk.ToString(), StringComparison.Ordinal) ||
-                string.Equals(lastEditedModuleTag, ToolboxModuleKey.Settings.ToString(), StringComparison.Ordinal))
-            {
-                ShowSt2MaterialPage();
-                return;
-            }
-
-            ShowLastEditedPage(lastEditedModuleTag);
+                FileName = folderPath,
+                UseShellExecute = true
+            });
         }
 
-        private async void CharacterDetailViewButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (_characterDetailCharacter is not { IsCompleted: true } character)
-            {
-                return;
-            }
+        void ICharacterDetailActionHost.ShowFloatingTip(NotifySeverity severity, string title, string message) =>
+            ((INotificationService)this).Notify(severity, title, message);
 
-            try
-            {
-                await CharacterDesk.OpenCompletedCharacterViewAsync(character);
-                HideCharacterDetail();
-                ShowSt1DesignPage();
-                AppendLog(LogKind.User, $"只读查看角色：{character.Name} / {character.Code}");
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "打开角色查看失败", ex.Message);
-                AppendLog(LogKind.Error, "打开角色只读查看失败。", ex);
-            }
-        }
+        void ICharacterDetailActionHost.AppendLog(LogKind kind, string message, Exception? error) =>
+            AppendLog(kind, message, error);
 
-        private async void CharacterDetailExportButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (_characterDetailCharacter is not { } character)
-            {
-                return;
-            }
+        // C3：导出流程搬进 CharacterExportController；三个对话框留在壳里。
+        private CharacterExportController? _characterExport;
 
-            var defaultExportRoot = CharacterDesk.GetDefaultExportRootPath(Settings.ProjectRootPath);
-            var exportRoot = await ShowCharacterExportLocationDialogAsync(character, defaultExportRoot);
-            if (string.IsNullOrWhiteSpace(exportRoot))
-            {
-                return;
-            }
+        private CharacterExportController Export =>
+            _characterExport ??= new CharacterExportController(this, CharacterDesk);
 
-            var targetPath = Path.Combine(exportRoot, character.Code);
-            var overwrite = Directory.Exists(targetPath);
-            if (overwrite && !await ConfirmCharacterExportOverwriteAsync(character, targetPath))
-            {
-                return;
-            }
+        string ICharacterDeskExportHost.ProjectRootPath => Settings.ProjectRootPath;
 
-            try
-            {
-                var exportedPath = await ShowCharacterExportProgressAsync(character, exportRoot, overwrite);
-                ShowFloatingTip(InfoBarSeverity.Success, "角色已导出", exportedPath);
-                AppendLog(LogKind.User, $"导出完整角色文件夹：{character.Name} / {character.Code} -> {exportedPath}");
-            }
-            catch (OperationCanceledException)
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "导出已取消", character.Name);
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "导出角色失败", ex.Message);
-                AppendLog(LogKind.Error, "导出完整角色文件夹失败。", ex);
-            }
-        }
+        Task<string?> ICharacterDeskExportHost.ShowExportLocationDialogAsync(
+            CharacterCard character, string defaultExportRoot) =>
+            ShowCharacterExportLocationDialogAsync(character, defaultExportRoot);
+
+        Task<bool> ICharacterDeskExportHost.ConfirmOverwriteAsync(CharacterCard character, string targetPath) =>
+            ConfirmCharacterExportOverwriteAsync(character, targetPath);
+
+        Task<string> ICharacterDeskExportHost.ShowExportProgressAsync(
+            CharacterCard character, string exportRoot, bool overwrite) =>
+            ShowCharacterExportProgressAsync(character, exportRoot, overwrite);
+
+        void ICharacterDeskExportHost.ShowFloatingTip(NotifySeverity severity, string title, string message) =>
+            ((INotificationService)this).Notify(severity, title, message);
+
+        void ICharacterDeskExportHost.AppendLog(LogKind kind, string message, Exception? error) =>
+            AppendLog(kind, message, error);
 
         private async Task<string?> ShowCharacterExportLocationDialogAsync(CharacterCard character, string defaultExportRoot)
         {
@@ -438,16 +415,10 @@ namespace CrossingVoidZDTool
             };
             browseButton.Click += async (_, _) =>
             {
-                var picker = new FolderPicker
+                var folderPath = await _filePickerService.PickFolderAsync();
+                if (folderPath is not null)
                 {
-                    SuggestedStartLocation = PickerLocationId.ComputerFolder
-                };
-                picker.FileTypeFilter.Add("*");
-                InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-                var folder = await picker.PickSingleFolderAsync();
-                if (folder is not null)
-                {
-                    pathTextBox.Text = folder.Path;
+                    pathTextBox.Text = folderPath;
                 }
             };
 
@@ -506,53 +477,6 @@ namespace CrossingVoidZDTool
             return result == DialogResultKind.Primary;
         }
 
-        private void CharacterDetailOpenFolderButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (_characterDetailCharacter is not { } character)
-            {
-                return;
-            }
-
-            try
-            {
-                Directory.CreateDirectory(character.FolderPath);
-                Process.Start(new ProcessStartInfo
-                {
-                    FileName = character.FolderPath,
-                    UseShellExecute = true
-                });
-                AppendLog(LogKind.User, $"打开角色目录：{character.FolderPath}");
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "角色目录打开失败", ex.Message);
-                AppendLog(LogKind.Error, "角色目录打开失败。", ex);
-            }
-        }
-
-        private async void CharacterDetailUnrealSyncButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (_characterDetailCharacter is not { } character)
-            {
-                return;
-            }
-
-            try
-            {
-                await CharacterDesk.SetCurrentCharacterAsync(character);
-                PersistCurrentCharacterSelection();
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "选择角色失败", ex.Message);
-                AppendLog(LogKind.Error, "前往虚幻同步台时选择角色失败。", ex);
-                return;
-            }
-
-            HideCharacterDetail();
-            ShowUnrealProjectSyncPage();
-        }
-
         private void CharacterCardButton_RightTapped(object sender, RightTappedRoutedEventArgs e)
         {
             if (sender is FrameworkElement element)
@@ -576,55 +500,31 @@ namespace CrossingVoidZDTool
 
         private async Task OpenDraftCharacterCardAsync(CharacterCard? character)
         {
-            if (_isOpeningDraftCharacterCard)
-            {
-                return;
-            }
-
-            _isOpeningDraftCharacterCard = true;
-            try
-            {
-                if (character is null)
-                {
-                    ShowFloatingTip(InfoBarSeverity.Warning, "草稿卡打开失败", "没有识别到被点击的角色卡。");
-                    AppendLog(LogKind.Warning, "DraftCard open failed. CharacterFromEvent=<null>.");
-                    return;
-                }
-
-                AppendLog(LogKind.User, $"DraftCard tapped. Character={character.Code} Name={character.EffectiveDisplayName} Path={character.FolderPath}");
-                await RunDraftOpenStepAsync(
-                    "SetCurrentCharacter",
-                    () => CharacterDesk.SetCurrentCharacterAsync(character));
-                AppendLog(LogKind.User, $"DraftCard SetCurrentCharacter completed. Current={CharacterDesk.CurrentCharacter?.Code ?? "<null>"}");
-                PersistCurrentCharacterSelection();
-
-                if (CharacterDesk.CurrentCharacter is null)
-                {
-                    ShowTextGuideOverlay("当前未选择角色", "当前未选择角色，请点击草稿卡进行选择。");
-                    return;
-                }
-
-                AppendLog(LogKind.User, $"DraftCard OpenCurrentCharacterDraft starting. Character={CharacterDesk.CurrentCharacter.Code}");
-                await RunDraftOpenStepAsync(
-                    "OpenCurrentCharacterDraft",
-                    () => CharacterDesk.OpenCurrentCharacterDraftAsync());
-                AppendLog(LogKind.User, $"DraftCard OpenCurrentCharacterDraft completed. IsDraftOpen={CharacterDesk.IsDraftOpen}");
-                TryPlayPageEntrance(ActionFramesPage);
-                MarkLastEditedModule("ActionFrames");
-                PersistCurrentCharacterSelection();
-                ShowFloatingTip(InfoBarSeverity.Success, "已进入草稿", CharacterDesk.CurrentCharacterName);
-                AppendLog(LogKind.User, $"打开 St1 草稿：{CharacterDesk.CurrentCharacterName}");
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "草稿卡打开失败", FormatExceptionForTip(ex));
-                AppendLog(LogKind.Error, "DraftCard open failed.", ex);
-            }
-            finally
-            {
-                _isOpeningDraftCharacterCard = false;
-            }
+            await DraftOpen.OpenAsync(character);
         }
+
+        // C2：打开草稿的整条流程搬进了 CharacterDeskDraftOpenController，
+        // 防重入标志也跟着搬过去——它属于流程，不属于窗口。
+        private CharacterDeskDraftOpenController? _draftOpen;
+
+        private CharacterDeskDraftOpenController DraftOpen =>
+            _draftOpen ??= new CharacterDeskDraftOpenController(this, CharacterDesk);
+
+        void ICharacterDeskDraftOpenHost.ShowFloatingTip(NotifySeverity severity, string title, string message) =>
+            ((INotificationService)this).Notify(severity, title, message);
+
+        void ICharacterDeskDraftOpenHost.AppendLog(LogKind kind, string message, Exception? error) =>
+            AppendLog(kind, message, error);
+
+        void ICharacterDeskDraftOpenHost.ShowTextGuideOverlay(string title, string message) =>
+            ShowTextGuideOverlay(title, message);
+
+        void ICharacterDeskDraftOpenHost.PersistCurrentCharacterSelection() => PersistCurrentCharacterSelection();
+
+        void ICharacterDeskDraftOpenHost.MarkLastEditedModule(string moduleTag) => MarkLastEditedModule(moduleTag);
+
+        // 入场动画是壳的事（要具体元素），流程只说「该进场了」。
+        void ICharacterDeskDraftOpenHost.TryPlayDraftPageEntrance() => TryPlayPageEntrance(ActionFramesPage);
 
         private void TryPlayPageEntrance(FrameworkElement page)
         {
@@ -638,29 +538,8 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private async Task RunDraftOpenStepAsync(string stepName, Func<Task> action)
-        {
-            try
-            {
-                AppendLog(LogKind.User, $"DraftCard step begin: {stepName}");
-                await action();
-                AppendLog(LogKind.User, $"DraftCard step end: {stepName}");
-            }
-            catch (Exception ex)
-            {
-                throw new InvalidOperationException($"DraftCard step failed: {stepName}", ex);
-            }
-        }
-
-        private static string FormatExceptionForTip(Exception ex)
-        {
-            var message = string.IsNullOrWhiteSpace(ex.Message)
-                ? ex.GetType().Name
-                : ex.Message;
-            return ex.InnerException is null || string.IsNullOrWhiteSpace(ex.InnerException.Message)
-                ? message
-                : $"{message} / {ex.InnerException.Message}";
-        }
+        // 这句话现在是共用规则（ExceptionText）：流程和壳都调它，免得同一个错误两种显示。
+        private static string FormatExceptionForTip(Exception ex) => ExceptionText.ForTip(ex);
 
         private void RefreshVisibleCharacterPageAfterSelection()
         {
@@ -744,31 +623,31 @@ namespace CrossingVoidZDTool
         private void ShowCharacterCardMenu(FrameworkElement target, CharacterCard character, RightTappedRoutedEventArgs args)
         {
             var menu = new MenuFlyout();
-            var backupItem = new MenuFlyoutItem
+            // C6c：菜单内容来自 `CharacterCardMenu.Build()`（纯函数，回归可直接断言），
+            // 壳只把数据变成控件；命令拿控制器，`CommandParameter` 带这张卡。
+            // 以前这里是手写三个 MenuFlyoutItem + Click += 三个处理器。
+            var commands = CardMenuCommands;
+            foreach (var item in CharacterCardMenu.Build())
             {
-                Text = "手动备份",
-                CommandParameter = character
-            };
-            backupItem.Click += BackupCharacterMenuItem_Click;
+                if (item.IsSeparatorBefore)
+                {
+                    menu.Items.Add(new MenuFlyoutSeparator());
+                }
 
-            var restoreItem = new MenuFlyoutItem
-            {
-                Text = "还原",
-                CommandParameter = character
-            };
-            restoreItem.Click += RestoreCharacterMenuItem_Click;
+                menu.Items.Add(new MenuFlyoutItem
+                {
+                    Text = item.Text,
+                    Command = item.Action switch
+                    {
+                        CharacterCardMenuAction.Backup => commands?.BackupCommand,
+                        CharacterCardMenuAction.Restore => commands?.RestoreCommand,
+                        CharacterCardMenuAction.Delete => commands?.DeleteCommand,
+                        _ => null
+                    },
+                    CommandParameter = character
+                });
+            }
 
-            var deleteItem = new MenuFlyoutItem
-            {
-                Text = "删除",
-                CommandParameter = character
-            };
-            deleteItem.Click += DeleteCharacterMenuItem_Click;
-
-            menu.Items.Add(backupItem);
-            menu.Items.Add(restoreItem);
-            menu.Items.Add(new MenuFlyoutSeparator());
-            menu.Items.Add(deleteItem);
             ShowMenuToRightOfPointer(menu, target, args);
         }
 
@@ -782,81 +661,49 @@ namespace CrossingVoidZDTool
             });
         }
 
-        private async void BackupCharacterMenuItem_Click(object sender, RoutedEventArgs e)
+        // C4：备份 / 还原 / 删除三条流程搬进 CharacterBackupController；
+        // 四个对话框与进度留在壳里，通过 ICharacterBackupHost 暴露。
+        private CharacterBackupController? _characterBackup;
+
+        private CharacterBackupController CharacterBackup =>
+            _characterBackup ??= new CharacterBackupController(this, CharacterDesk);
+
+        /// <summary>C6c：角色卡右键菜单的命令。懒建一次，菜单项**永远拿得到命令**——
+        /// 挂在启动顺序上（"忘了 Attach"）就会变成"菜单点不动"那种最难查的形态。</summary>
+        private CharacterCardMenuCommands? _cardMenuCommands;
+
+        private CharacterCardMenuCommands CardMenuCommands =>
+            _cardMenuCommands ??= CharacterCardMenuCommands.Attach(CharacterBackup);
+
+        /// <summary>C6c：参考图右键菜单的两条命令（流程就是下面那两个方法）。</summary>
+        private System.Windows.Input.ICommand? _renameReferenceImageCommand;
+
+        private System.Windows.Input.ICommand RenameReferenceImageCommand =>
+            _renameReferenceImageCommand ??= new AsyncRelayCommand(
+                (Func<object?, Task>)(parameter => RenameReferenceImageAsync(parameter as CharacterReferenceImage)));
+
+        private System.Windows.Input.ICommand? _deleteReferenceImageCommand;
+
+        private System.Windows.Input.ICommand DeleteReferenceImageCommand =>
+            _deleteReferenceImageCommand ??= new AsyncRelayCommand(
+                (Func<object?, Task>)(parameter => DeleteReferenceImageAsync(parameter as CharacterReferenceImage)));
+
+        Task<string?> ICharacterBackupHost.ShowBackupNoteDialogAsync(CharacterCard character) =>
+            ShowCharacterBackupNoteDialogAsync(character);
+
+        Task<CharacterBackupEntry> ICharacterBackupHost.ShowBackupProgressAsync(CharacterCard character, string note) =>
+            ShowCharacterBackupProgressAsync(character, note);
+
+        Task<CharacterBackupEntry?> ICharacterBackupHost.ShowRestoreDialogAsync(
+            CharacterCard character, IReadOnlyList<CharacterBackupEntry> backups) =>
+            ShowCharacterRestoreDialogAsync(character, backups);
+
+        Task<CharacterCard> ICharacterBackupHost.ShowRestoreProgressAsync(
+            CharacterCard character, CharacterBackupEntry backup) =>
+            ShowCharacterRestoreProgressAsync(character, backup);
+
+        async Task<bool> ICharacterBackupHost.ConfirmDeleteAsync(CharacterCard character)
         {
-            if (sender is not MenuFlyoutItem { CommandParameter: CharacterCard character })
-            {
-                return;
-            }
-
-            await BackupCharacterAsync(character);
-        }
-
-        private async Task BackupCharacterAsync(CharacterCard character)
-        {
-            var note = await ShowCharacterBackupNoteDialogAsync(character);
-            if (note is null)
-            {
-                return;
-            }
-
-            try
-            {
-                var backup = await ShowCharacterBackupProgressAsync(character, note);
-                ShowFloatingTip(InfoBarSeverity.Success, "角色卡已备份", backup.DisplayName);
-                AppendLog(LogKind.User, $"备份角色卡：{character.Name} / {character.Code} -> {backup.Path}");
-            }
-            catch (OperationCanceledException)
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "备份已取消", character.Name);
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "角色卡备份失败", ex.Message);
-                AppendLog(LogKind.Error, "角色卡备份失败。", ex);
-            }
-        }
-
-        private async void RestoreCharacterMenuItem_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is not MenuFlyoutItem { CommandParameter: CharacterCard character })
-            {
-                return;
-            }
-
-            try
-            {
-                var backups = await CharacterDesk.LoadCharacterBackupsAsync(character);
-                var backup = await ShowCharacterRestoreDialogAsync(character, backups);
-                if (backup is null)
-                {
-                    return;
-                }
-
-                var restored = await ShowCharacterRestoreProgressAsync(character, backup);
-                PersistCurrentCharacterSelection();
-                RefreshProductionStatusWithFeedback();
-                ShowFloatingTip(InfoBarSeverity.Success, "角色卡已还原", restored.EffectiveDisplayName);
-                AppendLog(LogKind.User, $"还原角色卡：{character.Name} / {character.Code} <- {backup.Path}");
-            }
-            catch (OperationCanceledException)
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "还原已取消", character.Name);
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "角色卡还原失败", ex.Message);
-                AppendLog(LogKind.Error, "角色卡还原失败。", ex);
-            }
-        }
-
-        private async void DeleteCharacterMenuItem_Click(object sender, RoutedEventArgs e)
-        {
-            if (sender is not MenuFlyoutItem { CommandParameter: CharacterCard character })
-            {
-                return;
-            }
-
             var result = await _dialogService.ShowContentAsync(new ContentDialogRequest(
                 "删除角色卡",
                 new TextBlock
@@ -870,25 +717,18 @@ namespace CrossingVoidZDTool
                 SecondaryButtonText: "取消",
                 DefaultButton: ContentDialogButton.Primary,
                 PrimaryButtonStyle: (Style)Application.Current.Resources["DialogAccentButtonStyle"]));
-            if (result != DialogResultKind.Primary)
-            {
-                return;
-            }
-
-            try
-            {
-                await CharacterDesk.DeleteCharacterAsync(character);
-                PersistCurrentCharacterSelection();
-                RefreshProductionStatusWithFeedback();
-                ShowFloatingTip(InfoBarSeverity.Success, "角色卡已删除", $"{character.Name} / {character.Code}");
-                AppendLog(LogKind.User, $"删除角色卡：{character.Name} / {character.Code}");
-            }
-            catch (Exception ex)
-            {
-                ShowFloatingTip(InfoBarSeverity.Error, "角色卡删除失败", ex.Message);
-                AppendLog(LogKind.Error, "角色卡删除失败。", ex);
-            }
+            return result == DialogResultKind.Primary;
         }
+
+        void ICharacterBackupHost.PersistCurrentCharacterSelection() => PersistCurrentCharacterSelection();
+
+        void ICharacterBackupHost.RefreshProductionStatusWithFeedback() => RefreshProductionStatusWithFeedback();
+
+        void ICharacterBackupHost.ShowFloatingTip(NotifySeverity severity, string title, string message) =>
+            ((INotificationService)this).Notify(severity, title, message);
+
+        void ICharacterBackupHost.AppendLog(LogKind kind, string message, Exception? error) =>
+            AppendLog(kind, message, error);
 
         private async Task<string?> ShowCharacterBackupNoteDialogAsync(CharacterCard character)
         {
@@ -1738,32 +1578,32 @@ namespace CrossingVoidZDTool
             }
 
             var menu = new MenuFlyout();
-            var renameItem = new MenuFlyoutItem
+            // C6c：内容来自 `CharacterReferenceImageMenu.Build()`（纯函数），
+            // 壳只把数据变成控件。两条流程仍是壳里的方法（它们就是"对话框 + 调 VM"这一段），
+            // 用命令接上之后不再需要 Click 处理器。
+            foreach (var item in CharacterReferenceImageMenu.Build())
             {
-                Text = "重命名",
-                CommandParameter = image
-            };
-            renameItem.Click += RenameReferenceImageMenuItem_Click;
-            var deleteItem = new MenuFlyoutItem
-            {
-                Text = "删除",
-                CommandParameter = image
-            };
-            deleteItem.Click += DeleteReferenceImageMenuItem_Click;
-            menu.Items.Add(renameItem);
-            menu.Items.Add(deleteItem);
+                menu.Items.Add(new MenuFlyoutItem
+                {
+                    Text = item.Text,
+                    Command = item.Action switch
+                    {
+                        CharacterReferenceImageMenuAction.Rename => RenameReferenceImageCommand,
+                        CharacterReferenceImageMenuAction.Delete => DeleteReferenceImageCommand,
+                        _ => null
+                    },
+                    CommandParameter = image
+                });
+            }
+
             ShowMenuToRightOfPointer(menu, element, e);
             e.Handled = true;
         }
 
-        private async void RenameReferenceImageMenuItem_Click(object sender, RoutedEventArgs e)
+        /// <summary>C6c：参考图重命名。命令接上之后，入口只有“参数是不是一张参考图”这一种。</summary>
+        private async Task RenameReferenceImageAsync(CharacterReferenceImage? image)
         {
-            if (CharacterDesk.IsViewOnly)
-            {
-                return;
-            }
-
-            if (sender is not MenuFlyoutItem { CommandParameter: CharacterReferenceImage image })
+            if (CharacterDesk.IsViewOnly || image is null)
             {
                 return;
             }
@@ -1809,14 +1649,10 @@ namespace CrossingVoidZDTool
             }
         }
 
-        private async void DeleteReferenceImageMenuItem_Click(object sender, RoutedEventArgs e)
+        /// <summary>C6c：参考图删除（同上）。</summary>
+        private async Task DeleteReferenceImageAsync(CharacterReferenceImage? image)
         {
-            if (CharacterDesk.IsViewOnly)
-            {
-                return;
-            }
-
-            if (sender is not MenuFlyoutItem { CommandParameter: CharacterReferenceImage image })
+            if (CharacterDesk.IsViewOnly || image is null)
             {
                 return;
             }
@@ -2058,25 +1894,7 @@ namespace CrossingVoidZDTool
 
         private async void ImportReferenceImagesButton_Click(object sender, RoutedEventArgs e)
         {
-            if (CharacterDesk.CurrentCharacter is null || CharacterDesk.IsViewOnly)
-            {
-                return;
-            }
-
-            var picker = new FileOpenPicker
-            {
-                SuggestedStartLocation = PickerLocationId.PicturesLibrary
-            };
-            picker.FileTypeFilter.Add(".png");
-            picker.FileTypeFilter.Add(".jpg");
-            picker.FileTypeFilter.Add(".jpeg");
-            picker.FileTypeFilter.Add(".webp");
-            picker.FileTypeFilter.Add(".bmp");
-            InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
-
-            var files = await picker.PickMultipleFilesAsync();
-            var paths = files.Select(file => file.Path).Where(File.Exists).ToList();
-            await ImportReferenceImagesAsync(paths);
+            await ReferenceImageImport.ImportPickedAsync();
         }
 
         private void ReferenceImages_DragOver(object sender, DragEventArgs e)
@@ -2107,30 +1925,28 @@ namespace CrossingVoidZDTool
                 .Select(file => file.Path)
                 .Where(File.Exists)
                 .ToList();
-            await ImportReferenceImagesAsync(paths);
+            await ReferenceImageImport.ImportPathsAsync(paths);
         }
 
-        private async Task ImportReferenceImagesAsync(IReadOnlyList<string> paths)
-        {
-            if (CharacterDesk.CurrentCharacter is null || paths.Count == 0)
-            {
-                return;
-            }
+        // C1：参考图导入流程整体搬进了 CharacterDeskReferenceImageImportController。
+        // 这里只剩「把壳能力交给它」——按钮点击和拖放共用同一条流程，不再是两份守卫。
+        private CharacterDeskReferenceImageImportController? _referenceImageImport;
 
-            try
-            {
-                await CharacterDesk.ImportReferenceImagesAsync(paths);
-                MarkLastEditedModule("ActionFrames");
-                PersistCurrentCharacterSelection();
-                ShowFloatingTip(InfoBarSeverity.Success, "参考图已导入", $"{paths.Count} 个文件");
-                AppendLog(LogKind.User, $"导入草稿参考图：{paths.Count} 个文件。");
-            }
-            catch (Exception ex)
-            {
-                CharacterDesk.StatusText = $"导入参考图失败：{ex.Message}";
-                AppendLog(LogKind.Error, "导入草稿参考图失败。", ex);
-            }
-        }
+        private CharacterDeskReferenceImageImportController ReferenceImageImport =>
+            _referenceImageImport ??= new CharacterDeskReferenceImageImportController(
+                this, CharacterDesk, _filePickerService);
+
+        void ICharacterDeskReferenceImageHost.MarkLastEditedModule(string moduleTag) =>
+            MarkLastEditedModule(moduleTag);
+
+        void ICharacterDeskReferenceImageHost.PersistCurrentCharacterSelection() =>
+            PersistCurrentCharacterSelection();
+
+        void ICharacterDeskReferenceImageHost.ShowFloatingTip(
+            NotifySeverity severity, string title, string message) =>
+            ((INotificationService)this).Notify(severity, title, message);
+
+        void ICharacterDeskReferenceImageHost.LogUserOperation(string action) => LogUserOperation(action);
 
         private void OpenReferenceFolderButton_Click(object sender, RoutedEventArgs e)
         {

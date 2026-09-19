@@ -1,6 +1,8 @@
 # CrossingVoidZDTool Architecture Migration Map
 
-> ⚠️ 这份文件写于项目早期。它描述的是**目标架构**，而代码已经偏离了它（详见 `Plan/01-现状诊断.md`）。当前约定以 `README.md` 为准。
+> ⚠️ 这份文件写于项目早期，描述的是当时的**目标架构**；代码已经比它更细，且偏了几处。
+> 当前的代码约定（命令接线、XamlCompiler 的坑、技术债棘轮、日志契约、验证闭环）
+> 一律以仓库根的 `README.md` 为准，本文件只当历史参考。
 
 This file records the baseline framework for the Zero Crossing ZD toolbox. Keep it current before adding feature pages.
 

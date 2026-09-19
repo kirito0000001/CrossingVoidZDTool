@@ -45,13 +45,64 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     private UnrealSyncSourceItem? _selectedSource;
     private UnrealSyncPublishStageItem? _selectedPublishStage;
     private bool _isNormalizationWorkspace;
-    private bool _isNormalizationStepLoaded;
+    /// <summary>
+    /// 第二步有没有可用数据。
+    ///
+    /// 从这里往下这几个「这一步加载了没」的标志都是**私有 setter + 集中清单**：
+    /// 写入口只有一个，派生属性由 <see cref="UnrealSyncDerivedNotifications"/> 统一通知，
+    /// 漏不掉（P3a）。以前是「谁改这个字段，谁记得补 OnPropertyChanged」——
+    /// 改的路径有十几条，漏一条界面就停在上一刻。
+    /// </summary>
+    private readonly UnrealSyncStepLoadStore _stepLoads = new();
+
+    public bool IsNormalizationStepLoaded
+    {
+        get => _stepLoads.IsLoaded(2);
+        private set
+        {
+            if (!_stepLoads.SetLoaded(2, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(IsNormalizationStepLoaded));
+            NotifyDerived(UnrealSyncDerivedNotifications.NormalizationStepLoaded);
+            NotifyWorkspaceStateChanged();
+            SaveSessionCache();
+        }
+    }
     private readonly List<CharacterCard> _draftSources = [];
     private readonly HashSet<string> _existingImportStableIds = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<UnrealSyncSelectionTreeItem, UnrealSyncSelectionTreeItem> _selectionParents = [];
-    private bool _hasImportDetection;
+    public bool HasImportDetection
+    {
+        get => _stepLoads.HasPublishTree;
+        private set
+        {
+            if (value ? _stepLoads.MarkPublishTree() : _stepLoads.ClearPublishTree())
+            {
+                OnPropertyChanged(nameof(HasImportDetection));
+                NotifyDerived(UnrealSyncDerivedNotifications.ImportDetection);
+            }
+        }
+    }
     /// <summary>当前差异树属于哪一步（第三步或第五步）；0 表示还没有已加载的差异树。</summary>
-    private int _loadedPublishStep;
+    private int _loadedPublishStep
+    {
+        get => _stepLoads.PublishTreeOwnerStep;
+        // 旧名字保留成门面：读写都落到状态对象，历史调用点一行不用改。
+        set
+        {
+            if (value is 3 or 5)
+            {
+                _stepLoads.ClaimPublishTree(value);
+            }
+            else
+            {
+                _stepLoads.ClearPublishTree();
+            }
+        }
+    }
     private int _importSelectedCount;
     private int _importAddedCount;
     private int _importUpdatedCount;
@@ -73,6 +124,24 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     private bool _canImportSelection;
     private bool _isPublishRunning;
     private bool _isWorkflowOperationRunning;
+
+    public bool IsWorkflowOperationRunning
+    {
+        get => _isWorkflowOperationRunning;
+        private set
+        {
+            if (!SetProperty(ref _isWorkflowOperationRunning, value))
+            {
+                return;
+            }
+
+            NotifyDerived(UnrealSyncDerivedNotifications.WorkflowOperationRunning);
+            // 单条派生属性的通知归清单管；中栏要单独重算——
+            // 检测结果是在操作还没结束时写进来的，那一刻算出来的可用性必然是假，
+            // 操作收尾时不重算一次，写入按钮就会一直停在灰色。
+            NotifyWorkspaceStateChanged();
+        }
+    }
     private readonly UnrealSyncSessionCacheService _sessionCacheService = new();
     private readonly SemaphoreSlim _sessionSaveSemaphore = new(1, 1);
     private int _sessionSaveVersion;
@@ -95,11 +164,55 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     private int _detectionConflictCount;
     private int _detectionDeletedCount;
     private List<UnrealLightConfigurationResultItem> _lastLightConfigurationItems = [];
-    private bool _isLightConfigurationLoaded;
+    public bool IsLightConfigurationLoaded
+    {
+        get => _stepLoads.IsLoaded(4);
+        private set
+        {
+            if (!_stepLoads.SetLoaded(4, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(IsLightConfigurationLoaded));
+            NotifyDerived(UnrealSyncDerivedNotifications.LightConfigurationLoaded);
+            NotifyWorkspaceStateChanged();
+        }
+    }
     private bool _isApplyingLightConfiguration;
     private string _lightConfigurationResultMessage = string.Empty;
     private string _publishFilter = "全部";
+    /// <summary>
+    /// 当前步号。
+    ///
+    /// 这一个字段喂着三十多条派生属性（六条状态文案、下一步文案、各处可见性、
+    /// 可用性判断…）。以前这些通知是**手写**在 setter 里的：改一个属性要顺着
+    /// 三十多行对齐着补，历史上漏掉一条就是一次真实的界面 bug。
+    /// 现在同一份清单只有 <see cref="UnrealSyncDerivedNotifications"/> 一处，
+    /// 加派生属性时漏不掉。
+    /// </summary>
     private int _workflowStep = 1;
+
+    public int WorkflowStep
+    {
+        get => _workflowStep;
+        private set
+        {
+            // 越界的步号在这里夹住：入口有六七条，钳位留在唯一的写入口最省心。
+            if (!SetProperty(
+                    ref _workflowStep,
+                    Math.Clamp(value, UnrealSyncWorkflow.MinStep, UnrealSyncWorkflow.MaxStep)))
+            {
+                return;
+            }
+
+            NotifyDerived(UnrealSyncDerivedNotifications.WorkflowStep);
+            // 另外两件清单管不了的事：落盘，以及重算中栏
+            // （中栏状态是从十来个数一起算出来的，不是单个属性）。
+            SaveSessionCache();
+            NotifyWorkspaceStateChanged();
+        }
+    }
 
     public UnrealProjectSyncViewModel(UnrealProjectSyncService syncService)
     {
@@ -269,7 +382,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     public int LightConfigurationUnchangedCount => _lastLightConfigurationItems.Count(item =>
         item.Status == UnrealLightConfigurationStatus.Unchanged);
     public int LightConfigurationSelectedCount => LightConfigurationItems.Count(item => item.IsSelected);
-    public string LightConfigurationSummaryText => !_isLightConfigurationLoaded
+    public string LightConfigurationSummaryText => !IsLightConfigurationLoaded
         ? "尚未检测基础配置"
         : $"共检查 {_lastLightConfigurationItems.Count} 项：无差异 {LightConfigurationUnchangedCount}，待设置 {LightConfigurationPendingCount}，错误 {LightConfigurationErrorCount}";
     public string LightConfigurationEmptyTitle => LightConfigurationErrorCount > 0
@@ -277,9 +390,8 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         : "基础配置没有改动";
     public string LightConfigurationSelectionText => $"已选择 {LightConfigurationSelectedCount} / {LightConfigurationPendingCount} 项";
     public string LightConfigurationResultMessage => _lightConfigurationResultMessage;
-    public bool IsLightConfigurationLoaded => _isLightConfigurationLoaded;
     public bool CanApplyLightConfiguration => IsLightConfigurationWorkspace &&
-        _isLightConfigurationLoaded &&
+        IsLightConfigurationLoaded &&
         LightConfigurationSelectedCount > 0 &&
         !_isApplyingLightConfiguration &&
         IsWorkflowOperationIdle;
@@ -300,28 +412,26 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         1 => SelectedSource?.DraftCharacter is not null &&
             FoundationChecks.Count > 0 && FoundationChecks.All(item => item.IsCompliant),
         2 => SelectedSource?.DraftCharacter is not null &&
-            _isNormalizationStepLoaded && NormalizationItems.All(item => item.IsResolved),
+            IsNormalizationStepLoaded && NormalizationItems.All(item => item.IsResolved),
         3 => IsPublishSelectionReady,
-        4 => _isLightConfigurationLoaded &&
+        4 => IsLightConfigurationLoaded &&
             LightConfigurationPendingCount == 0 &&
             LightConfigurationErrorCount == 0,
-        5 => _hasImportDetection &&
+        5 => HasImportDetection &&
             _lastPublishChanges.All(change => change.Kind == UnrealBridgeChangeKind.Unchanged),
         6 => false,
         _ => false
     };
 
-    public bool IsNormalizationStepLoaded => _isNormalizationStepLoaded;
-
     public bool HasPublishSelection => !IsEngineToToolbox && _importSelectedCount > 0;
     public bool HasNoPublishChanges => !IsEngineToToolbox && WorkflowStep is 3 or 5 &&
-        _hasImportDetection &&
+        HasImportDetection &&
         _lastPublishChanges.All(change => change.Kind == UnrealBridgeChangeKind.Unchanged);
     public bool CanStartPublish => HasPublishSelection &&
         !IsPublishRunning && IsWorkflowOperationIdle;
     public string PublishActionText => WorkflowStep == 5 ? "同步序列到虚幻" : "同步到虚幻";
 
-    public bool IsWorkflowOperationIdle => !_isWorkflowOperationRunning;
+    public bool IsWorkflowOperationIdle => !IsWorkflowOperationRunning;
 
     public bool IsPublishRunning
     {
@@ -337,21 +447,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     public void SetPublishRunning(bool value) => IsPublishRunning = value;
 
-    public void SetWorkflowOperationRunning(bool value)
-    {
-        if (SetProperty(ref _isWorkflowOperationRunning, value))
-        {
-            OnPropertyChanged(nameof(IsWorkflowOperationIdle));
-            OnPropertyChanged(nameof(CanStartPublish));
-            OnPropertyChanged(nameof(CanDetectSelectedSource));
-            OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
-            OnPropertyChanged(nameof(CanApplyLightConfiguration));
-            // 检测结果是在操作还没结束时写进来的，那一刻算出来的可用性必然是假。
-            // 操作收尾时不重算一次，写入按钮就会一直停在灰色。
-            OnPropertyChanged(nameof(CanApplyBlueprintSetup));
-            NotifyWorkspaceStateChanged();
-        }
-    }
+    public void SetWorkflowOperationRunning(bool value) => IsWorkflowOperationRunning = value;
 
     public string ContentDetectionStatusText => _lastContentDetectionAt is DateTimeOffset detected
         ? $"上次检测：{detected.LocalDateTime:yyyy-MM-dd HH:mm:ss}（打开页面不会自动重检，同步前会强制刷新）"
@@ -433,7 +529,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         NotifyWorkspaceStateChanged();
     }
 
-    public bool HasContentDetection => _hasImportDetection;
+    public bool HasContentDetection => HasImportDetection;
 
     /// <summary>
     /// 这一步是否已经有可用数据。有就不必再跑一次虚幻检测——
@@ -443,16 +539,8 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     /// 所以要靠 <see cref="_loadedPublishStep"/> 区分树里装的是谁的数据，
     /// 不能只看 <see cref="HasContentDetection"/>。
     /// </summary>
-    public bool IsWorkflowStepLoaded(int step) => step switch
-    {
-        1 => FoundationChecks.Count > 0,
-        2 => _isNormalizationStepLoaded,
-        3 => _hasImportDetection && _loadedPublishStep == 3,
-        4 => _isLightConfigurationLoaded,
-        5 => _hasImportDetection && _loadedPublishStep == 5,
-        6 => _isBlueprintSetupLoaded,
-        _ => false,
-    };
+    public bool IsWorkflowStepLoaded(int step) =>
+        UnrealSyncWorkflowState.IsStepLoaded(BuildWorkflowInputs(), step);
 
     /// <summary>差异检测完成或从缓存恢复后，记下这棵树属于哪一步。</summary>
     public void SetLoadedPublishStep(int step)
@@ -468,79 +556,38 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         NotifyWorkspaceStateChanged();
     }
 
-    public int WorkflowStep
-    {
-        get => _workflowStep;
-        private set
-        {
-            if (SetProperty(ref _workflowStep, Math.Clamp(value, UnrealSyncWorkflow.MinStep, UnrealSyncWorkflow.MaxStep)))
-            {
-                NotifyWorkflowStateChanged();
-                SaveSessionCache();
-            }
-        }
-    }
-
     /// <summary>
     /// 六步流程的可用性与文案是从步号、各步加载标志、检测结果一起算出来的，
-    /// 派生属性有二十多条。以前这串通知只写在 WorkflowStep 的 setter 里，
-    /// 于是别的路径（比如重置导入操作）改了同样的输入却只通知一两条，
-    /// 界面就停在上一刻的状态。提成方法是为了让每条改这些输入的路径都能复用。
+    /// 派生属性有三十多条。
+    ///
+    /// P3a 之后，主要输入（<c>_workflowStep</c>、四个加载标志、操作闸门）的依赖
+    /// 都声明在字段上了，走属性赋值的路径不会再漏。这个方法留给
+    /// **声明覆盖不到的路径**：集合内容变了、重置了整块状态这类，
+    /// 它们没有对应的字段可以挂声明。
     /// </summary>
     private void NotifyWorkflowStateChanged()
     {
-        OnPropertyChanged(nameof(WorkflowStep1StatusText));
-        OnPropertyChanged(nameof(WorkflowStep2StatusText));
-        OnPropertyChanged(nameof(WorkflowStep3StatusText));
-        OnPropertyChanged(nameof(WorkflowStep4StatusText));
-        OnPropertyChanged(nameof(WorkflowStep5StatusText));
-        OnPropertyChanged(nameof(WorkflowStep6StatusText));
-        OnPropertyChanged(nameof(WorkflowNextText));
-        OnPropertyChanged(nameof(WorkflowReloadText));
-        OnPropertyChanged(nameof(WorkflowConfirmationVisibility));
-        OnPropertyChanged(nameof(NormalizationDetailsVisibility));
-        OnPropertyChanged(nameof(WorkflowNextButtonVisibility));
-        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
-        OnPropertyChanged(nameof(IsFoundationWorkspace));
-        OnPropertyChanged(nameof(IsLightConfigurationWorkspace));
-        OnPropertyChanged(nameof(IsBlueprintSetupWorkspace));
-        OnPropertyChanged(nameof(IsSequenceSynchronizationWorkspace));
-        OnPropertyChanged(nameof(FoundationWorkspaceVisibility));
-        OnPropertyChanged(nameof(FoundationDetailsVisibility));
-        OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
-        OnPropertyChanged(nameof(LightConfigurationDetailsVisibility));
-        OnPropertyChanged(nameof(BlueprintSetupWorkspaceVisibility));
-        OnPropertyChanged(nameof(BlueprintSetupDetailsVisibility));
-        OnPropertyChanged(nameof(SequenceSynchronizationDetailsVisibility));
-        OnPropertyChanged(nameof(WorkspaceTitle));
-        OnPropertyChanged(nameof(WorkspaceDescription));
-        OnPropertyChanged(nameof(SelectionContentVisibility));
-        OnPropertyChanged(nameof(CanAdvanceWorkflow));
-        OnPropertyChanged(nameof(CanApplyLightConfiguration));
-        OnPropertyChanged(nameof(CanApplyBlueprintSetup));
-        OnPropertyChanged(nameof(HasNoPublishChanges));
-        OnPropertyChanged(nameof(CanStartPublish));
-        OnPropertyChanged(nameof(PublishActionText));
+        NotifyDerived(UnrealSyncDerivedNotifications.WorkflowStep);
         NotifyWorkspaceStateChanged();
     }
 
-    public string WorkflowStep1StatusText => WorkflowStep > 1 ? "已完成" : WorkflowStep == 1 ? "进行中" : "待处理";
-    public string WorkflowStep2StatusText => WorkflowStep > 2 ? "已完成" : WorkflowStep == 2 ? "进行中" : "待处理";
-    public string WorkflowStep3StatusText => WorkflowStep > 3 ? "已完成" : WorkflowStep == 3 ? "进行中" : "待处理";
-    public string WorkflowStep4StatusText => WorkflowStep < 4
-        ? "待处理"
-        : !_isLightConfigurationLoaded
-            ? "进行中"
-            : LightConfigurationErrorCount > 0
-                ? "有错误"
-                : LightConfigurationPendingCount > 0
-                    ? "待设置"
-                    : "已完成";
-    public string WorkflowStep5StatusText => WorkflowStep < 5
-        ? "待处理"
-        : !HasContentDetection
-            ? "待检测"
-            : "进行中";
+    /// <summary>
+    /// 按 <see cref="UnrealSyncDerivedNotifications"/> 的清单广播派生属性。
+    /// 清单是「哪个输入喂着哪些派生属性」的唯一真相，加属性时改那一个文件。
+    /// </summary>
+    private void NotifyDerived(IReadOnlyList<string> propertyNames)
+    {
+        for (var index = 0; index < propertyNames.Count; index++)
+        {
+            OnPropertyChanged(propertyNames[index]);
+        }
+    }
+
+    public string WorkflowStep1StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 1);
+    public string WorkflowStep2StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 2);
+    public string WorkflowStep3StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 3);
+    public string WorkflowStep4StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 4);
+    public string WorkflowStep5StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 5);
     public string WorkflowNextText => WorkflowStep switch
     {
         1 => "规整素材",
@@ -577,7 +624,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     {
         get
         {
-            if (IsEngineToToolbox || !_hasImportDetection)
+            if (IsEngineToToolbox || !HasImportDetection)
             {
                 return CanImportSelection;
             }
@@ -893,7 +940,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         {
             if (SetProperty(ref _selectedPublishStage, value))
             {
-                _hasImportDetection = false;
+                HasImportDetection = false;
                 _loadedPublishStep = 0;
                 OnPropertyChanged(nameof(HasContentDetection));
                 OnPropertyChanged(nameof(WorkflowStep5StatusText));
@@ -946,7 +993,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             ResetDetectionSummary();
             ClearLightConfigurationState();
             ClearBlueprintSetupState();
-            _isNormalizationStepLoaded = false;
+            IsNormalizationStepLoaded = false;
             NormalizationItems.Clear();
             VisibleNormalizationItems = [];
             FoundationChecks.Clear();
@@ -1127,9 +1174,9 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     {
         var previousCode = SelectedSource?.UnrealCandidate?.Code ?? SelectedSource?.DraftCharacter?.Code;
         var nextCode = source?.UnrealCandidate?.Code ?? source?.DraftCharacter?.Code;
-        var sameDetectedSource = (_hasImportDetection || _isLightConfigurationLoaded) &&
+        var sameDetectedSource = (HasImportDetection || IsLightConfigurationLoaded) &&
             string.Equals(previousCode, nextCode, StringComparison.OrdinalIgnoreCase);
-        sameDetectedSource |= _isNormalizationStepLoaded &&
+        sameDetectedSource |= IsNormalizationStepLoaded &&
             string.Equals(previousCode, nextCode, StringComparison.OrdinalIgnoreCase);
         var sameSource = string.Equals(previousCode, nextCode, StringComparison.OrdinalIgnoreCase);
         SelectedSource = source;
@@ -1346,19 +1393,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     public void BeginNormalizationStepLoad() => SetNormalizationStepLoaded(false);
 
     private void SetNormalizationStepLoaded(bool value)
-    {
-        if (_isNormalizationStepLoaded == value)
-        {
-            return;
-        }
-
-        _isNormalizationStepLoaded = value;
-        OnPropertyChanged(nameof(IsNormalizationStepLoaded));
-        NotifyWorkspaceStateChanged();
-        OnPropertyChanged(nameof(CanAdvanceWorkflow));
-        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
-        SaveSessionCache();
-    }
+        => IsNormalizationStepLoaded = value;
 
     private void RefreshVisibleNormalizationItems()
     {
@@ -1452,8 +1487,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             if (step == 2)
             {
                 RestoreNormalizationItems(cache.NormalizationItems);
-                _isNormalizationStepLoaded = cache.IsNormalizationStepLoaded || cache.NormalizationItems.Count > 0;
-                OnPropertyChanged(nameof(IsNormalizationStepLoaded));
+                IsNormalizationStepLoaded = cache.IsNormalizationStepLoaded || cache.NormalizationItems.Count > 0;
                 return;
             }
 
@@ -1503,7 +1537,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 // 第三步和第五步共用同一棵树的槽位、范围不同，只有它能把两者分开。
                 // 换角色时 SelectSource 会 ResetImportOperation 把它清零，冷启动是 0，
                 // 这两种情况照常从缓存恢复。
-                if (_hasImportDetection &&
+                if (HasImportDetection &&
                     _loadedPublishStep == step &&
                     SelectionTreeRoots.Count > 0 &&
                     string.Equals(
@@ -1620,7 +1654,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         var rootList = roots.ToArray();
         _existingImportStableIds.Clear();
         _existingImportStableIds.UnionWith(existingStableIds);
-        _hasImportDetection = true;
+        HasImportDetection = true;
         OnPropertyChanged(nameof(HasContentDetection));
         OnPropertyChanged(nameof(WorkflowStep5StatusText));
         OnPropertyChanged(nameof(WorkflowStep6StatusText));
@@ -1665,7 +1699,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         IReadOnlyCollection<UnrealBridgeChange>? changes = null)
     {
         _existingImportStableIds.Clear();
-        _hasImportDetection = true;
+        HasImportDetection = true;
         // 默认按当前步骤认领这棵树。检测流程会在建完树、切到目标步骤之前
         // 用 SetLoadedPublishStep 覆盖成真正的目标步骤；这里只是保证
         // 视图模型单独使用时也是自洽的，不会出现「有树但没人认领」。
@@ -1909,7 +1943,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         // DetectionResultVisibility 要求 HasContentDetection 为真，于是整块结果面板直接折叠，
         // 中栏什么都不显示——刚跑完一次成功的同步，界面却像什么都没发生过。
         // 复扫的统计是真实且有意义的（检查了多少项、还剩多少差异），保留它。
-        _hasImportDetection = true;
+        HasImportDetection = true;
         OnPropertyChanged(nameof(HasContentDetection));
         OnPropertyChanged(nameof(WorkflowStep5StatusText));
         OnPropertyChanged(nameof(WorkflowStep6StatusText));
@@ -1974,7 +2008,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             LightConfigurationItems.Add(item);
         }
 
-        _isLightConfigurationLoaded = true;
+        IsLightConfigurationLoaded = true;
         _lightConfigurationResultMessage = result.Succeeded
             ? result.AppliedStableIds.Count > 0
                 ? $"已应用并验证 {result.AppliedStableIds.Count} 项配置。"
@@ -2027,7 +2061,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
         LightConfigurationItems.Clear();
         _lastLightConfigurationItems.Clear();
-        _isLightConfigurationLoaded = false;
+        IsLightConfigurationLoaded = false;
         _isApplyingLightConfiguration = false;
         _lightConfigurationResultMessage = string.Empty;
         NotifyLightConfigurationChanged();
@@ -2286,9 +2320,8 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             _detectionConflictCount = cache.DetectionConflictCount;
             _detectionDeletedCount = cache.DetectionDeletedCount;
             NotifyDetectionSummaryChanged();
-            _isNormalizationStepLoaded = cache.IsNormalizationStepLoaded ||
+            IsNormalizationStepLoaded = cache.IsNormalizationStepLoaded ||
                 cache.WorkflowStep >= 3 || cache.NormalizationItems.Count > 0;
-            OnPropertyChanged(nameof(IsNormalizationStepLoaded));
             if (cache.IsBlueprintSetupLoaded)
             {
                 SetBlueprintSetupResult(
@@ -2327,7 +2360,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                     cache.PublishChanges.Clear();
                     cache.SelectedStableIds.Clear();
                     _lastPublishChanges.Clear();
-                    _hasImportDetection = false;
+                    HasImportDetection = false;
                     _loadedPublishStep = 0;
                     ResetDetectionSummary();
                     OnPropertyChanged(nameof(HasContentDetection));
@@ -2609,14 +2642,14 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                     IsAlreadyNormalized = item.IsAlreadyNormalized
                 })
                 .ToList(),
-            IsNormalizationStepLoaded = _isNormalizationStepLoaded,
+            IsNormalizationStepLoaded = IsNormalizationStepLoaded,
             HideCompletedFoundationChecks = HideCompletedFoundationChecks,
             HideResolvedNormalizationItems = HideResolvedNormalizationItems,
-            IsLightConfigurationLoaded = _isLightConfigurationLoaded,
+            IsLightConfigurationLoaded = IsLightConfigurationLoaded,
             LightConfigurationItems = _lastLightConfigurationItems.ToList(),
             SelectedLightConfigurationIds = GetSelectedLightConfigurationIds().ToHashSet(StringComparer.OrdinalIgnoreCase),
             LightConfigurationResultMessage = _lightConfigurationResultMessage,
-            IsBlueprintSetupLoaded = _isBlueprintSetupLoaded,
+            IsBlueprintSetupLoaded = IsBlueprintSetupLoaded,
             BlueprintSetupItems = _lastBlueprintSetupItems.ToList(),
             SelectedBlueprintSetupIds = GetSelectedBlueprintSetupIds().ToHashSet(StringComparer.OrdinalIgnoreCase),
             BlueprintSetupResultMessage = _blueprintSetupResultMessage
@@ -2698,7 +2731,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     private void UpdateImportSelectionSummary()
     {
-        if (!_hasImportDetection)
+        if (!HasImportDetection)
         {
             return;
         }
@@ -2772,7 +2805,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     private void ResetImportOperation()
     {
-        _hasImportDetection = false;
+        HasImportDetection = false;
         _loadedPublishStep = 0;
         OnPropertyChanged(nameof(HasContentDetection));
         ResetDetectionSummary();
