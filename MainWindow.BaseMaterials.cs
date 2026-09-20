@@ -325,12 +325,7 @@ namespace CrossingVoidZDTool
             }
 
             var folderPath = _baseMaterialService.GetMaterialFolderPath(CharacterDesk.CurrentCharacter, kind);
-            Directory.CreateDirectory(folderPath);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = folderPath,
-                UseShellExecute = true
-            });
+            OpenFolderInExplorer(folderPath);
         }
 
         private async Task<string?> PickImageAsync()

@@ -44,12 +44,7 @@ namespace CrossingVoidZDTool
             }
 
             var folderPath = _applicationViewModel.SequenceFrames.GetActionFolderPath(character, section);
-            Directory.CreateDirectory(folderPath);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = folderPath,
-                UseShellExecute = true
-            });
+            OpenFolderInExplorer(folderPath);
             MarkLastEditedModule("SequenceFrames");
         }
 
@@ -124,6 +119,8 @@ namespace CrossingVoidZDTool
                 : Task.CompletedTask;
 
         Task ISequenceFramesCommandHost.ExportAtlasAsync() => ExportSelectedSequenceAtlasAsync();
+
+        Task ISequenceFramesCommandHost.ExportBasePlatesAsync() => ExportSelectedSequenceBasePlatesAsync();
 
         Task ISequenceFramesCommandHost.ConfirmDuplicateResolutionAsync() => ResolveSelectedDuplicateFramesAsync();
 

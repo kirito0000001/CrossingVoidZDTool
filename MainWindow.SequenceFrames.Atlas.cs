@@ -25,11 +25,8 @@ namespace CrossingVoidZDTool
         /// </summary>
         private async Task ExportSelectedSequenceAtlasAsync()
         {
-            if (SequenceEditorExportAtlasButton.IsEnabled == false)
-            {
-                return;
-            }
-
+            // 「同时只跑一次」由命令自己保证：导出走 AsyncRelayCommand，执行期间 CanExecute 为 false，
+            // 菜单项自动变灰。原来这里靠按钮的 IsEnabled 手写三道闸，收成菜单之后没必要了。
             if (CharacterDesk.CurrentCharacter is not { } character)
             {
                 ShowFloatingTip(InfoBarSeverity.Warning, "未选择角色", "请先在角色台选择当前制作角色。");
@@ -48,7 +45,6 @@ namespace CrossingVoidZDTool
                 return;
             }
 
-            SequenceEditorExportAtlasButton.IsEnabled = false;
             try
             {
                 var action = section.Action;
@@ -99,6 +95,17 @@ namespace CrossingVoidZDTool
 
                 // 尺寸和帧数是用户唯一需要当场确认的两件事，所以直接开对话框报出来，
                 // 不要求他再去翻目录。打开目录的入口就放在对话框里。
+                // 文件夹同时也**自动打开一次**（和图集/底板一致）：产物马上要用，
+                // 打开失败只记一条，不能把已经成功的导出报成失败。
+                try
+                {
+                    OpenFolderInExplorer(result.OutputDirectory);
+                }
+                catch (Exception openError)
+                {
+                    AppendLog(LogKind.Warning, "图集已导出，但没能自动打开导出目录。", openError);
+                }
+
                 await ShowAtlasExportedDialogAsync(character.Code, variantCode, result);
             }
             catch (OperationCanceledException)
@@ -112,10 +119,6 @@ namespace CrossingVoidZDTool
                 await HideGlobalProgressAfterDelayAsync();
                 ShowFloatingTip(InfoBarSeverity.Error, "导出图集失败", ex.Message);
                 AppendLog(LogKind.Error, "导出图集失败。", ex);
-            }
-            finally
-            {
-                SequenceEditorExportAtlasButton.IsEnabled = true;
             }
         }
 
@@ -139,12 +142,7 @@ namespace CrossingVoidZDTool
             {
                 try
                 {
-                    Directory.CreateDirectory(result.OutputDirectory);
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = result.OutputDirectory,
-                        UseShellExecute = true,
-                    });
+                    OpenFolderInExplorer(result.OutputDirectory);
                 }
                 catch (Exception ex)
                 {

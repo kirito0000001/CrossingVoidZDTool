@@ -101,6 +101,9 @@ var tests = new (string Name, Action Run)[]
     ("同步前备份开关对每一步都生效", BackupSettingGovernsEveryStep),
     ("虚幻项目备份使用当前引擎 ZipProjectUp", UnrealBridgeBackupUsesEngineAutomationTool),
     ("虚幻项目备份只落在工具箱工作区", UnrealProjectBackupStaysInsideToolboxWorkspace),
+    ("导出菜单是可扩展的清单", SequenceExportMenuListsExtensibleEntries),
+    ("底板按动作帧率的2倍逐帧切片", BasePlatePlannerSlicesEachCellByMultiplier),
+    ("底板导出只留本次结果并写对照表", BasePlateExportWritesFramesAndManifest),
     ("虚幻发布快照拒绝草稿角色", UnrealBridgeToolboxSnapshotRejectsDraftCharacter),
     ("虚幻工具箱快照覆盖角色六类模块", UnrealBridgeToolboxSnapshotCoversAllModules),
     ("蓝图置入目标值取自工具箱数据", BlueprintSetupRequestComesFromToolboxData),
@@ -4772,6 +4775,201 @@ static void UnrealProjectBackupStaysInsideToolboxWorkspace()
     }
 }
 
+/// <summary>
+/// 「导出」菜单要**可扩展**：工具条那排已经放不下更多按钮了，入口收成一个按钮加一份数据清单。
+/// 这条用例盯的是"清单还是数据"（文案 / 动作 / 说明齐全）；壳把它变成 MenuFlyoutItem 那一步由冒烟兜。
+/// </summary>
+static void SequenceExportMenuListsExtensibleEntries()
+{
+    var items = SequenceExportMenu.Build();
+    AssertEqual(2, items.Count);
+    AssertEqual("导出图集", items[0].Text);
+    AssertEqual(SequenceExportAction.Atlas, items[0].Action);
+    AssertEqual(SequenceExportAction.BasePlate, items[1].Action);
+    AssertEqual(true, items[1].Text.Contains("底板", StringComparison.Ordinal));
+    AssertEqual(true, items.All(item => !string.IsNullOrWhiteSpace(item.ToolTip)));
+}
+
+/// <summary>
+/// 底板切片规则：一格 = 1/动作FPS 秒，倍数 N 就是把一格再切成 N 份。
+/// 算错的表现是"画出来的特效整体偏时序"，画的人不一定看得出来，所以钉死在用例里。
+/// </summary>
+static void BasePlatePlannerSlicesEachCellByMultiplier()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var frames = new List<SequenceFrameItem>
+        {
+            CreateBasePlateTestFrame(Path.Combine(root, "1 a.png"), index: 1, duration: 1, width: 40, height: 30),
+            CreateBasePlateTestFrame(Path.Combine(root, "2 b.png"), index: 2, duration: 2, width: 50, height: 30),
+            CreateBasePlateTestFrame(Path.Combine(root, "3 c.png"), index: 3, duration: 4, width: 40, height: 30)
+        };
+
+        var plan = BasePlateExportPlanner.Build(root, "Misaka", "Sk2", frames, actionFps: 10);
+
+        AssertEqual(2, BasePlateExportPlanner.Multiplier);
+        AssertEqual(20d, plan.OutputFps);
+        // (1 + 2 + 4) 格 × 2 = 14 张，时长不变：0.7 秒。
+        AssertEqual(14, plan.Frames.Count);
+        AssertEqual(0.7d, plan.DurationSeconds);
+        // 画布取非空白帧里最大的：50×30。
+        AssertEqual(50, plan.CanvasWidth);
+        AssertEqual(30, plan.CanvasHeight);
+        AssertEqual("Misaka_Sk2", plan.FileNamePrefix);
+        AssertEqual(
+            Path.Combine(root, "Export", "Misaka", "BasePlate", "Sk2-2x"),
+            plan.OutputDirectory);
+
+        // 第 1 格 → 前 2 张，第 2 格 → 第 3~6 张，第 3 格 → 第 7~14 张。
+        AssertEqual(1, plan.Frames[0].SourceFrameOrdinal);
+        AssertEqual(1, plan.Frames[1].SourceFrameOrdinal);
+        AssertEqual(2, plan.Frames[2].SourceFrameOrdinal);
+        AssertEqual(2, plan.Frames[5].SourceFrameOrdinal);
+        AssertEqual(3, plan.Frames[6].SourceFrameOrdinal);
+        AssertEqual(3, plan.Frames[13].SourceFrameOrdinal);
+        AssertEqual("Misaka_Sk2_0001.png", BasePlateExportPlanner.FormatFrameFileName(plan, plan.Frames[0]));
+        AssertEqual("Misaka_Sk2_0014.png", BasePlateExportPlanner.FormatFrameFileName(plan, plan.Frames[13]));
+
+        // 空白帧：不给源图（导出时生成同画布透明图），但时间轴节奏照占。
+        var withBlank = new List<SequenceFrameItem>(frames)
+        {
+            CreateBasePlateTestFrame(string.Empty, index: 4, duration: 1, isBlank: true)
+        };
+        var blankPlan = BasePlateExportPlanner.Build(root, "Misaka", "Sk2", withBlank, actionFps: 10);
+        var blankFrame = blankPlan.Frames.Last();
+        AssertEqual(true, blankFrame.IsBlank);
+        AssertEqual(string.Empty, blankFrame.SourceFilePath);
+        AssertEqual(50, blankFrame.CanvasWidth);
+
+        // 没有帧 → 明确报错，不要导出一个空目录。
+        var emptyThrown = false;
+        try
+        {
+            _ = BasePlateExportPlanner.Build(root, "Misaka", "Sk2", [], actionFps: 10);
+        }
+        catch (InvalidOperationException)
+        {
+            emptyThrown = true;
+        }
+
+        AssertEqual(true, emptyThrown);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>
+/// 底板写盘：每张输出一图（非空白帧原样复制）、空白帧出透明 PNG、
+/// 目录**只留本次结果**（上次的残留会被清掉）、顺带写 frames.csv，
+/// 并且拒绝往工作区导出区之外写（那是"路径算错就删别人东西"的护栏）。
+/// </summary>
+static void BasePlateExportWritesFramesAndManifest()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var framesFolder = Path.Combine(root, "src");
+        Directory.CreateDirectory(framesFolder);
+        var firstPath = Path.Combine(framesFolder, "1 a.png");
+        var secondPath = Path.Combine(framesFolder, "2 b.png");
+        WriteSolidImage(firstPath, Color.Red, 40, 30);
+        WriteSolidImage(secondPath, Color.Blue, 40, 30);
+
+        var frames = new List<SequenceFrameItem>
+        {
+            CreateBasePlateTestFrame(firstPath, index: 1, duration: 2, width: 40, height: 30),
+            CreateBasePlateTestFrame(secondPath, index: 2, duration: 1, width: 40, height: 30),
+            CreateBasePlateTestFrame(string.Empty, index: 3, duration: 1, width: 40, height: 30, isBlank: true)
+        };
+        var plan = BasePlateExportPlanner.Build(root, "Misaka", "Sk2", frames, actionFps: 10);
+        // 上一次导出的残留：目录只该拥有本次结果，所以要被清掉。
+        Directory.CreateDirectory(plan.OutputDirectory);
+        File.WriteAllText(Path.Combine(plan.OutputDirectory, "stale.png"), "old");
+
+        var result = new BasePlateExportService()
+            .ExportAsync(plan, root, progress: null, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+
+        // (2 + 1 + 1) 格 × 2 = 8 张。
+        AssertEqual(8, result.FrameCount);
+        AssertEqual(1, result.RemovedStaleFiles);
+        AssertEqual(false, File.Exists(Path.Combine(plan.OutputDirectory, "stale.png")));
+
+        var written = Directory
+            .EnumerateFiles(plan.OutputDirectory, "*.png")
+            .Select(Path.GetFileName)
+            .OrderBy(name => name, StringComparer.Ordinal)
+            .ToArray();
+        AssertEqual(8, written.Length);
+        AssertEqual("Misaka_Sk2_0001.png", written[0]);
+        AssertEqual("Misaka_Sk2_0008.png", written[7]);
+        AssertEqual(true, File.Exists(Path.Combine(plan.OutputDirectory, BasePlateExportPlanner.ManifestFileName)));
+
+        // 第 1 张 = 第一格的源图（原样复制），最后 2 张是空白帧 → 透明同画布。
+        using (var firstOutput = new Bitmap(Path.Combine(plan.OutputDirectory, "Misaka_Sk2_0001.png")))
+        {
+            AssertEqual(Color.Red.ToArgb(), firstOutput.GetPixel(10, 10).ToArgb());
+        }
+
+        using (var blankOutput = new Bitmap(Path.Combine(plan.OutputDirectory, "Misaka_Sk2_0008.png")))
+        {
+            AssertEqual(0, blankOutput.GetPixel(10, 10).A);
+            AssertEqual(40, blankOutput.Width);
+            AssertEqual(30, blankOutput.Height);
+        }
+
+        var manifest = File.ReadAllText(
+            Path.Combine(plan.OutputDirectory, BasePlateExportPlanner.ManifestFileName));
+        AssertEqual(true, manifest.Contains("输出帧,源帧序号", StringComparison.Ordinal));
+        AssertEqual(true, manifest.Contains("1 a.png", StringComparison.Ordinal));
+
+        // 护栏：目标目录不在 <工作区>/Export/<角色>/BasePlate/ 之下时，必须拒绝（不是照写）。
+        var hijacked = plan with { OutputDirectory = Path.Combine(root, "somewhere-else") };
+        var refused = false;
+        try
+        {
+            _ = new BasePlateExportService()
+                .ExportAsync(hijacked, root, progress: null, CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+        }
+        catch (InvalidOperationException)
+        {
+            refused = true;
+        }
+
+        AssertEqual(true, refused);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static SequenceFrameItem CreateBasePlateTestFrame(
+    string path,
+    int index,
+    int duration,
+    int width = 40,
+    int height = 30,
+    bool isBlank = false) =>
+    new(
+        FilePath: path,
+        FileUri: string.Empty,
+        FileName: isBlank ? "（空白帧）" : Path.GetFileName(path),
+        CacheKey: $"base-plate-{index}",
+        Index: index,
+        ActualWidth: width,
+        ActualHeight: height,
+        IsValid: true,
+        UpdatedAt: new DateTime(2026, 9, 20),
+        IsBlank: isBlank,
+        DurationFrames: duration);
+
 static void UnrealBridgeToolboxSnapshotRejectsDraftCharacter()
 {
     var root = CreateTemporaryTestFolder();
@@ -5489,12 +5687,15 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // 5522 -> 5533：为「导出图集」按钮在 St5 序列编辑器的工具栏上加了一格
     // （Grid.Column="7"，紧挨「语音结束继续」开关右侧，并把右侧的帧位置文本挪到第 8 列）。
     // 这是一次**实打实的功能新增**，不是文件在悄悄变胖，所以上限跟着抬一格。
+    // 5533 -> 5538：同样性质的一次抬格 —— 编辑器工具条上的「导出图集」按钮收成
+    // 「导出 ▾」菜单（清单驱动，加新导出物不用再动 XAML），按钮本体多 5 行。
+    // 这是"能长久扩展"的做法本身换来的，不是文件在无意义地长。
     //
     // 注意：「把十二个遮罩层抽成 Controls/*.xaml」这条**已经被否掉了**：它们的
     // 手势语义本来就各不相同，收敛会悄悄改掉行为，而那些手势一条 UI 测试都没有。
     // 现在只保留护栏（每个全屏遮罩层至少有一种关法）。真要砍 XAML，
     // 先给这些手势补上测试覆盖，再谈收敛。
-    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5533);
+    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5538);
 
     // 4) Services 最大单文件。
     var largestService = Directory.EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories)

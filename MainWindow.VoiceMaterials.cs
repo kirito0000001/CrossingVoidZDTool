@@ -165,12 +165,7 @@ namespace CrossingVoidZDTool
             }
 
             var folderPath = _voiceMaterialService.GetCategoryFolderPath(CharacterDesk.CurrentCharacter, kind);
-            Directory.CreateDirectory(folderPath);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = folderPath,
-                UseShellExecute = true
-            });
+            OpenFolderInExplorer(folderPath);
         }
 
         private void OpenVoiceMaterialManagerButton_Click(object sender, RoutedEventArgs e)

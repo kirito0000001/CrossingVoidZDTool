@@ -127,6 +127,9 @@ namespace CrossingVoidZDTool
             // S0/S1：St5 动作卡上的命令随卡片携带，先把壳能力交给它。
             // 漏了这一行，卡片上的 Command 就是 null——按钮看着在、点不动，而且没有任何报错。
             _applicationViewModel.SequenceFrames.AttachCommandHost(this);
+            // 工具条那排放不下更多按钮了：导出收成一个「导出 ▾」，菜单内容由
+            // `SequenceExportMenu` 这份清单决定（加新导出不用动 XAML）。
+            BuildSequenceExportMenu();
             // C6b：角色详情那五个按钮的命令。流程在 CharacterDetailActionController 里，
             // 命令挂在全局持有者上，由**角色卡**读它给 XAML 绑（`{Binding ContinueEditingCommand}`）
             // ——详情面板的 DataContext 是那张卡，不是页面级 VM。

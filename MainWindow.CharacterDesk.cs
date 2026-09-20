@@ -360,14 +360,7 @@ namespace CrossingVoidZDTool
         string? ICharacterDetailActionHost.LastEditedModuleTag => GetLastEditedModuleTag();
 
         void ICharacterDetailActionHost.OpenInFileExplorer(string folderPath)
-        {
-            Directory.CreateDirectory(folderPath);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = folderPath,
-                UseShellExecute = true
-            });
-        }
+            => OpenFolderInExplorer(folderPath);
 
         void ICharacterDetailActionHost.ShowFloatingTip(NotifySeverity severity, string title, string message) =>
             ((INotificationService)this).Notify(severity, title, message);
@@ -1955,12 +1948,7 @@ namespace CrossingVoidZDTool
                 return;
             }
 
-            Directory.CreateDirectory(CharacterDesk.CurrentCharacter.ReferenceFolderPath);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = CharacterDesk.CurrentCharacter.ReferenceFolderPath,
-                UseShellExecute = true
-            });
+            OpenFolderInExplorer(CharacterDesk.CurrentCharacter.ReferenceFolderPath);
             AppendLog(LogKind.User, $"打开草稿参考图文件夹：{CharacterDesk.CurrentCharacter.ReferenceFolderPath}");
         }
 

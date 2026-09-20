@@ -307,12 +307,7 @@ namespace CrossingVoidZDTool
             }
 
             var folderPath = _applicationViewModel.Buffs.GetBuffRootPath(CharacterDesk.CurrentCharacter);
-            Directory.CreateDirectory(folderPath);
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = folderPath,
-                UseShellExecute = true
-            });
+            OpenFolderInExplorer(folderPath);
         }
     }
 }

@@ -167,6 +167,18 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     public AsyncRelayCommand? ExportAtlasCommand => _commands?.ExportAtlasCommand;
 
+    /// <summary>「导出底板」：按动作帧率的 2 倍逐帧导出 PNG（给特效绘制对照用）。</summary>
+    public AsyncRelayCommand? ExportBasePlatesCommand => _commands?.ExportBasePlatesCommand;
+
+    /// <summary>
+    /// 「导出」按钮的菜单内容（清单 + 命令）。壳启动时把它变成 <c>MenuFlyoutItem</c>。
+    ///
+    /// 它是个**计算属性**：命令对象在 <see cref="AttachCommandHost"/> 之后才有，
+    /// 而壳是在那之后才建菜单的。
+    /// </summary>
+    public IReadOnlyList<(SequenceExportMenuItem Item, System.Windows.Input.ICommand Command)> ExportMenuActions =>
+        _commands?.ExportMenuActions ?? [];
+
     public AsyncRelayCommand? ConfirmDuplicateResolutionCommand => _commands?.ConfirmDuplicateResolutionCommand;
 
     /// <summary>

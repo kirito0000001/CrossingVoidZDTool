@@ -4634,14 +4634,19 @@
                                     OffContent="语音结束继续"
                                     OnContent="语音结束暂停" />
                                 <Button
-                                    x:Name="SequenceEditorExportAtlasButton"
+                                    x:Name="SequenceExportButton"
                                     Grid.Column="7"
                                     VerticalAlignment="Center"
-                                    Command="{Binding SequenceFrames.ExportAtlasCommand}"
-                                    Style="{StaticResource PrimaryToolButtonStyle}" ToolTipService.ToolTip="把当前动作的序列帧打成一张图集（含坐标 json），落到 Export 目录">
+                                    Style="{StaticResource PrimaryToolButtonStyle}"
+                                    ToolTipService.ToolTip="导出当前动作的产物（图集 / 底板…）">
                                     <StackPanel Orientation="Horizontal" Spacing="6">
                                         <FontIcon FontSize="14" Glyph="&#xE8B7;" />
-                                        <TextBlock Text="导出图集" /></StackPanel>
+                                        <TextBlock Text="导出" />
+                                        <FontIcon FontSize="10" Glyph="&#xE70D;" VerticalAlignment="Center" />
+                                    </StackPanel>
+                                    <Button.Flyout>
+                                        <MenuFlyout x:Name="SequenceExportMenuFlyout" Placement="BottomEdgeAlignedRight" />
+                                    </Button.Flyout>
                                 </Button>
                                 <Grid Grid.Column="8" HorizontalAlignment="Right" VerticalAlignment="Center">
                                     <TextBlock

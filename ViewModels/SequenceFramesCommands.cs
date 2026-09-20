@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Linq;
 using System.Threading.Tasks;
 using CrossingVoidZDTool.Services;
 
@@ -96,6 +98,9 @@ internal interface ISequenceFramesCommandHost
 
     /// <summary>「导出图集」：给当前选中动作打包图集并导出（S5 收尾）。</summary>
     Task ExportAtlasAsync();
+
+    /// <summary>「导出底板」：按动作帧率的倍数逐帧导出 PNG（给特效绘制对照用）。</summary>
+    Task ExportBasePlatesAsync();
 
     /// <summary>重复帧裁决器的「确认保留所选」。</summary>
     Task ConfirmDuplicateResolutionAsync();
@@ -288,6 +293,29 @@ internal sealed class SequenceFramesCommands(ISequenceFramesCommandHost host)
         new((object? _) => host.PickEditorFrameFromCollectionAsync());
 
     public AsyncRelayCommand ExportAtlasCommand { get; } = new((object? _) => host.ExportAtlasAsync());
+
+    public AsyncRelayCommand ExportBasePlatesCommand { get; } = new((object? _) => host.ExportBasePlatesAsync());
+
+    /// <summary>
+    /// 「导出」按钮的菜单内容：清单来自 <see cref="SequenceExportMenu.Build"/>（纯函数），
+    /// 命令在这里配一次。壳只负责把这份数据变成 <c>MenuFlyoutItem</c>。
+    ///
+    /// 加新导出的第二处就在这个 switch 里 —— 清单加一条、这里加一个分支。
+    /// </summary>
+    public IReadOnlyList<(SequenceExportMenuItem Item, System.Windows.Input.ICommand Command)> ExportMenuActions =>
+        SequenceExportMenu.Build()
+            .Select(item => (
+                item,
+                item.Action switch
+                {
+                    SequenceExportAction.Atlas => (System.Windows.Input.ICommand)ExportAtlasCommand,
+                    SequenceExportAction.BasePlate => ExportBasePlatesCommand,
+                    _ => throw new ArgumentOutOfRangeException(
+                        nameof(item),
+                        item.Action,
+                        "导出菜单里出现没有配命令的项。")
+                }))
+            .ToArray();
 
     public AsyncRelayCommand ConfirmDuplicateResolutionCommand { get; } =
         new((object? _) => host.ConfirmDuplicateResolutionAsync());

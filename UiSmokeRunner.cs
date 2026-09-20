@@ -294,6 +294,28 @@ internal static class UiSmokeRunner
                     lines.Add("SKIP 编辑器按钮检查（管理器浮层里没找到那四个按钮）");
                 }
 
+                // 工具条那排放不下更多按钮了，导出收成一个「导出 ▾」菜单（清单驱动）。
+                // 菜单是懒创建的、冒烟点不开它，所以直接查按钮上的 Flyout：
+                // 项数够 + 每一项都真的绑了命令 —— 命令为 null 就是"点了没反应"。
+                if (managerHost is not null &&
+                    FindFirstByName(managerHost, "SequenceExportButton") is Button exportButton)
+                {
+                    var exportItems = (exportButton.Flyout as MenuFlyout)
+                        ?.Items
+                        .OfType<MenuFlyoutItem>()
+                        .ToArray() ?? [];
+                    lines.Add(
+                        "INFO 导出菜单=" + string.Join(
+                            ",",
+                            exportItems.Select(item => $"{item.Text}[cmd={(item.Command is null ? "无" : "有")}]")));
+                    Check("导出菜单装上了导出项", exportItems.Length >= 2);
+                    Check("导出菜单每一项都绑了命令", exportItems.All(item => item.Command is not null));
+                }
+                else
+                {
+                    lines.Add("SKIP 导出菜单（这次没找到「导出」按钮）");
+                }
+
                 // 浮层里可能不止一个命令按钮（管理器里就带了「帧素材合集」的入口），
                 // 所以不能"取第一个当关闭"——那正是上一版点错的原因。
                 // 依次试点，直到浮层收起：断言的是「存在一个命令按钮能关掉它」。
