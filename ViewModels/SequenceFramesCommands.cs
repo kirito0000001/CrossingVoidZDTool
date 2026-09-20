@@ -102,6 +102,16 @@ internal interface ISequenceFramesCommandHost
     /// <summary>「导出底板」：按动作帧率的倍数逐帧导出 PNG（给特效绘制对照用）。</summary>
     Task ExportBasePlatesAsync();
 
+    // 特效层（和动作走同一条链路：导入 → 两层预览 → 并进第五步同步）。
+    /// <summary>「导入特效帧」：把画好的特效帧导进当前动作的特效层（选文件在壳里）。</summary>
+    Task ImportEffectFramesAsync();
+
+    /// <summary>「打开特效目录」：用资源管理器打开当前动作的特效层目录。</summary>
+    void OpenEffectFolder();
+
+    /// <summary>「清空特效层」：把当前动作的特效帧全删掉（动作本身不动）。</summary>
+    void ClearEffectLayer();
+
     /// <summary>重复帧裁决器的「确认保留所选」。</summary>
     Task ConfirmDuplicateResolutionAsync();
 }
@@ -295,6 +305,12 @@ internal sealed class SequenceFramesCommands(ISequenceFramesCommandHost host)
     public AsyncRelayCommand ExportAtlasCommand { get; } = new((object? _) => host.ExportAtlasAsync());
 
     public AsyncRelayCommand ExportBasePlatesCommand { get; } = new((object? _) => host.ExportBasePlatesAsync());
+
+    public AsyncRelayCommand ImportEffectFramesCommand { get; } = new((object? _) => host.ImportEffectFramesAsync());
+
+    public RelayCommand OpenEffectFolderCommand { get; } = new(_ => host.OpenEffectFolder());
+
+    public RelayCommand ClearEffectLayerCommand { get; } = new(_ => host.ClearEffectLayer());
 
     /// <summary>
     /// 「导出」按钮的菜单内容：清单来自 <see cref="SequenceExportMenu.Build"/>（纯函数），

@@ -1897,15 +1897,20 @@
                                         PointerPressed="SequencePreviewCanvas_PointerPressed"
                                         PointerReleased="SequencePreviewCanvas_PointerReleased"
                                         PointerWheelChanged="SequencePreviewCanvas_PointerWheelChanged">
-                                        <controls:BufferedImagePresenter
-                                            x:Name="SequencePreviewPresenter"
+                                        <!-- 两层预览：角色在下、特效在上，**共用一个变换**，缩放/拖动一起动。
+                                             变换从原来的呈现器挪到这个容器上，等于把两层绑成一层来操作。 -->
+                                        <Grid
                                             HorizontalAlignment="Center"
                                             VerticalAlignment="Center"
                                             RenderTransformOrigin="0.5,0.5">
-                                            <controls:BufferedImagePresenter.RenderTransform>
+                                            <Grid.RenderTransform>
                                                 <CompositeTransform x:Name="SequencePreviewImageTransform" />
-                                            </controls:BufferedImagePresenter.RenderTransform>
-                                        </controls:BufferedImagePresenter>
+                                            </Grid.RenderTransform>
+                                            <controls:BufferedImagePresenter x:Name="SequencePreviewPresenter" />
+                                            <controls:BufferedImagePresenter
+                                                x:Name="SequencePreviewEffectPresenter"
+                                                Visibility="{Binding SequenceFrames.ShowEffectLayer, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}" />
+                                        </Grid>
                                     </Grid>
                                     <TextBlock
                                         Grid.Row="2"
@@ -4680,13 +4685,16 @@
                                     PointerPressed="SequenceEditorPreviewCanvas_PointerPressed"
                                     PointerReleased="SequenceEditorPreviewCanvas_PointerReleased"
                                     PointerWheelChanged="SequenceEditorPreviewCanvas_PointerWheelChanged">
-                                    <controls:BufferedImagePresenter
-                                        x:Name="SequenceEditorPreviewPresenter"
-                                        RenderTransformOrigin="0.5,0.5">
-                                        <controls:BufferedImagePresenter.RenderTransform>
+                                    <!-- 两层预览（同外层）：角色在下、特效在上，共用一个变换。 -->
+                                    <Grid RenderTransformOrigin="0.5,0.5">
+                                        <Grid.RenderTransform>
                                             <CompositeTransform x:Name="SequenceEditorPreviewImageTransform" />
-                                        </controls:BufferedImagePresenter.RenderTransform>
-                                    </controls:BufferedImagePresenter>
+                                        </Grid.RenderTransform>
+                                        <controls:BufferedImagePresenter x:Name="SequenceEditorPreviewPresenter" />
+                                        <controls:BufferedImagePresenter
+                                            x:Name="SequenceEditorPreviewEffectPresenter"
+                                            Visibility="{Binding SequenceFrames.ShowEffectLayer, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}" />
+                                    </Grid>
                                     <TextBlock
                                         HorizontalAlignment="Center"
                                         VerticalAlignment="Center"
@@ -4818,6 +4826,48 @@
                                         </StackPanel>
                                         <Button x:Name="DuplicateSelectedSequenceFramesButton" HorizontalAlignment="Stretch" Command="{Binding SequenceFrames.ToggleCopyTargetSelectionCommand}" Content="复制所选帧" Style="{StaticResource PrimaryToolButtonStyle}" />
 <Button x:Name="DeleteSelectedSequenceFramesButton" HorizontalAlignment="Stretch" Command="{Binding SequenceFrames.DeleteSelectedFramesCommand}" Content="删除所选帧" Style="{StaticResource PrimaryToolButtonStyle}" />
+                                    </StackPanel>
+
+                                    <!-- 特效层：跟着**动作**走（不是跟着某一帧），所以放在两个面板之外。
+                                         帧率是动作的 2 倍，和「导出底板」一一对应；空帧直接留白。 -->
+                                    <StackPanel x:Name="SequenceEffectPanel" Spacing="10">
+                                        <StackPanel Spacing="3">
+                                            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="特效层" />
+                                            <TextBlock
+                                                Style="{StaticResource SubtleTextStyle}"
+                                                Text="{Binding SequenceFrames.EffectLayerSummary, Mode=OneWay}"
+                                                TextWrapping="Wrap" />
+                                            <TextBlock
+                                                Style="{StaticResource SubtleTextStyle}"
+                                                Text="帧率是动作的 2 倍，和「导出底板」一一对应；没画的帧留空即可，同步到虚幻时是空关键帧。"
+                                                TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <ToggleSwitch
+                                            x:Name="SequenceEffectLayerToggle"
+                                            IsOn="{Binding SequenceFrames.ShowEffectLayer, Mode=TwoWay}"
+                                            OffContent="预览不叠特效"
+                                            OnContent="预览叠特效" />
+                                        <Grid ColumnSpacing="8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <Button
+                                                HorizontalAlignment="Stretch"
+                                                Command="{Binding SequenceFrames.ImportEffectFramesCommand}"
+                                                Content="导入特效帧"
+                                                Style="{StaticResource PrimaryToolButtonStyle}" />
+                                            <Button
+                                                Grid.Column="1"
+                                                HorizontalAlignment="Stretch"
+                                                Command="{Binding SequenceFrames.OpenEffectFolderCommand}"
+                                                Content="打开特效目录" />
+                                        </Grid>
+                                        <Button
+                                            HorizontalAlignment="Stretch"
+                                            Command="{Binding SequenceFrames.ClearEffectLayerCommand}"
+                                            Content="清空特效层"
+                                            Visibility="{Binding SequenceFrames.HasEffectLayer, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}" />
                                     </StackPanel>
                                 </Grid>
                             </ScrollViewer>

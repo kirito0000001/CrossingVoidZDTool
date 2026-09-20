@@ -597,6 +597,8 @@ namespace CrossingVoidZDTool
                 UpdateSequencePreviewInterval();
                 PlayCurrentSequenceFrameVoice();
                 _sequencePreviewTimer.Start();
+                // 特效层比角色层快"倍数"倍，所以在它自己的节拍上推进。
+                StartSequenceEffectSubFrameTimer();
                 MarkLastEditedModule("SequenceFrames");
             }
             catch (Exception ex)
@@ -651,6 +653,12 @@ namespace CrossingVoidZDTool
             AnimateReferenceOverlay(SequenceFramesManagerHost, SequenceFramesManagerCardScale, show: true);
             SequenceFramesManagerHost.Focus(FocusState.Programmatic);
             SynchronizeSequenceTimelineSelectionToCurrentFrame();
+            // 打开编辑器时把这一层的特效现状读出来（顺手也刷一次两层预览）。
+            if (CharacterDesk.CurrentCharacter is { } effectCharacter)
+            {
+                ReloadEffectLayer(effectCharacter, section);
+            }
+
             MarkLastEditedModule("SequenceFrames");
         }
 
@@ -1676,6 +1684,7 @@ namespace CrossingVoidZDTool
         private void StopSequencePreview()
         {
             _sequencePreviewTimer.Stop();
+            StopSequenceEffectSubFrameTimer();
             _isSequenceEditorPreviewPlayback = false;
             _applicationViewModel.SequenceFrames.StopPreview();
         }
@@ -1829,6 +1838,8 @@ namespace CrossingVoidZDTool
         {
             SequencePreviewPresenter.Show(source);
             SequenceEditorPreviewPresenter.Show(source);
+            // 角色层每次换图都把特效层跟着对齐（同一个时间点，两层各显各的帧）。
+            UpdateSequenceEffectLayerSource();
         }
 
         private void PrepareNextSequencePreviewSource()

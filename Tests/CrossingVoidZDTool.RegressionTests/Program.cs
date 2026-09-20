@@ -104,6 +104,8 @@ var tests = new (string Name, Action Run)[]
     ("导出菜单是可扩展的清单", SequenceExportMenuListsExtensibleEntries),
     ("底板按动作帧率的2倍逐帧切片", BasePlatePlannerSlicesEachCellByMultiplier),
     ("底板导出只留本次结果并写对照表", BasePlateExportWritesFramesAndManifest),
+    ("特效按文件名编号对号入座并保留空帧", SequenceEffectImportMapsFramesByNumber),
+    ("特效层可读可清且不碰动作帧", SequenceEffectLayerLoadsAndClears),
     ("虚幻发布快照拒绝草稿角色", UnrealBridgeToolboxSnapshotRejectsDraftCharacter),
     ("虚幻工具箱快照覆盖角色六类模块", UnrealBridgeToolboxSnapshotCoversAllModules),
     ("蓝图置入目标值取自工具箱数据", BlueprintSetupRequestComesFromToolboxData),
@@ -4970,6 +4972,112 @@ static SequenceFrameItem CreateBasePlateTestFrame(
         IsBlank: isBlank,
         DurationFrames: duration);
 
+/// <summary>
+/// 特效导入：文件名里最后那段数字就是帧号（和"导出底板"同名，画完直接导回来），
+/// 缺的编号是空帧、整张全透明的也算空帧、超出动作长度的忽略；导入前先清掉旧帧。
+/// </summary>
+static void SequenceEffectImportMapsFramesByNumber()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var action = SequenceFrameService.BuildActions(new CharacterSkillsData()).First();
+        var drawnFolder = Path.Combine(root, "drawn");
+        Directory.CreateDirectory(drawnFolder);
+        // 1、3、5 有内容；2 整张透明；4 根本没画；6 超出（期望只有 5 张）。
+        WriteSolidImage(Path.Combine(drawnFolder, "Misaka_Click_0001.png"), Color.Red, 40, 30);
+        WriteSolidImage(Path.Combine(drawnFolder, "Misaka_Click_0002.png"), Color.Transparent, 40, 30);
+        WriteSolidImage(Path.Combine(drawnFolder, "Misaka_Click_0003.png"), Color.Blue, 40, 30);
+        WriteSolidImage(Path.Combine(drawnFolder, "Misaka_Click_0005.png"), Color.Green, 40, 30);
+        WriteSolidImage(Path.Combine(drawnFolder, "Misaka_Click_0006.png"), Color.Black, 40, 30);
+
+        var service = new SequenceEffectService();
+        var result = service.Import(
+            character,
+            action,
+            Directory.GetFiles(drawnFolder, "*.png"),
+            expectedFrameCount: 5);
+
+        AssertEqual(3, result.ImportedFrames);
+        AssertEqual(2, result.EmptyFrames);
+        AssertEqual(1, result.IgnoredFrames);
+
+        var layer = service.Load(character, action, expectedFrameCount: 5);
+        AssertEqual(5, layer.FrameCount);
+        AssertEqual(2, layer.EmptyFrameCount);
+        AssertEqual(3, layer.Frames.Count);
+        AssertEqual(1, layer.Frames[0].Ordinal);
+        AssertEqual(3, layer.Frames[1].Ordinal);
+        AssertEqual(5, layer.Frames[2].Ordinal);
+        // 层内按自己的规范改名（<动作>_<层名>_NNNN），和虚幻侧的资产前缀一致；
+        // 对号入座靠的是编号，所以"导出底板 → 画 → 导回"不用改名。
+        AssertEqual("Click_Effect_0001.png", layer.Frames[0].FileName);
+        AssertEqual("Click_Effect", layer.AssetPrefix);
+        AssertEqual(5, layer.SummaryText.Contains("空 2", StringComparison.Ordinal) ? 5 : 0);
+
+        // 再导一次：旧帧（含上一次多出来的）要被清掉，不会残留。
+        var second = service.Import(
+            character,
+            action,
+            [Path.Combine(drawnFolder, "Misaka_Click_0001.png")],
+            expectedFrameCount: 5);
+        AssertEqual(1, second.ImportedFrames);
+        AssertEqual(3, second.ClearedFrames);
+        var reloaded = service.Load(character, action, expectedFrameCount: 5);
+        AssertEqual(1, reloaded.Frames.Count);
+        AssertEqual(4, reloaded.EmptyFrameCount);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>
+/// 特效层和动作帧各住各的：清空特效**不能**碰 ZDMaterial 里的素材帧。
+/// 目录形状也要钉住 —— 它在 <c>ZDMaterial/&lt;动作&gt;/Effects/&lt;层名&gt;/Frames/</c>。
+/// </summary>
+static void SequenceEffectLayerLoadsAndClears()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var action = SequenceFrameService.BuildActions(new CharacterSkillsData()).First();
+        var framePath = Path.Combine(
+            SequenceActionFolderLayout.GetFramesFolderPath(character, action),
+            "1 a.png");
+        Directory.CreateDirectory(Path.GetDirectoryName(framePath)!);
+        WriteSolidImage(framePath, Color.Red, 40, 30);
+        var drawnPath = Path.Combine(root, "drawn.png");
+        WriteSolidImage(drawnPath, Color.Blue, 40, 30);
+
+        var service = new SequenceEffectService();
+        var layerFolder = SequenceEffectService.GetLayerFramesFolderPath(character, action);
+        AssertEqual(
+            Path.Combine(character.FolderPath, "ZDMaterial", action.Code, "Effects", "Effect", "Frames"),
+            layerFolder);
+
+        _ = service.Import(character, action, [drawnPath], expectedFrameCount: 1);
+        AssertEqual(true, Directory.Exists(layerFolder));
+        AssertEqual(1, Directory.GetFiles(layerFolder, "*.png").Length);
+
+        var removed = service.ClearLayer(character, action);
+        AssertEqual(1, removed);
+        AssertEqual(0, Directory.GetFiles(layerFolder, "*.png").Length);
+        // 素材帧原地不动：清特效不该动角色序列。
+        AssertEqual(true, File.Exists(framePath));
+        AssertEqual(false, service.Load(character, action).HasFrames);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static void UnrealBridgeToolboxSnapshotRejectsDraftCharacter()
 {
     var root = CreateTemporaryTestFolder();
@@ -5690,12 +5798,14 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // 5533 -> 5538：同样性质的一次抬格 —— 编辑器工具条上的「导出图集」按钮收成
     // 「导出 ▾」菜单（清单驱动，加新导出物不用再动 XAML），按钮本体多 5 行。
     // 这是"能长久扩展"的做法本身换来的，不是文件在无意义地长。
+    // 5538 -> 5588：特效层这条功能自身（编辑器右侧「特效层」区 + 两处预览改成
+    // "角色层 + 特效层"叠放，两层共用一个变换），也是实打实加功能。
     //
     // 注意：「把十二个遮罩层抽成 Controls/*.xaml」这条**已经被否掉了**：它们的
     // 手势语义本来就各不相同，收敛会悄悄改掉行为，而那些手势一条 UI 测试都没有。
     // 现在只保留护栏（每个全屏遮罩层至少有一种关法）。真要砍 XAML，
     // 先给这些手势补上测试覆盖，再谈收敛。
-    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5538);
+    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5588);
 
     // 4) Services 最大单文件。
     var largestService = Directory.EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories)

@@ -31,6 +31,12 @@ internal sealed class SequencePreviewBitmapCache
         }
     }
 
+    /// <summary>
+    /// 直接按文件路径加载一张图（特效层用：它的缓存键就是路径本身）。
+    /// 失败会抛，调用方自己决定"这一张画不出来"怎么处理。
+    /// </summary>
+    public static ImageSource LoadFile(string filePath) => LoadWriteableBitmap(filePath);
+
     public async Task<IReadOnlyList<SequencePreviewBitmapLoadFailure>> PreloadAsync(IEnumerable<SequenceFrameItem> frames)
     {
         var failures = new List<SequencePreviewBitmapLoadFailure>();

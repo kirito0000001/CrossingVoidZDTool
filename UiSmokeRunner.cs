@@ -316,6 +316,41 @@ internal static class UiSmokeRunner
                     lines.Add("SKIP 导出菜单（这次没找到「导出」按钮）");
                 }
 
+                // 特效层：两层预览的呈现器都在树上 + 三个入口都绑了命令。
+                // 呈现器"没装上"的表现是"特效永远不显示"，而命令为 null 是"点了没反应"。
+                var effectPresenterNames = new[]
+                {
+                    "SequencePreviewEffectPresenter",
+                    "SequenceEditorPreviewEffectPresenter"
+                };
+                var effectPresenters = effectPresenterNames
+                    .Select(name => (Name: name, Presenter: FindFirstByName(root, name)))
+                    .ToArray();
+                lines.Add(
+                    "INFO 特效层呈现器=" + string.Join(
+                        ",",
+                        effectPresenters.Select(pair => $"{pair.Name}={(pair.Presenter is null ? "无" : "有")}")));
+                Check(
+                    "两层预览都装了特效层",
+                    effectPresenters.All(pair => pair.Presenter is not null));
+
+                var effectButtons = managerHost is null
+                    ? []
+                    : FindAll<Button>(managerHost)
+                        .Where(button => button.Visibility == Visibility.Visible)
+                        .Select(button => (Label: DescribeLabel(button), Button: button))
+                        .Where(pair => pair.Label is "导入特效帧" or "打开特效目录" or "清空特效层")
+                        .ToArray();
+                foreach (var (label, button) in effectButtons)
+                {
+                    Check($"特效层「{label}」已绑定命令", button.Command is not null);
+                }
+
+                if (effectButtons.Length == 0)
+                {
+                    lines.Add("SKIP 特效层入口（这次没找到特效层面板）");
+                }
+
                 // 浮层里可能不止一个命令按钮（管理器里就带了「帧素材合集」的入口），
                 // 所以不能"取第一个当关闭"——那正是上一版点错的原因。
                 // 依次试点，直到浮层收起：断言的是「存在一个命令按钮能关掉它」。

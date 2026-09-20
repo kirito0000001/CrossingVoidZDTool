@@ -59,6 +59,10 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         OnPropertyChanged(nameof(ReplaceSelectedEditorFrameCommand));
         OnPropertyChanged(nameof(PickEditorFrameFromCollectionCommand));
         OnPropertyChanged(nameof(ExportAtlasCommand));
+        OnPropertyChanged(nameof(ExportBasePlatesCommand));
+        OnPropertyChanged(nameof(ImportEffectFramesCommand));
+        OnPropertyChanged(nameof(OpenEffectFolderCommand));
+        OnPropertyChanged(nameof(ClearEffectLayerCommand));
         OnPropertyChanged(nameof(ConfirmDuplicateResolutionCommand));
     }
 
@@ -178,6 +182,46 @@ internal sealed class SequenceFramesViewModel : ObservableObject
     /// </summary>
     public IReadOnlyList<(SequenceExportMenuItem Item, System.Windows.Input.ICommand Command)> ExportMenuActions =>
         _commands?.ExportMenuActions ?? [];
+
+    // ── 特效层 ────────────────────────────────────────────────────────────
+    // 命令之外还有一份**状态**（当前动作的特效层），壳在打开编辑器 / 导入 / 清空后往里塞。
+    public AsyncRelayCommand? ImportEffectFramesCommand => _commands?.ImportEffectFramesCommand;
+
+    public RelayCommand? OpenEffectFolderCommand => _commands?.OpenEffectFolderCommand;
+
+    public RelayCommand? ClearEffectLayerCommand => _commands?.ClearEffectLayerCommand;
+
+    private SequenceEffectLayer? _effectLayer;
+
+    /// <summary>当前动作的特效层；没导入过就是 null（界面显示"未导入"，不是错误）。</summary>
+    public SequenceEffectLayer? EffectLayer
+    {
+        get => _effectLayer;
+        private set
+        {
+            if (SetProperty(ref _effectLayer, value))
+            {
+                OnPropertyChanged(nameof(EffectLayerSummary));
+                OnPropertyChanged(nameof(HasEffectLayer));
+            }
+        }
+    }
+
+    public bool HasEffectLayer => EffectLayer?.HasFrames == true;
+
+    public string EffectLayerSummary => EffectLayer is null ? "未导入" : EffectLayer.SummaryText;
+
+    private bool _showEffectLayer = true;
+
+    /// <summary>预览里要不要叠特效（默认叠）。关掉只是不看，不动数据。</summary>
+    public bool ShowEffectLayer
+    {
+        get => _showEffectLayer;
+        set => SetProperty(ref _showEffectLayer, value);
+    }
+
+    /// <summary>壳在打开编辑器 / 导入 / 清空之后调用；传 null 表示这一层现在是空的。</summary>
+    public void SetEffectLayer(SequenceEffectLayer? layer) => EffectLayer = layer;
 
     public AsyncRelayCommand? ConfirmDuplicateResolutionCommand => _commands?.ConfirmDuplicateResolutionCommand;
 
