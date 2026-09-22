@@ -25,6 +25,7 @@ internal sealed class ApplicationViewModel : ObservableObject
         SequenceFrames = new SequenceFramesViewModel(new SequenceFrameService(), new CharacterSkillsService());
         Buffs = new BuffsViewModel(new BuffService());
         UnrealProjectSync = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        AtlasTools = new AtlasToolViewModel();
     }
 
     public SettingsViewModel Settings { get; }
@@ -50,6 +51,9 @@ internal sealed class ApplicationViewModel : ObservableObject
     public BuffsViewModel Buffs { get; }
 
     public UnrealProjectSyncViewModel UnrealProjectSync { get; }
+
+    /// <summary>工具集（创建图集 / 拆分图集…）。和角色无关的通用小工具都挂这儿。</summary>
+    public AtlasToolViewModel AtlasTools { get; }
 
     public IReadOnlyList<ToolboxModuleDefinition> Modules { get; } =
     [

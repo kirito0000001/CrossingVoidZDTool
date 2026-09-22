@@ -329,8 +329,28 @@ internal sealed class UnrealBridgeDiffService
         }
 
         var objectPath = change.UnrealItem?.SourceObjectPath ?? string.Empty;
+        // 特效层的产物住在动作目录里，但差异树里没有它的行（它随动作同步）。
+        // 按命名认出来，别把刚同步过去的特效精灵/Flipbook 列成"待删除"。
+        if (SequenceEffectSyncService.IsEffectLayerAssetName(ExtractAssetName(objectPath)))
+        {
+            return true;
+        }
+
         return canonicalAssetPaths.TryGetValue(change.SequenceGroupKey, out var paths) &&
             paths.Contains(SequenceFrameIdentity.NormalizePackagePath(objectPath));
+    }
+
+    /// <summary>从包路径里取资产名：<c>/Game/X/Y.Sprite</c> → <c>Y</c>。</summary>
+    private static string ExtractAssetName(string? objectPath)
+    {
+        var value = (objectPath ?? string.Empty).Trim();
+        if (value.Length == 0)
+        {
+            return string.Empty;
+        }
+
+        var separator = value.LastIndexOf('.');
+        return separator >= 0 ? value[(separator + 1)..] : value[(value.LastIndexOf('/') + 1)..];
     }
 
     private static int ParseFrameOrdinal(string stableId)

@@ -124,6 +124,12 @@ namespace CrossingVoidZDTool
                 return;
             }
 
+            if (string.Equals(tag, "AtlasTools", StringComparison.Ordinal))
+            {
+                ShowAtlasToolsPage();
+                return;
+            }
+
             ShowCharacterDeskPage();
         }
 
@@ -327,6 +333,7 @@ namespace CrossingVoidZDTool
                 SequenceFramesPage,
                 BuffsPage,
                 UnrealProjectSyncPage,
+                AtlasToolsPage,
                 SettingsPage
             ];
 

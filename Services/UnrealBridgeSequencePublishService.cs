@@ -46,6 +46,15 @@ internal sealed class UnrealBridgeSequenceSyncAction
     public string FlipbookAssetName { get; set; } = string.Empty;
     /// <summary>该动作的历史命名 token；仅在计划没有给出显式待删列表时作为兜底。</summary>
     public List<string> LegacyNameTokens { get; set; } = [];
+
+    /// <summary>
+    /// 这一项是动作的**特效层**（不是角色序列本身）。
+    ///
+    /// 特效层和角色序列同构，但只做三件事：导图集贴图、切精灵、建 Flipbook；
+    /// **不建序列资产、不写 AnimMaps、不碰角色蓝图** —— 那三样属于角色序列。
+    /// 空帧在 Flipbook 里保留一个"精灵为空"的关键帧，时间照占（和角色序列同一套处理）。
+    /// </summary>
+    public bool IsEffectLayer { get; set; }
     /// <summary>
     /// 用户在差异树里勾选的待删除资产对象路径。这是清理的权威依据：
     /// 按资产名 token 猜测既会漏删（历史命名不含动作 token），也会误删
@@ -352,6 +361,23 @@ internal sealed class UnrealBridgeSequencePublishService
                 })
                 .ToList();
             plan.Actions.Add(action);
+
+            // 特效层跟着它的动作走：动作被重建时，这一层的图集/精灵/Flipbook 一起重建。
+            // 为什么不做成差异树里的独立行：特效资产就住在动作的 Material 目录里，
+            // 布局（哪几张精灵）不影响角色序列那张 Flipbook 的对错，所以让它**随动作同步**最省事；
+            // "特效改了"靠动作的内容指纹体现（指纹里算了特效图的哈希）。
+            AppendEffectAction(
+                plan,
+                character,
+                section,
+                definition,
+                formIndex,
+                fps,
+                atlases.TryGetValue(
+                    AtlasKey(SequenceEffectSyncService.BuildLayerCode(variantCode), formIndex),
+                    out var packedEffectAtlas)
+                    ? packedEffectAtlas
+                    : null);
         }
 
         if (plan.Actions.Count == 0 && plan.DetachSequenceObjectPaths.Count == 0)
@@ -363,6 +389,124 @@ internal sealed class UnrealBridgeSequencePublishService
 
         SkippedActionCodes = skipped;
         return plan;
+    }
+
+    /// <summary>
+    /// 把动作的特效层追加成计划里的一条（<see cref="UnrealBridgeSequenceSyncAction.IsEffectLayer"/>）。
+    /// 没有特效图、或者没打图集，就什么都不加。
+    /// </summary>
+    private static void AppendEffectAction(
+        UnrealBridgeSequenceSyncPlan plan,
+        CharacterCard character,
+        SequenceFrameSection section,
+        SequenceActionDefinition definition,
+        int formIndex,
+        int actionFps,
+        UnrealBridgeSequenceAtlasInput? effectAtlas)
+    {
+        var layer = new SequenceEffectService().Load(character, section.Action);
+        var layout = SequenceEffectSyncService.TryBuildLayout(
+            character, section, definition, formIndex, layer, actionFps);
+        if (layout is null || effectAtlas is null)
+        {
+            return;
+        }
+
+        var action = new UnrealBridgeSequenceSyncAction
+        {
+            IsEffectLayer = true,
+            ActionCode = layout.LayerCode,
+            BaseActionCode = definition.Code,
+            FormIndex = formIndex,
+            DisplayName = $"{definition.DisplayName} · 特效",
+            // 特效帧率 = 动作帧率 × 倍数（和导出的底板一一对应）。
+            Fps = (int)Math.Round(layout.OutputFps),
+            // 序列资产 / AnimMaps / 蓝图这三样都不属于特效层。
+            BlueprintProperty = string.Empty,
+            BlueprintFormSlotIndex = 0,
+            AnimMapsEntryName = string.Empty,
+            TargetSequencePath = string.Empty,
+            TargetMaterialFolder = layout.MaterialFolderPackagePath,
+            SequenceAssetName = string.Empty,
+            FlipbookAssetName = layout.FlipbookAssetName,
+            LegacyNameTokens = [],
+            // 特效资产的命名是确定的（这一版才引入，没有历史命名），所以直接给显式待删列表：
+            // Python 那边只删这一层自己的资产，绝不按名字猜（猜错了会删掉角色序列的精灵）。
+            StaleAssetObjectPaths = layout.CanonicalAssetObjectPaths.ToList(),
+            HasStaleAssetSelection = true,
+            Atlas = new UnrealBridgeSequenceSyncAtlas
+            {
+                AtlasName = effectAtlas.AtlasName,
+                ImagePath = effectAtlas.ImagePath,
+                Width = effectAtlas.Width,
+                Height = effectAtlas.Height
+            },
+            SourceImages = layout.FilledFrames
+                .Select((frame, position) => BuildEffectSourceImage(
+                    layout, effectAtlas, frame, position + 1))
+                .ToList()
+        };
+        var sourceIndexByOrdinal = layout.FilledFrames
+            .Select((frame, position) => (frame.OutputOrdinal, Index: position + 1))
+            .ToDictionary(pair => pair.OutputOrdinal, pair => pair.Index);
+        action.Frames = layout.Frames
+            .Select(frame => new UnrealBridgeSequenceSyncFrame
+            {
+                Index = frame.OutputOrdinal,
+                Ordinal = frame.OutputOrdinal - 1,
+                FilePath = frame.FilePath,
+                // 特效每一输出帧就是一格。
+                DurationFrames = 1,
+                IsBlank = frame.IsEmpty,
+                VoiceFileName = string.Empty,
+                SourceImageIndex = sourceIndexByOrdinal.GetValueOrDefault(frame.OutputOrdinal),
+                SpriteAssetName = frame.SpriteAssetName
+            })
+            .ToList();
+        plan.Actions.Add(action);
+    }
+
+    /// <summary>
+    /// 特效图集里的一格 → 计划里的素材项。
+    ///
+    /// 矩形必须带上：精灵只有知道「从图集哪儿取图」和「这块内容原本在画布哪儿」，
+    /// 才能把裁过透明边的特效贴回正确位置。少了它 Python 侧会当场报
+    /// "atlas rect ... is empty" —— 而这两件事只有图集工具说过算，工具箱不能自己推。
+    /// </summary>
+    private static UnrealBridgeSequenceSyncSourceImage BuildEffectSourceImage(
+        SequenceEffectSyncLayout layout,
+        UnrealBridgeSequenceAtlasInput effectAtlas,
+        SequenceEffectSyncFrame frame,
+        int index)
+    {
+        if (!effectAtlas.FramesByOrdinal.TryGetValue(index, out var cell) || cell?.Frame is null)
+        {
+            throw new InvalidOperationException(
+                $"特效层「{layout.LayerCode}」的第 {index} 张素材（{System.IO.Path.GetFileName(frame.FilePath)}）"
+                + "在图集帧表里找不到对应格子，无法生成同步计划。"
+                + "图集帧表和特效素材目录可能不是同一轮的结果，请重新刷新后再同步。");
+        }
+
+        return new UnrealBridgeSequenceSyncSourceImage
+        {
+            Index = index,
+            SpriteAssetName = frame.SpriteAssetName,
+            FilePath = frame.FilePath,
+            AtlasName = effectAtlas.AtlasName,
+            AtlasImagePath = effectAtlas.ImagePath,
+            AtlasMaterialFolder = layout.MaterialFolderPackagePath,
+            CreateSprite = true,
+            X = cell.Frame.X,
+            Y = cell.Frame.Y,
+            Width = cell.Frame.W,
+            Height = cell.Frame.H,
+            Rotated = cell.Rotated,
+            Trimmed = cell.Trimmed,
+            TrimOriginX = cell.SpriteSourceSize?.X ?? 0,
+            TrimOriginY = cell.SpriteSourceSize?.Y ?? 0,
+            SourceImageWidth = cell.SourceSize?.W ?? cell.Frame.W,
+            SourceImageHeight = cell.SourceSize?.H ?? cell.Frame.H
+        };
     }
 
     public void Save(string path, UnrealBridgeSequenceSyncPlan plan)

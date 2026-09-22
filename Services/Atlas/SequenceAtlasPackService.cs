@@ -71,6 +71,21 @@ internal sealed class SequenceAtlasPackService
             }
 
             var variantCode = SequenceActionCatalog.GetVariantCode(definition, formIndex);
+
+            // 特效层先打，而且**不看**下面那条「一张自己的图都没有」的捷径：
+            // 角色那条序列整条都借用别人的素材时，它自己没有图集，
+            // 但它自己的特效仍然是一张独立图集 —— 顺手跳过就等于特效永远同步不上去。
+            await PackEffectAtlasAsync(
+                packer,
+                character,
+                section,
+                definition,
+                formIndex,
+                configuredPythonPath,
+                progress,
+                cancellationToken,
+                result);
+
             var outputDirectory = AtlasPackService.ResolveOutputDirectory(
                 AtlasDestination.Cache,
                 projectRootPath: string.Empty,
@@ -126,6 +141,86 @@ internal sealed class SequenceAtlasPackService
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// 打这一层的特效图集。没有特效图（或全是空帧）就跳过 —— 计划生成那边同样会跳过，
+    /// 不替它报错。
+    ///
+    /// 和角色序列**各打一张**（<c>&lt;角色&gt;_&lt;动作&gt;_Effect</c>）：特效帧率和张数都不一样，
+    /// 混进同一张只会让两边都算不清。
+    /// </summary>
+    private static async Task PackEffectAtlasAsync(
+        AtlasPackService packer,
+        CharacterCard character,
+        SequenceFrameSection section,
+        SequenceActionDefinition definition,
+        int formIndex,
+        string? configuredPythonPath,
+        IProgress<AtlasPackProgress>? progress,
+        CancellationToken cancellationToken,
+        Dictionary<string, UnrealBridgeSequenceAtlasInput> result)
+    {
+        var layer = new SequenceEffectService().Load(character, section.Action);
+        var layout = SequenceEffectSyncService.TryBuildLayout(
+            character,
+            section,
+            definition,
+            formIndex,
+            layer,
+            new SequenceFrameService().GetActionFps(character, section.Action));
+        if (layout is null)
+        {
+            return;
+        }
+
+        var sourceImages = layout.FilledFrames.Select(frame => frame.FilePath).ToArray();
+        if (sourceImages.Length == 0)
+        {
+            return;
+        }
+
+        var outputDirectory = AtlasPackService.ResolveOutputDirectory(
+            AtlasDestination.Cache,
+            projectRootPath: string.Empty,
+            character.FolderPath,
+            character.Code,
+            layout.LayerCode);
+        AtlasPackService.ClearCache(outputDirectory);
+        var packedAt = DateTime.UtcNow;
+        // 特效图集走**通用**打包入口（能显式指定图集名和精灵名）：
+        // 名字必须和计划里写的一致 —— 计划说 `<动作>_Effect_FrameNN_Sprite`，这里就得切出同名精灵。
+        var packed = await new AtlasFolderPackService()
+            .PackAsync(
+                new AtlasCreateRequest(
+                    Path.GetDirectoryName(sourceImages[0]) ?? string.Empty,
+                    outputDirectory,
+                    layout.AtlasName,
+                    AtlasFolderPackService.PackMode,
+                    Columns: 0,
+                    Padding: 2,
+                    Trim: true,
+                    MaxSize: ResolveMaxSize(sourceImages.Length)),
+                configuredPythonPath,
+                progress,
+                cancellationToken,
+                spriteNameForIndex: position => layout.FilledFrames[position - 1].SpriteAssetName,
+                sourceImages: sourceImages)
+            .ConfigureAwait(false);
+
+        var manifest = AtlasSequenceManifestReader.Read(
+            AtlasSequenceManifestReader.GetManifestPath(packed.OutputDirectory, layout.AtlasName),
+            packedAt);
+        var atlasSize = AtlasFolderPackService.ReadPngSize(packed.AtlasImagePath);
+        result[UnrealBridgeSequencePublishService.AtlasKey(layout.LayerCode, formIndex)] =
+            new UnrealBridgeSequenceAtlasInput
+            {
+                AtlasName = layout.AtlasName,
+                ImagePath = packed.AtlasImagePath,
+                Width = atlasSize.Width,
+                Height = atlasSize.Height,
+                FramesByOrdinal = AtlasSequenceManifestReader.IndexByOrdinal(manifest),
+            };
     }
 
     /// <summary>

@@ -382,6 +382,28 @@ internal static class UiSmokeRunner
                 }
             }
 
+            // 4) 工具集：左边工具清单 + 右边参数/运行。
+            //    工具是**数据清单**驱动的，所以先断言"清单真的渲染出两张卡"，
+            //    再断言"跑"的按钮拿到了命令（命令为 null 就是点了没反应）。
+            window.UiSmokeShowAtlasToolsPage();
+            await WaitAsync(TimeSpan.FromSeconds(2));
+            var toolsPage = FindFirstByName(root, "AtlasToolsPage");
+            Check(
+                "工具集页面已切换（按可见性判）",
+                toolsPage is not null && toolsPage.Visibility == Visibility.Visible);
+
+            var toolList = toolsPage is null ? null : FindFirstByName(toolsPage, "AtlasToolList");
+            var toolCards = toolList is null
+                ? []
+                : FindAll<ListViewItem>(toolList).ToArray();
+            lines.Add($"INFO 工具集卡片={toolCards.Length} 个");
+            Check("工具集列出了工具卡（至少两个）", toolCards.Length >= 2);
+
+            var runButton = toolsPage is null ? null : FindFirstByName(toolsPage, "AtlasToolRunButton");
+            Check(
+                "工具集的运行按钮已绑定命令",
+                runButton is Button { Command: not null } run && run.Visibility == Visibility.Visible);
+
         }
         catch (Exception ex)
         {

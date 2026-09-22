@@ -76,26 +76,42 @@ internal static class UnrealBridgeSequenceFingerprintService
         ArgumentNullException.ThrowIfNull(character);
         ArgumentNullException.ThrowIfNull(executedActions);
 
+        var executed = executedActions.ToArray();
+        // 指纹是**按动作**记的，而一个动作现在有两段内容：角色帧 + 它自己的特效层。
+        // 所以这里不能照抄计划里的 SourceImages —— 那样记的是角色帧，读的时候却是
+        // 「角色帧 + 特效帧」，两侧永远不相等，每个有特效的动作都会长期显示「素材变了」。
+        // 记的那一侧必须和读的那一侧调**同一个**函数（ComputeCurrentSourceHashes）。
+        var executedCodes = new HashSet<string>(
+            executed.Where(action => !action.IsEffectLayer).Select(action => action.ActionCode),
+            StringComparer.OrdinalIgnoreCase);
+        var executedEffectLayers = new HashSet<string>(
+            executed.Where(action => action.IsEffectLayer).Select(action => action.ActionCode),
+            StringComparer.OrdinalIgnoreCase);
+        var sectionByActionCode = LoadSectionsByActionCode(character);
+
         var fingerprints = new UnrealBridgeSequenceContentFingerprints
         {
             CharacterCode = character.Code,
             RecordedAt = recordedAt,
         };
-        foreach (var action in executedActions)
+        foreach (var code in executedCodes)
         {
-            var stableId = SequenceFrameIdentity.BuildActionStableId(action.ActionCode);
-            var hashes = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var image in action.SourceImages)
+            if (!sectionByActionCode.TryGetValue(code, out var section))
             {
-                if (string.IsNullOrWhiteSpace(image.FilePath) || hashes.ContainsKey(image.FilePath))
-                {
-                    continue;
-                }
-
-                hashes[image.FilePath] = ComputeFileHash(image.FilePath);
+                // 认不出这个动作（老计划里的历史代号）：宁可这一条不记。
+                // 不记的后果是这一条不做内容比较（下一轮按没有记录走），
+                // 而记错内容的后果是它被永久判成「素材变了」。
+                ToolboxLog.Warn($"序列素材指纹：认不出动作 {code}，这一条不记指纹。");
+                continue;
             }
 
-            fingerprints.Actions[stableId] = new UnrealBridgeSequenceActionFingerprint
+            // 特效帧只在**这一层也真的同步成功**时才算进来：
+            // 特效失败了却把它记成"已经同步过"，下一轮检测就会说无差异，特效再也上不去。
+            var includeEffectFrames = executedEffectLayers.Contains(
+                SequenceEffectSyncService.BuildLayerCode(code));
+            var hashes = ComputeCurrentSourceHashes(character, section, includeEffectFrames);
+            fingerprints.Actions[SequenceFrameIdentity.BuildActionStableId(code)] =
+                new UnrealBridgeSequenceActionFingerprint
             {
                 SourceHashes = hashes,
                 ContentDigest = ComputeDigest(hashes),
@@ -109,13 +125,35 @@ internal static class UnrealBridgeSequenceFingerprintService
             JsonSerializer.Serialize(fingerprints, AppJsonSerializerContext.Default.UnrealBridgeSequenceContentFingerprints));
     }
 
+    /// <summary>动作代号 → 帧段。取不到（读盘失败之类）就返回空表，指纹那一步照常走完。</summary>
+    private static IReadOnlyDictionary<string, SequenceFrameSection> LoadSectionsByActionCode(
+        CharacterCard character)
+    {
+        try
+        {
+            return new SequenceFrameService()
+                .LoadSections(character, new CharacterSkillsService().Load(character))
+                .GroupBy(section => section.Action.Code, StringComparer.OrdinalIgnoreCase)
+                .ToDictionary(group => group.Key, group => group.First(), StringComparer.OrdinalIgnoreCase);
+        }
+        catch (Exception error) when (error is IOException or InvalidOperationException or JsonException)
+        {
+            ToolboxLog.Warn($"序列素材指纹：读取动作帧段失败，这一轮不记内容指纹。角色 {character.Code}", error);
+            return new Dictionary<string, SequenceFrameSection>(StringComparer.OrdinalIgnoreCase);
+        }
+    }
+
     /// <summary>
     /// 这条序列当前用到的源图 → 内容哈希（自己的 + 借来的，都算）。
     /// 借来的图也算：换了来源那张图，借用方同样要重做。
+    ///
+    /// **特效层的图也算进来**：特效随动作同步，而"特效改了"这件事只有内容指纹能体现 ——
+    /// 不算进来的话，只改特效（序列没动）时这个动作会被判成"无差异"，特效就上不去。
     /// </summary>
     public static Dictionary<string, string> ComputeCurrentSourceHashes(
         CharacterCard character,
-        SequenceFrameSection section)
+        SequenceFrameSection section,
+        bool includeEffectFrames = true)
     {
         ArgumentNullException.ThrowIfNull(character);
         ArgumentNullException.ThrowIfNull(section);
@@ -129,6 +167,23 @@ internal static class UnrealBridgeSequenceFingerprintService
             }
 
             hashes[file] = ComputeFileHash(file);
+        }
+
+        if (includeEffectFrames)
+        {
+            foreach (var effectFrame in new SequenceEffectService()
+                .Load(character, section.Action)
+                .Frames
+                .Where(frame => !frame.IsEmpty))
+            {
+                var path = effectFrame.FilePath;
+                if (string.IsNullOrWhiteSpace(path) || hashes.ContainsKey(path) || !File.Exists(path))
+                {
+                    continue;
+                }
+
+                hashes[path] = ComputeFileHash(path);
+            }
         }
 
         return hashes;

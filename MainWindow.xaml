@@ -443,12 +443,18 @@
                         <SymbolIcon Symbol="Important" />
                     </NavigationViewItem.Icon>
                 </NavigationViewItem>
-                <NavigationViewItem x:Name="UnrealProjectSyncNavItem" Content="虚幻同步台" Tag="UnrealProjectSync">
-                    <NavigationViewItem.Icon>
+<NavigationViewItem x:Name="UnrealProjectSyncNavItem" Content="虚幻同步台" Tag="UnrealProjectSync">
+<NavigationViewItem.Icon>
                         <SymbolIcon Symbol="Sync" />
-                    </NavigationViewItem.Icon>
-                </NavigationViewItem>
-            </NavigationView.MenuItems>
+</NavigationViewItem.Icon>
+</NavigationViewItem>
+<NavigationViewItemSeparator />
+<NavigationViewItem x:Name="AtlasToolsNavItem" Content="工具集" Tag="AtlasTools">
+<NavigationViewItem.Icon>
+<FontIcon Glyph="&#xE90F;" />
+</NavigationViewItem.Icon>
+</NavigationViewItem>
+</NavigationView.MenuItems>
             <NavigationView.FooterMenuItems>
                 <NavigationViewItem x:Name="GlobalSettingsNavItem" Content="整体设置" Tag="Settings">
                     <NavigationViewItem.Icon>
@@ -3238,6 +3244,21 @@
                     </Grid>
                 </ScrollViewer>
 
+                <ScrollViewer
+                    x:Name="AtlasToolsPage"
+                    Grid.Row="0"
+                    Background="Transparent"
+                    RightTapped="PageBlankArea_RightTapped"
+                    Visibility="Collapsed"
+                    VerticalScrollBarVisibility="Auto">
+                    <Grid
+                        MaxWidth="1180"
+                        Margin="0,0,12,0"
+                        HorizontalAlignment="Left">
+                        <controls:AtlasToolPanel />
+                    </Grid>
+                </ScrollViewer>
+
                 <Border
                     x:Name="ProductionStatusBorder"
                     Grid.Row="1"
@@ -4722,7 +4743,7 @@
                                 HorizontalScrollMode="Disabled"
                                 VerticalScrollBarVisibility="Auto"
                                 VerticalScrollMode="Auto">
-                                <Grid>
+                                <StackPanel Spacing="16">
                                     <StackPanel x:Name="SequenceSingleFramePanel" Spacing="12">
                                         <StackPanel Spacing="3">
                                             <TextBlock Style="{StaticResource SectionTitleStyle}" Text="当前帧" />
@@ -4828,8 +4849,8 @@
 <Button x:Name="DeleteSelectedSequenceFramesButton" HorizontalAlignment="Stretch" Command="{Binding SequenceFrames.DeleteSelectedFramesCommand}" Content="删除所选帧" Style="{StaticResource PrimaryToolButtonStyle}" />
                                     </StackPanel>
 
-                                    <!-- 特效层：跟着**动作**走（不是跟着某一帧），所以放在两个面板之外。
-                                         帧率是动作的 2 倍，和「导出底板」一一对应；空帧直接留白。 -->
+                                    <!-- 特效层：跟着**动作**走（不是跟着某一帧），所以放在两个面板之外；帧率是动作的 2 倍，
+                                         和「导出底板」一一对应。它常驻，所以三个面板必须纵向堆叠——塞进 Grid 会互相压字。 -->
                                     <StackPanel x:Name="SequenceEffectPanel" Spacing="10">
                                         <StackPanel Spacing="3">
                                             <TextBlock Style="{StaticResource SectionTitleStyle}" Text="特效层" />
@@ -4869,7 +4890,7 @@
                                             Content="清空特效层"
                                             Visibility="{Binding SequenceFrames.HasEffectLayer, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}" />
                                     </StackPanel>
-                                </Grid>
+                                </StackPanel>
                             </ScrollViewer>
                     </Border>
 

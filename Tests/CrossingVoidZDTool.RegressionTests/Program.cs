@@ -106,6 +106,12 @@ var tests = new (string Name, Action Run)[]
     ("底板导出只留本次结果并写对照表", BasePlateExportWritesFramesAndManifest),
     ("特效按文件名编号对号入座并保留空帧", SequenceEffectImportMapsFramesByNumber),
     ("特效层可读可清且不碰动作帧", SequenceEffectLayerLoadsAndClears),
+    ("特效层按动作帧率的2倍展开并保留空帧", SequenceEffectSyncLayoutDoublesFpsAndKeepsBlankFrames),
+    ("同步计划带上特效层并携带图集矩形", SequencePlanCarriesEffectLayerAction),
+    ("特效帧算进动作内容指纹且失败时不记", EffectFramesJoinActionFingerprint),
+    ("工具集清单里有创建与拆分图集", AtlasToolCatalogListsBuiltInTools),
+    ("拆分图集能把裁剪过的格子贴回原画布", AtlasExtractRestoresTrimmedSprites),
+    ("创建图集会生成清单与命令行参数", AtlasFolderPackBuildsManifestAndArguments),
     ("虚幻发布快照拒绝草稿角色", UnrealBridgeToolboxSnapshotRejectsDraftCharacter),
     ("虚幻工具箱快照覆盖角色六类模块", UnrealBridgeToolboxSnapshotCoversAllModules),
     ("蓝图置入目标值取自工具箱数据", BlueprintSetupRequestComesFromToolboxData),
@@ -155,6 +161,7 @@ var tests = new (string Name, Action Run)[]
     ("会话缓存读回后仍按大小写不敏感查表", SessionCacheKeepsCaseInsensitiveLookupAfterRoundTrip),
     ("语音与序列帧不再互相依赖", VoiceAndSequenceServicesDoNotDependOnEachOther),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
+    ("第五步序列同步自检", SequenceSyncSelfCheckPasses),
     ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
     ("进入某一步先落步再检测", EnteringStepNavigatesBeforeDetecting),
@@ -4952,6 +4959,283 @@ static void BasePlateExportWritesFramesAndManifest()
     }
 }
 
+/// <summary>工具集清单：现在有哪两个工具、卡片文案齐不齐。</summary>
+static void AtlasToolCatalogListsBuiltInTools()
+{
+    var tools = AtlasToolCatalog.Build();
+    AssertEqual(2, tools.Count);
+    AssertEqual(AtlasToolKind.Create, tools[0].Kind);
+    AssertEqual("创建图集", tools[0].Title);
+    AssertEqual(AtlasToolKind.Extract, tools[1].Kind);
+    AssertEqual("拆分图集", tools[1].Title);
+    AssertEqual(true, tools.All(tool => !string.IsNullOrWhiteSpace(tool.Description)));
+    AssertEqual(true, tools.All(tool => !string.IsNullOrWhiteSpace(tool.Glyph)));
+}
+
+/// <summary>
+/// 拆分图集的关键性质：打包时**裁掉了透明边**，所以拆回来必须能按
+/// spriteSourceSize / sourceSize 贴回原画布 —— 否则"改一张再打回去"就对不上位置了。
+/// 这条用例就是造一份最小的图集 + 坐标文件，验证贴回去逐像素等于原图。
+/// </summary>
+static void AtlasExtractRestoresTrimmedSprites()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        // 原图：40×30 的画布，只有 (12,9) 开始的一块 10×6 是红的，其余透明。
+        var originalPath = Path.Combine(root, "original.png");
+        using (var canvas = new Bitmap(40, 30, PixelFormat.Format32bppArgb))
+        {
+            using (var graphics = Graphics.FromImage(canvas))
+            {
+                graphics.Clear(Color.Transparent);
+                graphics.FillRectangle(Brushes.Red, 12, 9, 10, 6);
+            }
+
+            canvas.Save(originalPath, ImageFormat.Png);
+        }
+
+        // 图集：只装被裁过的那一块（10×6），坐标文件记着它原来在画布上的位置。
+        var sheetPath = Path.Combine(root, "Sheet.png");
+        using (var sheet = new Bitmap(10, 6, PixelFormat.Format32bppArgb))
+        {
+            using (var graphics = Graphics.FromImage(sheet))
+            {
+                graphics.Clear(Color.Transparent);
+                graphics.FillRectangle(Brushes.Red, 0, 0, 10, 6);
+            }
+
+            sheet.Save(sheetPath, ImageFormat.Png);
+        }
+
+        var dataPath = Path.Combine(root, "Sheet.json");
+        File.WriteAllText(dataPath, """
+{
+  "frames": {
+    "Fx_Frame00_Sprite": {
+      "frame": { "x": 0, "y": 0, "w": 10, "h": 6 },
+      "rotated": false,
+      "trimmed": true,
+      "spriteSourceSize": { "x": 12, "y": 9, "w": 10, "h": 6 },
+      "sourceSize": { "w": 40, "h": 30 }
+    }
+  }
+}
+""", Encoding.UTF8);
+
+        var service = new AtlasExtractService();
+        AssertEqual(dataPath, AtlasExtractService.ResolveDataFilePath(sheetPath));
+
+        // 贴回原画布：拆出来的应该和原图逐像素一致。
+        var canvasOutput = Path.Combine(root, "split-canvas");
+        var canvasResult = service.Extract(new AtlasExtractRequest(
+            sheetPath, dataPath, canvasOutput, PasteBackToCanvas: true));
+        AssertEqual(1, canvasResult.Frames.Count);
+        AssertEqual(1, canvasResult.PaddedToCanvasCount);
+        AssertEqual(true, canvasResult.ReportPath is not null && File.Exists(canvasResult.ReportPath));
+        var restoredPath = canvasResult.Frames[0].OutputFilePath;
+        AssertEqual("Fx_Frame00_Sprite.png", Path.GetFileName(restoredPath));
+        using (var restored = new Bitmap(restoredPath))
+        using (var original = new Bitmap(originalPath))
+        {
+            AssertEqual(original.Width, restored.Width);
+            AssertEqual(original.Height, restored.Height);
+            var same = true;
+            for (var y = 0; y < original.Height && same; y++)
+            {
+                for (var x = 0; x < original.Width; x++)
+                {
+                    if (original.GetPixel(x, y).ToArgb() != restored.GetPixel(x, y).ToArgb())
+                    {
+                        same = false;
+                        break;
+                    }
+                }
+            }
+
+            AssertEqual(true, same);
+        }
+
+        // 不贴回：就是那块裁好的图（10×6），给"只想单独改这一张"用。
+        var trimmedOutput = Path.Combine(root, "split-trimmed");
+        var trimmedResult = service.Extract(new AtlasExtractRequest(
+            sheetPath, dataPath, trimmedOutput, PasteBackToCanvas: false));
+        AssertEqual(0, trimmedResult.PaddedToCanvasCount);
+        using (var trimmed = new Bitmap(trimmedResult.Frames[0].OutputFilePath))
+        {
+            AssertEqual(10, trimmed.Width);
+            AssertEqual(6, trimmed.Height);
+        }
+
+        // 再拆一次：上一次的结果要被替换掉（报告里记着写过哪些），不能留旧文件。
+        var again = service.Extract(new AtlasExtractRequest(
+            sheetPath, dataPath, canvasOutput, PasteBackToCanvas: true));
+        AssertEqual(1, again.Frames.Count);
+        AssertEqual(1, Directory.GetFiles(canvasOutput, "*.png").Length);
+
+        // 没有坐标文件 → 明确报错（"只有一张 PNG 拼不回去"是用户最容易踩的）。
+        var missingDataThrown = false;
+        try
+        {
+            _ = service.Extract(new AtlasExtractRequest(
+                sheetPath, Path.Combine(root, "nope.json"), canvasOutput, PasteBackToCanvas: true));
+        }
+        catch (FileNotFoundException)
+        {
+            missingDataThrown = true;
+        }
+
+        AssertEqual(true, missingDataThrown);
+
+        // 旋转过的格子暂不支持：宁可报错，也不拆出错位的图。
+        var rotatedPath = Path.Combine(root, "Rotated.json");
+        File.WriteAllText(rotatedPath, """
+{
+  "frames": [
+    {
+      "filename": "R00",
+      "frame": { "x": 0, "y": 0, "w": 6, "h": 10 },
+      "rotated": true,
+      "trimmed": false,
+      "spriteSourceSize": { "x": 0, "y": 0, "w": 10, "h": 6 },
+      "sourceSize": { "w": 10, "h": 6 }
+    }
+  ]
+}
+""", Encoding.UTF8);
+        var rotatedThrown = false;
+        try
+        {
+            _ = service.Extract(new AtlasExtractRequest(
+                sheetPath, rotatedPath, canvasOutput, PasteBackToCanvas: false));
+        }
+        catch (InvalidOperationException)
+        {
+            rotatedThrown = true;
+        }
+
+        AssertEqual(true, rotatedThrown);
+
+        // 另一种坐标格式（数组式，`.paper2dsprites` 就是这种）：名字取 filename，同样能拆。
+        var arrayDataPath = Path.Combine(root, "Array.json");
+        File.WriteAllText(arrayDataPath, """
+{
+  "frames": [
+    {
+      "filename": "FromArray_00",
+      "frame": { "x": 0, "y": 0, "w": 10, "h": 6 },
+      "rotated": false,
+      "trimmed": true,
+      "spriteSourceSize": { "x": 12, "y": 9, "w": 10, "h": 6 },
+      "sourceSize": { "w": 40, "h": 30 }
+    }
+  ]
+}
+""", Encoding.UTF8);
+        var arrayResult = service.Extract(new AtlasExtractRequest(
+            sheetPath, arrayDataPath, Path.Combine(root, "split-array"), PasteBackToCanvas: true));
+        AssertEqual("FromArray_00.png", Path.GetFileName(arrayResult.Frames[0].OutputFilePath));
+        using (var arrayRestored = new Bitmap(arrayResult.Frames[0].OutputFilePath))
+        {
+            AssertEqual(40, arrayRestored.Width);
+            AssertEqual(30, arrayRestored.Height);
+        }
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>
+/// 创建图集的清单与命令行：只认 PNG、序号给死、模式/间距/裁剪都要传下去，
+/// 而且**图集名默认取源目录名**（自己导入时最省事）。
+/// </summary>
+static void AtlasFolderPackBuildsManifestAndArguments()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var sourceFolder = Path.Combine(root, "UiTexture");
+        Directory.CreateDirectory(sourceFolder);
+        WriteSolidImage(Path.Combine(sourceFolder, "a.png"), Color.Red, 8, 8);
+        WriteSolidImage(Path.Combine(sourceFolder, "b.png"), Color.Blue, 8, 8);
+        // 非 PNG 不该被打进去。
+        File.WriteAllText(Path.Combine(sourceFolder, "note.txt"), "x");
+
+        var images = AtlasFolderPackService.EnumerateSourceImages(sourceFolder);
+        AssertEqual(2, images.Count);
+
+        var packRequest = new AtlasCreateRequest(
+            sourceFolder,
+            Path.Combine(root, "out"),
+            AtlasName: string.Empty,
+            Mode: AtlasFolderPackService.PackMode,
+            Columns: 0,
+            Padding: 2,
+            Trim: true,
+            MaxSize: 2048);
+        AssertEqual("UiTexture", AtlasFolderPackService.ResolveAtlasName(packRequest));
+
+        var manifest = AtlasFolderPackService.BuildManifestJson(packRequest, images);
+        AssertEqual(true, manifest.Contains("\"atlas\": \"UiTexture\"", StringComparison.Ordinal));
+        AssertEqual(true, manifest.Contains("\"spritePrefix\": \"UiTexture\"", StringComparison.Ordinal));
+        AssertEqual(true, manifest.Contains("\"mode\": \"pack\"", StringComparison.Ordinal));
+        AssertEqual(true, manifest.Contains("\"trim\": true", StringComparison.Ordinal));
+        AssertEqual(true, manifest.Contains("\"maxSize\": 2048", StringComparison.Ordinal));
+        AssertEqual(true, manifest.Contains("\"index\": 1", StringComparison.Ordinal));
+        AssertEqual(true, manifest.Contains("\"index\": 2", StringComparison.Ordinal));
+
+        var arguments = AtlasFolderPackService.BuildArguments(
+            @"C:\tools\ue_atlas.py",
+            Path.Combine(root, "_atlas_manifest.json"),
+            Path.Combine(root, "_atlas_report.json"),
+            packRequest);
+        AssertEqual(true, arguments.Contains("--manifest", StringComparison.Ordinal));
+        AssertEqual(true, arguments.Contains("--mode pack", StringComparison.Ordinal));
+        AssertEqual(true, arguments.Contains("--name UiTexture", StringComparison.Ordinal));
+        AssertEqual(true, arguments.Contains("--trim", StringComparison.Ordinal));
+        AssertEqual(true, arguments.Contains("--max-size 2048", StringComparison.Ordinal));
+        AssertEqual(false, arguments.Contains("--cols", StringComparison.Ordinal));
+
+        var gridRequest = packRequest with
+        {
+            AtlasName = "UiGrid",
+            Mode = AtlasFolderPackService.GridMode,
+            Columns = 4,
+            Trim = false
+        };
+        var gridArguments = AtlasFolderPackService.BuildArguments(
+            @"C:\tools\ue_atlas.py",
+            Path.Combine(root, "_atlas_manifest.json"),
+            Path.Combine(root, "_atlas_report.json"),
+            gridRequest);
+        AssertEqual(true, gridArguments.Contains("--mode grid", StringComparison.Ordinal));
+        AssertEqual(true, gridArguments.Contains("--cols 4", StringComparison.Ordinal));
+        AssertEqual(false, gridArguments.Contains("--max-size", StringComparison.Ordinal));
+        AssertEqual(false, gridArguments.Contains("--trim", StringComparison.Ordinal));
+        var gridManifest = AtlasFolderPackService.BuildManifestJson(gridRequest, images);
+        AssertEqual(true, gridManifest.Contains("\"cols\": 4", StringComparison.Ordinal));
+
+        // 没有 PNG → 明确报错，不要生成一份空清单。
+        var emptyThrown = false;
+        try
+        {
+            _ = AtlasFolderPackService.BuildManifestJson(packRequest, []);
+        }
+        catch (InvalidOperationException)
+        {
+            emptyThrown = true;
+        }
+
+        AssertEqual(true, emptyThrown);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static SequenceFrameItem CreateBasePlateTestFrame(
     string path,
     int index,
@@ -5076,6 +5360,314 @@ static void SequenceEffectLayerLoadsAndClears()
     {
         Directory.Delete(root, recursive: true);
     }
+}
+
+/// <summary>写一个动作的序列帧清单：每格占几格由调用方给，fps 也由调用方给。</summary>
+static SequenceFrameSection WriteSequenceFrames(
+    CharacterCard character,
+    string actionCode,
+    int fps,
+    params int[] durations)
+{
+    var action = SequenceFrameService.BuildActions(new CharacterSkillsData())
+        .First(item => string.Equals(item.Code, actionCode, StringComparison.OrdinalIgnoreCase));
+    var framesFolder = SequenceActionFolderLayout.GetFramesFolderPath(character, action);
+    Directory.CreateDirectory(framesFolder);
+    var manifest = SequenceManifestStore.Create(action);
+    manifest.Fps = fps;
+    for (var index = 0; index < durations.Length; index++)
+    {
+        var path = Path.Combine(framesFolder, $"{index + 1} frame.png");
+        WriteSolidImage(
+            path, Color.FromArgb(10 + index * 20, 40, 60),
+            SequenceFrameService.RequiredWidth, SequenceFrameService.RequiredHeight);
+        manifest.Frames.Add(new SequenceFrameManifestEntry
+        {
+            RelativePath = SequenceActionFolderLayout.NormalizeRelativePath(
+                Path.GetRelativePath(
+                    SequenceActionFolderLayout.GetActionFolderPath(character, action), path)),
+            DurationFrames = durations[index],
+        });
+    }
+
+    SequenceManifestStore.Save(character, action, manifest);
+    return new SequenceFrameService()
+        .LoadSections(character, new CharacterSkillsService().Load(character))
+        .Single(item => string.Equals(item.Action.Code, actionCode, StringComparison.OrdinalIgnoreCase));
+}
+
+/// <summary>按文件名里最后那段数字导几张特效帧（编号就是对号入座的依据）。</summary>
+static SequenceEffectLayer ImportEffectFrames(
+    CharacterCard character,
+    SequenceFrameAction action,
+    string sourceRoot,
+    int expectedFrameCount,
+    params int[] ordinals)
+{
+    Directory.CreateDirectory(sourceRoot);
+    var files = new List<string>();
+    foreach (var ordinal in ordinals)
+    {
+        var path = Path.Combine(sourceRoot, $"drawn_{ordinal:0000}.png");
+        WriteSolidImage(path, Color.FromArgb(ordinal * 7 % 255, 30, 200), 40, 30);
+        files.Add(path);
+    }
+
+    _ = new SequenceEffectService().Import(character, action, files, expectedFrameCount);
+    return new SequenceEffectService().Load(character, action, expectedFrameCount: expectedFrameCount);
+}
+
+/// <summary>
+/// 特效层同步出去长什么样：**和角色序列同构**，唯一区别是帧率翻倍
+/// （底板导出也是这个倍数，画完导回来才对得上号）。
+///
+/// 张数不是"有几张图"，而是"动作总格数 × 倍数"：没画的位置是空帧，
+/// 在 Flipbook 里留成空关键帧，时间照占 —— 少了它们整条动画的节奏都会变。
+/// </summary>
+static void SequenceEffectSyncLayoutDoublesFpsAndKeepsBlankFrames()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        // 两格、第二格占 2 格 → 总 3 格；fps=6 → 特效层 12fps、输出 6 帧。
+        var section = WriteSequenceFrames(character, "Click", fps: 6, durations: [1, 2]);
+        AssertEqual(3, section.Frames.Sum(frame => frame.DurationFrames));
+
+        // 只画了第 1、5 张（编号就是导出底板上的编号）。
+        var layer = ImportEffectFrames(character, section.Action, Path.Combine(root, "drawn"), 6, 1, 5);
+        AssertEqual(2, layer.Frames.Count);
+
+        var definition = SequenceActionCatalog.Resolve("Click", out var formIndex);
+        var layout = SequenceEffectSyncService.TryBuildLayout(
+            character, section, definition, formIndex, layer, actionFps: 6);
+        AssertEqual(true, layout is not null);
+        AssertEqual("Click_Effect", layout!.LayerCode);
+        AssertEqual("Misaka_Click_Effect", layout.AtlasName);
+        AssertEqual("Click_Effect_Flipbook", layout.FlipbookAssetName);
+        AssertEqual("/Game/GameActor2D/Misaka/Material/Click", layout.MaterialFolderPackagePath);
+        // 帧率是**动作的 2 倍**，不是动作自己的帧率。
+        AssertEqual(12d, layout.OutputFps);
+        AssertEqual(6, layout.Frames.Count);
+        AssertSequence(
+            [true, false, false, false, true, false],
+            layout.Frames.Select(frame => !frame.IsEmpty).ToArray());
+        // 精灵按**输出帧的位置**编号（Frame00、Frame04），不是按素材顺序。
+        AssertSequence(
+            ["Click_Effect_Frame00_Sprite", "Click_Effect_Frame04_Sprite"],
+            layout.FilledFrames.Select(frame => frame.SpriteAssetName).ToArray());
+        // 这一层的规范资产：Flipbook + 图集贴图 + 两只精灵。清理只认这份名单。
+        AssertEqual(4, layout.CanonicalAssetObjectPaths.Count);
+        // 必须是**对象路径**（带 `.资产名`、大小写照写），不能是归一化过的小写包路径：
+        // 那份名单原样交给 Python 当清理范围，而清理是拿"刚重建出来的资产路径"去比的，
+        // 大小写对不上就会把自己刚建的那批删掉。
+        AssertEqual(
+            true,
+            layout.CanonicalAssetObjectPaths.Contains(
+                "/Game/GameActor2D/Misaka/Material/Click/Click_Effect_Flipbook.Click_Effect_Flipbook"));
+        AssertEqual(
+            true,
+            layout.CanonicalAssetObjectPaths.Contains(
+                "/Game/GameActor2D/Misaka/Material/Click/Misaka_Click_Effect.Misaka_Click_Effect"));
+        AssertEqual(
+            true,
+            layout.CanonicalAssetObjectPaths.Contains(
+                "/Game/GameActor2D/Misaka/Material/Click/Click_Effect_Frame00_Sprite.Click_Effect_Frame00_Sprite"));
+
+        // 还没画特效：这一层不参与同步（不该在工程里留一个空 Flipbook）。
+        AssertEqual(true, SequenceEffectSyncService.TryBuildLayout(
+            character, section, definition, formIndex,
+            SequenceEffectLayer.Empty("Effect", "Click_Effect", 2), actionFps: 6) is null);
+        // 有文件但全在输出范围外（漂移残留）：整层都是空帧，同样不参与。
+        var drifted = new SequenceEffectLayer(
+            "Effect", "Click_Effect", 2, 6,
+            [new SequenceEffectFrame(99, "drawn_0099.png", Path.Combine(root, "x.png"), IsEmpty: false)],
+            null);
+        AssertEqual(true, SequenceEffectSyncService.TryBuildLayout(
+            character, section, definition, formIndex, drifted, actionFps: 6) is null);
+
+        // 差异树里没有特效层的行，所以"这个动作目录下多出来的资产"要按命名认出来，
+        // 否则刚同步过去的特效会被列成待删除，一勾就删掉。
+        AssertEqual(true, SequenceEffectSyncService.IsEffectLayerAssetName("Click_Effect_Frame00_Sprite"));
+        AssertEqual(true, SequenceEffectSyncService.IsEffectLayerAssetName("Click_Effect_Flipbook"));
+        AssertEqual(true, SequenceEffectSyncService.IsEffectLayerAssetName("Misaka_Click_Effect"));
+        AssertEqual(false, SequenceEffectSyncService.IsEffectLayerAssetName("Click_Frame0_Sprite"));
+        AssertEqual(false, SequenceEffectSyncService.IsEffectLayerAssetName("Click_Flipbook"));
+        AssertEqual(false, SequenceEffectSyncService.IsEffectLayerAssetName("Misaka_Click"));
+        AssertEqual(false, SequenceEffectSyncService.IsEffectLayerAssetName(""));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>
+/// 计划里的特效层那一条：动作被同步时它一起走，但**不建序列、不写 AnimMaps、
+/// 不碰角色蓝图** —— 那三样属于角色序列。
+///
+/// 图集矩形必须一起带上：精灵只有知道从图集哪儿取图、这块内容原本在画布哪儿，
+/// 才能把裁过透明边的特效贴回正确位置。少了它在虚幻侧会当场报
+/// "atlas rect ... is empty"（这条已经踩过一次）。
+/// </summary>
+static void SequencePlanCarriesEffectLayerAction()
+{
+    var (character, root) = CreateSequenceCharacterWithFrames("Click", 2);
+    try
+    {
+        var action = SequenceFrameService.BuildActions(new CharacterSkillsData())
+            .First(item => string.Equals(item.Code, "Click", StringComparison.OrdinalIgnoreCase));
+        // 两格各占 1 格 → 输出 4 帧；特效画在第 1、3 帧。
+        _ = ImportEffectFrames(character, action, Path.Combine(root, "drawn"), 4, 1, 3);
+
+        var change = CreateSequenceDeleteChange("Click", "/Game/GameActor2D/Misaka/Material/Click/Old.Old");
+        var plan = new UnrealBridgeSequencePublishService().BuildSequenceSyncPlan(
+            character,
+            @"C:\Unreal\CrossingVoid.uproject",
+            [change],
+            WithEffectAtlas(BuildTestAtlas("Click", 2), "Click_Effect", 1, 2));
+
+        AssertSequence(["Click", "Click_Effect"], plan.Actions.Select(item => item.ActionCode).ToArray());
+        AssertEqual(false, plan.Actions[0].IsEffectLayer);
+        var effect = plan.Actions[1];
+        AssertEqual(true, effect.IsEffectLayer);
+        AssertEqual("Click", effect.BaseActionCode);
+        // 序列 / AnimMaps / 蓝图三样都不属于特效层。
+        AssertEqual("", effect.TargetSequencePath);
+        AssertEqual("", effect.AnimMapsEntryName);
+        AssertEqual("", effect.BlueprintProperty);
+        AssertEqual("", effect.SequenceAssetName);
+        AssertEqual("/Game/GameActor2D/Misaka/Material/Click", effect.TargetMaterialFolder);
+        AssertEqual("Click_Effect_Flipbook", effect.FlipbookAssetName);
+        // 默认 12fps 的动作 → 特效层 24fps。
+        AssertEqual(24, effect.Fps);
+        AssertEqual(4, effect.Frames.Count);
+        AssertSequence(
+            [true, false, true, false],
+            effect.Frames.Select(frame => !frame.IsBlank).ToArray());
+        // 空白帧指向图集第 0 格（它在图集里没有图）。
+        AssertSequence([1, 0, 2, 0], effect.Frames.Select(frame => frame.SourceImageIndex).ToArray());
+        AssertEqual(2, effect.SourceImages.Count);
+        AssertEqual(true, effect.SourceImages.All(image => image.CreateSprite));
+        AssertEqual(true, effect.SourceImages.All(image => image.AtlasName == "Misaka_Click_Effect"));
+        AssertEqual(true, effect.SourceImages.All(
+            image => image.AtlasMaterialFolder == "/Game/GameActor2D/Misaka/Material/Click"));
+        AssertEqual(true, effect.SourceImages.All(image => image.Width > 0 && image.Height > 0));
+        AssertEqual(true, effect.SourceImages.All(image => image.SourceImageWidth > 0));
+        AssertSequence(
+            ["Click_Effect_Frame00_Sprite", "Click_Effect_Frame02_Sprite"],
+            effect.SourceImages.Select(image => image.SpriteAssetName).ToArray());
+        // 待删名单就是这一层自己的规范资产（Flipbook + 图集 + 两只精灵），
+        // 不会顺手把角色序列的东西扫进去。
+        AssertEqual(4, effect.StaleAssetObjectPaths.Count);
+        AssertEqual(true, effect.HasStaleAssetSelection);
+
+        // 没有打特效图集时**不加**这一条：宁可不做，也不拿半份计划去同步。
+        var withoutEffectAtlas = new UnrealBridgeSequencePublishService().BuildSequenceSyncPlan(
+            character, @"C:\Unreal\CrossingVoid.uproject", [change], BuildTestAtlas("Click", 2));
+        AssertEqual(1, withoutEffectAtlas.Actions.Count);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>
+/// 内容指纹必须**两侧同源**。
+///
+/// 记的那一侧（同步成功后）与读的那一侧（下次检测）算的如果不是同一批文件，
+/// 每个有特效的动作都会长期显示「素材变了」，用户重同步多少次都没用 ——
+/// 这条以前在语音素材上踩过，所以这里盯住。
+///
+/// 反过来，特效层**没同步成功**时不许把它的图记进去：记了下一轮就会说
+/// 「无差异」，特效永远上不去。
+/// </summary>
+static void EffectFramesJoinActionFingerprint()
+{
+    var (character, root) = CreateSequenceCharacterWithFrames("Click", 2);
+    try
+    {
+        var action = SequenceFrameService.BuildActions(new CharacterSkillsData())
+            .First(item => string.Equals(item.Code, "Click", StringComparison.OrdinalIgnoreCase));
+        _ = ImportEffectFrames(character, action, Path.Combine(root, "drawn"), 4, 1, 3);
+
+        var change = CreateSequenceDeleteChange("Click", "/Game/GameActor2D/Misaka/Material/Click/Old.Old");
+        var plan = new UnrealBridgeSequencePublishService().BuildSequenceSyncPlan(
+            character,
+            @"C:\Unreal\CrossingVoid.uproject",
+            [change],
+            WithEffectAtlas(BuildTestAtlas("Click", 2), "Click_Effect", 1, 2));
+        var stableId = SequenceFrameIdentity.BuildActionStableId("Click");
+
+        UnrealBridgeSequenceFingerprintService.Save(character, plan.Actions, DateTimeOffset.Now);
+        var recorded = UnrealBridgeSequenceFingerprintService.Load(character);
+        AssertEqual(true, recorded is not null);
+        // 特效层并进它动作那一条，不单独记：工具箱侧按动作代号算摘要，单记的没人会比。
+        AssertEqual(true, recorded!.Actions.ContainsKey(stableId));
+        AssertEqual(false, recorded.Actions.ContainsKey(
+            SequenceFrameIdentity.BuildActionStableId("Click_Effect")));
+        // 2 张角色帧 + 2 张特效帧，都算进这个动作。
+        AssertEqual(4, recorded.Actions[stableId].SourceHashes.Count);
+
+        var section = new SequenceFrameService()
+            .LoadSections(character, new CharacterSkillsService().Load(character))
+            .Single(item => string.Equals(item.Action.Code, "Click", StringComparison.OrdinalIgnoreCase));
+        var current = UnrealBridgeSequenceFingerprintService.ComputeDigest(
+            UnrealBridgeSequenceFingerprintService.ComputeCurrentSourceHashes(character, section));
+        AssertEqual(current, recorded.Actions[stableId].ContentDigest);
+
+        // 只同步了角色序列（特效层这一步没成）：不能把特效算成"已经同步过"。
+        UnrealBridgeSequenceFingerprintService.Save(character, [plan.Actions[0]], DateTimeOffset.Now);
+        var partial = UnrealBridgeSequenceFingerprintService.Load(character);
+        AssertEqual(2, partial!.Actions[stableId].SourceHashes.Count);
+        AssertEqual(false, partial.Actions[stableId].ContentDigest == current);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>
+/// 造一份「特效层也已经打好图集」的输入。键是 <c>&lt;层代号&gt;|&lt;形态&gt;</c>，
+/// 和 <see cref="UnrealBridgeSequencePublishService.AtlasKey"/> 同一口径。
+/// </summary>
+static IReadOnlyDictionary<string, UnrealBridgeSequenceAtlasInput> WithEffectAtlas(
+    IReadOnlyDictionary<string, UnrealBridgeSequenceAtlasInput> atlases,
+    string layerCode,
+    int formIndex,
+    int sourceImageCount)
+{
+    var result = new Dictionary<string, UnrealBridgeSequenceAtlasInput>(
+        atlases, StringComparer.OrdinalIgnoreCase);
+    var variantCode = layerCode;
+    var frames = new Dictionary<int, AtlasSequenceFrame>();
+    for (var ordinal = 0; ordinal < sourceImageCount; ordinal++)
+    {
+        frames[ordinal + 1] = new AtlasSequenceFrame
+        {
+            Index = ordinal + 1,
+            Name = SequenceEffectSyncService.BuildSpriteName(variantCode, ordinal + 1),
+            // 故意带裁剪信息：贴图集的时候裁过透明边，精灵必须知道贴回哪儿。
+            Frame = new AtlasRect { X = ordinal * 8, Y = 0, W = 8, H = 8 },
+            Trimmed = true,
+            SpriteSourceSize = new AtlasRect { X = 2, Y = 3, W = 8, H = 8 },
+            SourceSize = new AtlasReportSize { W = 12, H = 14 },
+        };
+    }
+
+    result[UnrealBridgeSequencePublishService.AtlasKey(layerCode, formIndex)] =
+        new UnrealBridgeSequenceAtlasInput
+        {
+            AtlasName = $"Misaka_{layerCode}",
+            ImagePath = $@"C:\temp\Misaka_{layerCode}.png",
+            Width = Math.Max(8, sourceImageCount * 8),
+            Height = 8,
+            FramesByOrdinal = frames,
+        };
+    return result;
 }
 
 static void UnrealBridgeToolboxSnapshotRejectsDraftCharacter()
@@ -5460,37 +6052,7 @@ static void BlueprintSetupSelfCheckPasses()
     var script = Path.Combine("Tools", "UnrealBridge", "tests", "check_blueprint_setup.py");
     AssertEqual(true, File.Exists(script));
 
-    var output = new StringBuilder();
-    var exitCode = -1;
-    var ran = false;
-    foreach (var exe in new[] { "python", "python3", "py" })
-    {
-        try
-        {
-            using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
-            {
-                FileName = exe,
-                Arguments = "\"" + script + "\"",
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                StandardOutputEncoding = Encoding.UTF8,
-                StandardErrorEncoding = Encoding.UTF8,
-            });
-            if (process is null) continue;
-            output.Append(process.StandardOutput.ReadToEnd());
-            output.Append(process.StandardError.ReadToEnd());
-            process.WaitForExit(60_000);
-            exitCode = process.ExitCode;
-            ran = true;
-            break;
-        }
-        catch (System.ComponentModel.Win32Exception)
-        {
-            // 这个名字没装，换下一个
-        }
-    }
-
+    var (ran, exitCode, output) = TryRunPythonScript(script);
     if (ran)
     {
         if (exitCode != 0)
@@ -5509,6 +6071,84 @@ static void BlueprintSetupSelfCheckPasses()
     AssertEqual(true, source.Contains("def _missing_object_targets", StringComparison.Ordinal));
     AssertEqual(true, source.Contains("def _reconcile_applied", StringComparison.Ordinal));
 }
+
+/// <summary>
+/// 第五步的自检脚本也要跟着回归一起跑。
+///
+/// 为什么单列一条：它以前**没人跑**。self-check 里钉的是「动作异常不再拖垮整批」
+/// 这轮改动的契约，而脚本改了、它没跟着改，于是一红就是好几周，谁都不知道。
+/// 契约住在 Python 里（要在虚幻进程内跑），这里就是它唯一的看门人。
+/// </summary>
+static void SequenceSyncSelfCheckPasses()
+{
+    var script = Path.Combine("Tools", "UnrealBridge", "tests", "check_sequence_sync.py");
+    AssertEqual(true, File.Exists(script));
+
+    var (ran, exitCode, output) = TryRunPythonScript(script);
+    if (ran)
+    {
+        if (exitCode != 0)
+        {
+            throw new InvalidOperationException("第五步序列同步自检未通过：\n" + output);
+        }
+
+        return;
+    }
+
+    // 机器上没有 Python 时不装作过了：退而守住源码层面的不变量，
+    // 免得又退回「动作一炸整批就停」或者「伪条目被算成一个成功动作」。
+    var source = ReadSequenceSyncScriptSource();
+    AssertEqual(true, source.Contains("ITEM_KIND_DIAGNOSTIC", StringComparison.Ordinal));
+    AssertEqual(true, source.Contains("def _summarize_items", StringComparison.Ordinal));
+    AssertEqual(true, source.Contains("def _sync_effect_layer", StringComparison.Ordinal));
+}
+
+/// <summary>
+/// 跑一个自带 unreal 桩的 Python 自检脚本。
+/// 返回「有没有跑起来」——没装 Python 时 ran=false，由调用方决定退路。
+/// </summary>
+static (bool Ran, int ExitCode, string Output) TryRunPythonScript(string scriptPath)
+{
+    var output = new StringBuilder();
+    var exitCode = -1;
+    foreach (var exe in new[] { "python", "python3", "py" })
+    {
+        try
+        {
+            using var process = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+            {
+                FileName = exe,
+                Arguments = "\"" + scriptPath + "\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8,
+            });
+            if (process is null) continue;
+            output.Append(process.StandardOutput.ReadToEnd());
+            output.Append(process.StandardError.ReadToEnd());
+            process.WaitForExit(60_000);
+            exitCode = process.ExitCode;
+            return (true, exitCode, output.ToString());
+        }
+        catch (System.ComponentModel.Win32Exception)
+        {
+            // 这个名字没装，换下一个
+        }
+    }
+
+    return (false, exitCode, output.ToString());
+}
+
+/// <summary>
+/// 第五步桥接脚本的源码。跨语言契约（C# 写的字段名 Python 读得到、脚本里必须有哪些护栏）
+/// 只能读源码来盯，所以**只留这一个读取口**：以前散在九处，每加一条契约就多读一次文件。
+/// </summary>
+static string ReadSequenceSyncScriptSource() =>
+    File.ReadAllText(
+        Path.Combine(Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"),
+        Encoding.UTF8);
 
 static void ReadOnlySequenceCanBeViewedButNotEdited()
 {
@@ -5800,12 +6440,14 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // 这是"能长久扩展"的做法本身换来的，不是文件在无意义地长。
     // 5538 -> 5588：特效层这条功能自身（编辑器右侧「特效层」区 + 两处预览改成
     // "角色层 + 特效层"叠放，两层共用一个变换），也是实打实加功能。
+    // 5588 -> 5609：左侧新增「工具集」分区（一个导航项 + 一个页面壳，页面本体在
+    // Controls/AtlasToolPanel.xaml 里，所以这里只多了 21 行）。同样是加功能。
     //
     // 注意：「把十二个遮罩层抽成 Controls/*.xaml」这条**已经被否掉了**：它们的
     // 手势语义本来就各不相同，收敛会悄悄改掉行为，而那些手势一条 UI 测试都没有。
     // 现在只保留护栏（每个全屏遮罩层至少有一种关法）。真要砍 XAML，
     // 先给这些手势补上测试覆盖，再谈收敛。
-    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5588);
+    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5609);
 
     // 4) Services 最大单文件。
     var largestService = Directory.EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories)
@@ -5850,7 +6492,10 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // `ViewModels/*.cs` 收了一个统一读取口 `ReadViewModelSource`，总数降下来一格。
     // 117 -> 117（持平）：新增一条漂移护栏「虚幻项目备份只落在工具箱工作区」——
     // 备份落点必须在工作区里，这条只能靠读壳源码盯着（同额度内的记账，不是涨额度）。
-    Ratchet("读源码文件的调用点", sourceReadCalls, 118);
+    // 117 -> 111：同一招再用一次。第五步桥接脚本被读了九次（每条跨语言契约各读一遍），
+    // 收成 `ReadSequenceSyncScriptSource()` 一个口；期间新增的「第五步序列同步自检」护栏
+    // 也走这个口，所以是净降，不是拿新增护栏去挤额度。
+    Ratchet("读源码文件的调用点", sourceReadCalls, 111);
 
     if (violations.Count > 0)
     {
@@ -10509,8 +11154,7 @@ static void ToolboxSequenceActionCodesResolveThroughCatalog()
 
 static void SequenceSyncPlanFieldsAreReadByBridgeScript()
 {
-    var script = File.ReadAllText(Path.Combine(
-        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"));
+    var script = ReadSequenceSyncScriptSource();
     // 计划在磁盘上是 **PascalCase**（CreateSprite…），脚本正文读的是 camelCase，
     // 所以每个字段都必须先出现在 _load 的归一化列表里。
     //
@@ -10563,8 +11207,7 @@ static void SequenceActionLegacyTokensDoNotMatchCharacterName()
 
     // 清理必须按资产名分段比较；用整条路径做子串匹配时，
     // 角色 Origin_Ako 同步 KO 会命中该角色的每一个资产。
-    var script = File.ReadAllText(Path.Combine(
-        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"));
+    var script = ReadSequenceSyncScriptSource();
     AssertEqual(true, script.Contains("legacy_tokens & _name_tokens(_asset_name_of(path))", StringComparison.Ordinal));
     AssertEqual(false, script.Contains("alias in lowered", StringComparison.Ordinal));
 }
@@ -11105,8 +11748,7 @@ static void SequenceSyncIsolatesPerActionFailures()
     //
     // 现在一个动作炸掉要**就地记成一条失败项并继续**：协议和 C# 侧本来就支持「部分同步」
     // （基线只刷新成功过的动作），缺的只是脚本这一层不把整批带走。
-    var script = File.ReadAllText(Path.Combine(
-        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
+    var script = ReadSequenceSyncScriptSource();
     var loopStart = script.IndexOf("for index, action in enumerate(actions):", StringComparison.Ordinal);
     AssertEqual(true, loopStart > 0);
     var window = string.Join("\n", script[loopStart..].Split('\n').Take(60));
@@ -12022,8 +12664,7 @@ static void ExportedFrameListIsOneEntryPerKeyframe()
     // delete_asset 只要有引用方就拒删；ForceDeleteObjects 只置空硬引用，
     // 而图集是用 TSoftObjectPtr 挂着 Sprite 的，强删够不着；
     // Python 更问不出「引用是硬是软」——find_package_referencers 不返回依赖种类。
-    var syncScript = File.ReadAllText(Path.Combine(
-        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
+    var syncScript = ReadSequenceSyncScriptSource();
     AssertEqual(true, syncScript.Contains("purge_assets"));
     // 插件缺席时退回普通删除并如实汇报，不能整批失败。
     AssertEqual(true, syncScript.Contains("PurgeAssets unavailable"));
@@ -12113,8 +12754,7 @@ static void PostSyncExportRunsInTheSameEditorSession()
     // 实测每次会话 13-15 秒，其中约 9 秒是纯启动开销。复扫要读的就是那个
     // 刚被自己改过、已经加载好的编辑器，没有理由再开一次。
     // 合并后实测 16 秒完成「同步 + 导出」，对比原先 13 + 15 = 28 秒。
-    var syncScript = File.ReadAllText(Path.Combine(
-        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
+    var syncScript = ReadSequenceSyncScriptSource();
     AssertEqual(true, syncScript.Contains("_run_post_sync_export"));
     AssertEqual(true, syncScript.Contains("ZD_POST_SYNC_EXPORT_SCRIPT"));
     // 导出脚本是顶层执行的，必须给独立命名空间，否则两边同名函数会互相覆盖。
@@ -12220,8 +12860,7 @@ static void BlankFrameDeletionIsExecutable()
     // 第五步不碰角色蓝图：绑定序列槽位是下一步的职责。
     // 而且 UBlueprint 的 generated_class 在这个引擎版本上并非可脚本化属性，
     // 硬写会让第一个带蓝图属性的动作（DefAtk）直接失败，拖垮整批同步。
-    var syncScript2 = File.ReadAllText(Path.Combine(
-        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
+    var syncScript2 = ReadSequenceSyncScriptSource();
     AssertEqual(false, syncScript2.Contains("_write_blueprint_sequence_slot"));
     AssertEqual(false, syncScript2.Contains("_blueprint_default_object"));
     AssertEqual(false, syncScript2.Contains("generated_class"));
@@ -12344,8 +12983,7 @@ static void OrphanSequencesAreDetachedNotDeleted()
     // 大小写对齐要连着改两次名，中间那个 *__ZDCaseMigration 一旦被引用方记进包里、
     // 而重定向器随后被清理，引用就永久悬空——实测打断了 Misaka_AnimBP 的 Play Sequence 节点，
     // 此后每次导出编辑器都报 "references an unknown sequence" 并让 commandlet 返回非 0。
-    var caseScript = File.ReadAllText(Path.Combine(
-        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
+    var caseScript = ReadSequenceSyncScriptSource();
     AssertEqual(true, caseScript.Contains("_fixup_redirectors"));
     // 解引用走的是 EditorAssetLibrary.consolidate_assets。
     // AssetTools.fixup_referencers 在 UE 5.8 的 Python 里**不存在**（实测 hasattr 为假）；
@@ -12371,8 +13009,7 @@ static void OrphanSequencesAreDetachedNotDeleted()
     AssertEqual(false, snapshot.Contains("Add(items, SequenceFrameIdentity.OrphanGroupStableId"));
 
     // 脚本侧只解绑，绝不删资产：串错位置的序列往往仍是有用素材。
-    var syncScript = File.ReadAllText(Path.Combine(
-        Directory.GetCurrentDirectory(), "Tools", "UnrealBridge", "sync_character_sequences.py"), Encoding.UTF8);
+    var syncScript = ReadSequenceSyncScriptSource();
     AssertEqual(true, syncScript.Contains("detach_sequences_from_animation_source"));
     AssertEqual(true, syncScript.Contains("detachSequenceObjectPaths"));
 

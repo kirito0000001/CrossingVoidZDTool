@@ -130,6 +130,8 @@ namespace CrossingVoidZDTool
             // 工具条那排放不下更多按钮了：导出收成一个「导出 ▾」，菜单内容由
             // `SequenceExportMenu` 这份清单决定（加新导出不用动 XAML）。
             BuildSequenceExportMenu();
+            // 工具集：选目录/选文件/起进程由壳提供，流程在 AtlasToolViewModel 里。
+            _applicationViewModel.AtlasTools.AttachHost(this);
             // C6b：角色详情那五个按钮的命令。流程在 CharacterDetailActionController 里，
             // 命令挂在全局持有者上，由**角色卡**读它给 XAML 绑（`{Binding ContinueEditingCommand}`）
             // ——详情面板的 DataContext 是那张卡，不是页面级 VM。

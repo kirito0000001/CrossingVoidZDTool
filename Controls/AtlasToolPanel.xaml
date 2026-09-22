@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="utf-8"?>
+<UserControl
+    x:Class="CrossingVoidZDTool.Controls.AtlasToolPanel"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- 可复用排版：左边工具清单，右边「参数 → 运行 → 结果」。
+         加新工具只需要在清单里加一张卡、在右边加一个参数面板。 -->
+    <Grid ColumnSpacing="16">
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="268" />
+            <ColumnDefinition Width="*" />
+        </Grid.ColumnDefinitions>
+
+        <StackPanel Spacing="8">
+            <TextBlock Style="{StaticResource SectionTitleStyle}" Text="工具集" />
+            <TextBlock
+                Style="{StaticResource SubtleTextStyle}"
+                Text="和角色无关的小工具都放这里。选一个工具，右边填输入、跑。"
+                TextWrapping="Wrap" />
+            <ListView
+                x:Name="AtlasToolList"
+                ItemsSource="{Binding AtlasTools.Tools}"
+                SelectedItem="{Binding AtlasTools.SelectedTool, Mode=TwoWay}"
+                SelectionMode="Single">
+                <ListView.ItemTemplate>
+                    <DataTemplate>
+                        <StackPanel Padding="0,8" Spacing="4">
+                            <StackPanel Orientation="Horizontal" Spacing="8">
+                                <FontIcon FontSize="16" Glyph="{Binding Glyph}" />
+                                <TextBlock FontWeight="SemiBold" Text="{Binding Title}" />
+                            </StackPanel>
+                            <TextBlock
+                                Style="{StaticResource SubtleTextStyle}"
+                                Text="{Binding Description}"
+                                TextWrapping="Wrap" />
+                        </StackPanel>
+                    </DataTemplate>
+                </ListView.ItemTemplate>
+            </ListView>
+        </StackPanel>
+
+        <StackPanel Grid.Column="1" Spacing="12">
+            <StackPanel Spacing="3">
+                <TextBlock
+                    FontSize="20"
+                    FontWeight="SemiBold"
+                    Text="{Binding AtlasTools.SelectedTool.Title}" />
+                <TextBlock
+                    Style="{StaticResource SubtleTextStyle}"
+                    Text="{Binding AtlasTools.SelectedTool.Description}"
+                    TextWrapping="Wrap" />
+            </StackPanel>
+
+            <!-- 创建图集 -->
+            <StackPanel
+                x:Name="AtlasCreatePanel"
+                Spacing="10"
+                Visibility="{Binding AtlasTools.IsCreateToolSelected, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}">
+                <TextBlock FontWeight="SemiBold" Text="输入" />
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox
+                        Header="源目录（装 PNG 的目录）"
+                        IsReadOnly="True"
+                        Text="{Binding AtlasTools.CreateSourceFolder, Mode=OneWay}" />
+                    <Button
+                        Grid.Column="1"
+                        VerticalAlignment="Bottom"
+                        Command="{Binding AtlasTools.PickCreateSourceCommand}"
+                        Content="浏览…" />
+                </Grid>
+                <TextBox
+                    Header="图集名（留空就用源目录名）"
+                    Text="{Binding AtlasTools.CreateAtlasName, Mode=TwoWay}" />
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <ComboBox
+                        Header="打包方式"
+                        SelectedIndex="{Binding AtlasTools.CreateModeIndex, Mode=TwoWay}">
+                        <ComboBoxItem Content="紧密装箱（Paper2D 用）" />
+                        <ComboBoxItem Content="均匀网格（Niagara SubUV 用）" />
+                    </ComboBox>
+                    <NumberBox
+                        Grid.Column="1"
+                        Header="网格列数（0=自动）"
+                        Minimum="0"
+                        SpinButtonPlacementMode="Inline"
+                        Value="{Binding AtlasTools.CreateColumns, Mode=TwoWay}"
+                        Visibility="{Binding AtlasTools.IsCreateGridMode, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}" />
+                    <NumberBox
+                        Grid.Column="2"
+                        Header="最大边长"
+                        Minimum="64"
+                        SpinButtonPlacementMode="Inline"
+                        Value="{Binding AtlasTools.CreateMaxSize, Mode=TwoWay}" />
+                </Grid>
+                <Grid ColumnSpacing="10">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+                    <NumberBox
+                        Header="图元间距"
+                        Minimum="0"
+                        SpinButtonPlacementMode="Inline"
+                        Value="{Binding AtlasTools.CreatePadding, Mode=TwoWay}" />
+                    <ToggleSwitch
+                        Grid.Column="1"
+                        VerticalAlignment="Bottom"
+                        IsOn="{Binding AtlasTools.CreateTrim, Mode=TwoWay}"
+                        OffContent="保留透明边"
+                        OnContent="裁剪透明边" />
+                </Grid>
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox
+                        Header="输出目录（图集 PNG 与坐标 json 落这里）"
+                        IsReadOnly="True"
+                        Text="{Binding AtlasTools.CreateOutputFolder, Mode=OneWay}" />
+                    <Button
+                        Grid.Column="1"
+                        VerticalAlignment="Bottom"
+                        Command="{Binding AtlasTools.PickCreateOutputCommand}"
+                        Content="浏览…" />
+                </Grid>
+            </StackPanel>
+
+            <!-- 拆分图集 -->
+            <StackPanel
+                x:Name="AtlasExtractPanel"
+                Spacing="10"
+                Visibility="{Binding AtlasTools.IsExtractToolSelected, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}">
+                <TextBlock FontWeight="SemiBold" Text="输入" />
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox
+                        Header="图集 PNG"
+                        IsReadOnly="True"
+                        Text="{Binding AtlasTools.ExtractImagePath, Mode=OneWay}" />
+                    <Button
+                        Grid.Column="1"
+                        VerticalAlignment="Bottom"
+                        Command="{Binding AtlasTools.PickExtractImageCommand}"
+                        Content="浏览…" />
+                </Grid>
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox
+                        Header="坐标 json（选图集时会自动找同名的）"
+                        IsReadOnly="True"
+                        Text="{Binding AtlasTools.ExtractDataPath, Mode=OneWay}" />
+                    <Button
+                        Grid.Column="1"
+                        VerticalAlignment="Bottom"
+                        Command="{Binding AtlasTools.PickExtractDataCommand}"
+                        Content="浏览…" />
+                </Grid>
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox
+                        Header="输出目录"
+                        IsReadOnly="True"
+                        Text="{Binding AtlasTools.ExtractOutputFolder, Mode=OneWay}" />
+                    <Button
+                        Grid.Column="1"
+                        VerticalAlignment="Bottom"
+                        Command="{Binding AtlasTools.PickExtractOutputCommand}"
+                        Content="浏览…" />
+                </Grid>
+                <ToggleSwitch
+                    IsOn="{Binding AtlasTools.ExtractPasteBack, Mode=TwoWay}"
+                    OffContent="拆成紧贴裁剪的小图"
+                    OnContent="贴回原始画布尺寸" />
+            </StackPanel>
+
+            <Border
+                Height="1"
+                Background="{ThemeResource CardStrokeColorDefaultBrush}" />
+
+            <StackPanel Orientation="Horizontal" Spacing="10">
+                <Button
+                    x:Name="AtlasToolRunButton"
+                    MinWidth="150"
+                    Command="{Binding AtlasTools.RunCommand}"
+                    Content="{Binding AtlasTools.RunButtonText, Mode=OneWay}"
+                    Style="{StaticResource PrimaryToolButtonStyle}" />
+                <ProgressRing
+                    Width="22"
+                    Height="22"
+                    VerticalAlignment="Center"
+                    IsActive="{Binding AtlasTools.IsBusy, Mode=OneWay}" />
+            </StackPanel>
+
+            <TextBlock
+                Style="{StaticResource SubtleTextStyle}"
+                Text="{Binding AtlasTools.StatusText, Mode=OneWay}"
+                TextWrapping="Wrap" />
+
+            <StackPanel Spacing="4">
+                <TextBlock FontWeight="SemiBold" Text="输出位置" />
+                <TextBlock
+                    Style="{StaticResource SubtleTextStyle}"
+                    Text="{Binding AtlasTools.LastOutputFolderText, Mode=OneWay}"
+                    TextWrapping="Wrap" />
+                <Button
+                    HorizontalAlignment="Left"
+                    Command="{Binding AtlasTools.OpenOutputFolderCommand}"
+                    Content="打开输出目录" />
+            </StackPanel>
+        </StackPanel>
+    </Grid>
+</UserControl>

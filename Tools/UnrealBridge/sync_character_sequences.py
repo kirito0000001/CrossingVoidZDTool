@@ -41,7 +41,9 @@ def _load(path):
         for name in ('actionCode', 'baseActionCode', 'formIndex', 'displayName', 'fps', 'blueprintProperty',
                      'blueprintFormSlotIndex', 'animMapsEntryName', 'targetSequencePath', 'targetMaterialFolder',
                      'sequenceAssetName', 'flipbookAssetName', 'legacyNameTokens',
-                     'staleAssetObjectPaths', 'hasStaleAssetSelection'):
+                     'staleAssetObjectPaths', 'hasStaleAssetSelection',
+                     # 特效层：只建图集贴图 + 精灵 + Flipbook，不建序列、不写 AnimMaps、不碰蓝图。
+                     'isEffectLayer'):
             action[name] = get(action, name, action.get(name, ''))
         frames = get(action, 'frames', []) or []
         for frame in frames:
@@ -655,9 +657,15 @@ def _cleanup_old_assets(paths, new_paths, action):
 
     插件不可用时退回普通删除，并如实汇报删不掉的那些。
     """
-    new_packages = {_package(path) for path in new_paths if path}
+    # 比价必须**忽略大小写**。虚幻的资产路径在 Windows 上本来就大小写不敏感，
+    # 而工具箱侧的「规范路径」是归一化过的（小写）。逐字节比会把自己刚建好的资产
+    # 判成"该清掉的旧资产"：实测 2026-09-22，特效层新建的图集贴图 / 3 只精灵 /
+    # Flipbook 被整批 force delete，紧接着 flipbook.get_path_name() 报
+    # "PaperFlipbook: Internal Error - ObjectInstance is null!" —— 同步看着失败，
+    # 工程里那批资产也已经没了。用户勾选的待删行同样可能是别的拼写，一并护住。
+    new_packages = {_package(path).lower() for path in new_paths if path}
     targets = [path for path in paths
-               if _package(path) not in new_packages
+               if _package(path).lower() not in new_packages
                and unreal.EditorAssetLibrary.does_asset_exist(path)]
     code = action.get('actionCode', '')
     if not targets:
@@ -706,6 +714,8 @@ def _cleanup_old_assets(paths, new_paths, action):
     return skipped, deleted
 
 def _sync_action(action):
+    if _is_effect_layer(action):
+        return _sync_effect_layer(action)
     code = action['actionCode']
     frames = action.get('frames', [])
     if not frames:
@@ -844,6 +854,15 @@ def _sync_action(action):
     return {'actionCode': code, 'sequencePath': sequence.get_path_name(), 'flipbookPath': flipbook.get_path_name(), 'frameCount': len(frames), 'animMapsChange': anim_maps_change, 'deletedAssets': deleted, 'legacyAssetsNotDeleted': skipped}
 
 def _result_message(action_result):
+    if action_result.get('isEffectLayer'):
+        parts = ['effect layer synchronized', 'frames=%d' % int(action_result.get('frameCount', 0) or 0)]
+        deleted = action_result.get('deletedAssets') or []
+        skipped = action_result.get('legacyAssetsNotDeleted') or []
+        if deleted:
+            parts.append('deleted=%d' % len(deleted))
+        if skipped:
+            parts.append('legacyAssetsNotDeleted=%d: %s' % (len(skipped), ', '.join(skipped)))
+        return ' | '.join(parts)
     parts = ['sequence assets synchronized', 'frames=%d' % int(action_result.get('frameCount', 0) or 0)]
     deleted = action_result.get('deletedAssets') or []
     skipped = action_result.get('legacyAssetsNotDeleted') or []
@@ -853,6 +872,117 @@ def _result_message(action_result):
         # 删不掉的旧资产必须出现在结果里；否则界面上看不出还有历史资产残留。
         parts.append('legacyAssetsNotDeleted=%d: %s' % (len(skipped), ', '.join(skipped)))
     return ' | '.join(parts)
+
+
+def _is_effect_layer(action):
+    """这一项是不是动作的**特效层**。
+
+    计划里带 isEffectLayer=true；老版本的计划没有这个字段（归一化后是空串），
+    所以这里显式按 True 判断，别把空串当特征。
+    """
+    return action.get('isEffectLayer') is True
+
+
+def _sync_effect_layer(action):
+    """同步一个动作的特效层。
+
+    和角色序列**同构**，但只做三件事：导图集贴图、切精灵、建 Flipbook。
+    刻意**不**建序列资产、**不**写 AnimMaps、**不**碰角色蓝图 ——
+    那三样是角色序列的职责，特效只是一层叠上去的图。
+
+    空帧的处理和角色序列完全一样：Flipbook 里保留一个"精灵为空"的关键帧，
+    时间照占，什么都不画。
+    """
+    code = action['actionCode']
+    frames = [frame for frame in (action.get('frames') or [])]
+    if not frames:
+        raise RuntimeError('%s: no frames in toolbox data' % code)
+    # 材质目录是**文件夹**，不是资产：它没有对应的 UObject，
+    # 拿 _require（内部是 load_asset）去校验只会每次都报 "asset not found"。
+    material_folder = str(action.get('targetMaterialFolder') or '').strip()
+    if not material_folder:
+        raise RuntimeError('%s: sync plan has no target material folder' % code)
+    source_images = action.get('sourceImages') or []
+    if not source_images:
+        raise RuntimeError('%s: sync plan has no atlas information' % code)
+
+    _align_material_folder_case(material_folder, code)
+    old_assets = _collect_action_assets(action)
+
+    atlas_texture_by_name = {}
+    atlas_size_by_name = {}
+    sprite_by_index = {}
+    for image in source_images:
+        index = int(image.get('index') or 0)
+        sprite_name = image.get('spriteAssetName') or ''
+        atlas_name = image.get('atlasName') or ''
+        atlas_image_path = image.get('atlasImagePath') or ''
+        if index <= 0 or not sprite_name or not atlas_name or not atlas_image_path:
+            raise RuntimeError('%s: effect atlas entry %s is incomplete' % (code, index))
+        if atlas_name not in atlas_texture_by_name:
+            texture = _require(_import_texture(atlas_image_path, material_folder, atlas_name, code), code)
+            atlas_texture_by_name[atlas_name] = texture
+            atlas_size_by_name[atlas_name] = _texture_size(texture)
+
+        _align_asset_name_case(material_folder, sprite_name, code)
+        sprite = _apply_atlas_sprite(
+            material_folder, sprite_name,
+            atlas_texture_by_name[atlas_name], atlas_size_by_name[atlas_name][0],
+            atlas_size_by_name[atlas_name][1], image, code)
+        # Sprite 是独立包，不显式保存的话离线 commandlet 退出后不落盘。
+        _save(sprite.get_path_name())
+        sprite_by_index[index] = sprite
+
+    sprites = []
+    for frame in frames:
+        if frame.get('isBlank'):
+            # 空帧 = 空关键帧（用户确认过：flipbook 可以直接放空对象），时间照占。
+            sprites.append(None)
+            continue
+        source_index = int(frame.get('sourceImageIndex') or 0)
+        sprite = sprite_by_index.get(source_index)
+        if sprite is None:
+            raise RuntimeError(
+                '%s: frame %s references atlas entry %s, which is not in the plan'
+                % (code, frame.get('index'), source_index))
+        sprites.append(sprite)
+
+    if not any(sprite is not None for sprite in sprites):
+        # 整层都是空帧：这一层没有可画的东西，不建 Flipbook（也就不会在工程里留一个空资产）。
+        unreal.log('SequenceSync: effect layer %s 全是空帧，跳过 Flipbook 创建' % code)
+        _cleanup_old_assets(old_assets, [], action)
+        return {
+            'actionCode': code,
+            'isEffectLayer': True,
+            'frameCount': len(frames),
+            'deletedAssets': [],
+            'legacyAssetsNotDeleted': [],
+        }
+
+    frame_runs = [max(1, int(frame.get('durationFrames', 1) or 1)) for frame in frames]
+    flipbook_name = action.get('flipbookAssetName') or code
+    _align_asset_name_case(material_folder, flipbook_name, code)
+    flipbook, _ = _bridge_call(
+        'create_paper_flipbook_from_sprites',
+        [sprites, frame_runs, float(action.get('fps', 12)), material_folder, flipbook_name],
+        code)
+    _save(flipbook.get_path_name())
+
+    unreal.log('SequenceSync: effectLayer=%s sprites=%d blankFrames=%d fps=%s'
+               % (code, len(source_images), sum(1 for sprite in sprites if sprite is None),
+                  action.get('fps')))
+    new_paths = sorted({texture.get_path_name() for texture in atlas_texture_by_name.values()}) + sorted(
+        {sprite.get_path_name() for sprite in sprite_by_index.values()}
+    ) + [flipbook.get_path_name()]
+    skipped, deleted = _cleanup_old_assets(old_assets, new_paths, action)
+    return {
+        'actionCode': code,
+        'isEffectLayer': True,
+        'flipbookPath': flipbook.get_path_name(),
+        'frameCount': len(frames),
+        'deletedAssets': deleted,
+        'legacyAssetsNotDeleted': skipped,
+    }
 
 
 def _detach_orphan_sequences(paths):
