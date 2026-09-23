@@ -57,6 +57,9 @@ internal static class BasePlateExportPlanner
     /// <summary>导出目录里那份「哪张图对应哪一帧」的对照表。</summary>
     public const string ManifestFileName = "frames.csv";
 
+    /// <summary>导出目录里那份多图层 PSD 的后缀（给画世界 / PS 导入用）。</summary>
+    public const string PsdExtension = ".psd";
+
     /// <summary>
     /// 落点：<c>&lt;工作区&gt;/Export/&lt;角色&gt;/BasePlate/&lt;动作&gt;-&lt;倍数&gt;x/</c>。
     /// 目录名带倍数，是因为换倍率导出的帧数不一样，混在一起会互相覆盖。
@@ -143,4 +146,11 @@ internal static class BasePlateExportPlanner
     /// <summary>输出帧的规范文件名：<c>&lt;角色&gt;_&lt;动作&gt;_0001.png</c>。</summary>
     public static string FormatFrameFileName(BasePlateExportPlan plan, BasePlateOutputFrame frame) =>
         $"{plan.FileNamePrefix}_{frame.OutputIndex:0000}.png";
+
+    /// <summary>
+    /// 多图层 PSD 的文件名：<c>&lt;角色&gt;_&lt;动作&gt;-2x.psd</c>。
+    /// 带上倍数，是因为换倍率导出的图层数不一样，名字一样会让人分不清手上这份是哪一版。
+    /// </summary>
+    public static string FormatPsdFileName(BasePlateExportPlan plan) =>
+        $"{plan.FileNamePrefix}-{plan.Multiplier}x{PsdExtension}";
 }

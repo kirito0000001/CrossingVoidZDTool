@@ -12,8 +12,19 @@ internal enum AtlasToolKind
     Extract
 }
 
-/// <summary>工具卡（清单里的一条）。纯数据，回归可以直接断言"现在有哪些工具"。</summary>
-internal sealed record AtlasToolCard(AtlasToolKind Kind, string Title, string Description, string Glyph);
+/// <summary>
+/// 工具卡（清单里的一条）。纯数据，回归可以直接断言"现在有哪些工具"。
+///
+/// 文案分两段：<paramref name="Summary"/> 是左栏列表里的一行短句（只够说"这工具干什么"），
+/// <paramref name="Description"/> 是选中之后右栏标题下面那份完整说明。
+/// 之前两处绑的是同一个字段，左栏被挤成三行、右栏又和左栏重复。
+/// </summary>
+internal sealed record AtlasToolCard(
+    AtlasToolKind Kind,
+    string Title,
+    string Summary,
+    string Description,
+    string Glyph);
 
 /// <summary>
 /// 工具集里当前有哪些工具。
@@ -28,11 +39,13 @@ internal static class AtlasToolCatalog
         new(
             AtlasToolKind.Create,
             "创建图集",
+            "一个目录的 PNG → 一张图集。",
             "选一个装 PNG 的目录，打成一张图集 + 坐标 json，输出到你指定的位置。",
             "\uE8B7"),
         new(
             AtlasToolKind.Extract,
             "拆分图集",
+            "一张图集 → 一张张 PNG。",
             "拿图集 + 它的坐标 json 拆回一张张 PNG；可贴回原始画布尺寸，改完再打回去。",
             "\uE7C4")
     ];

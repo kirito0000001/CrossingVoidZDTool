@@ -109,6 +109,7 @@ var tests = new (string Name, Action Run)[]
     ("特效层按动作帧率的2倍展开并保留空帧", SequenceEffectSyncLayoutDoublesFpsAndKeepsBlankFrames),
     ("同步计划带上特效层并携带图集矩形", SequencePlanCarriesEffectLayerAction),
     ("特效帧算进动作内容指纹且失败时不记", EffectFramesJoinActionFingerprint),
+    ("MANUAL 底板 PSD 探针", ManualBasePlatePsdProbe),
     ("工具集清单里有创建与拆分图集", AtlasToolCatalogListsBuiltInTools),
     ("拆分图集能把裁剪过的格子贴回原画布", AtlasExtractRestoresTrimmedSprites),
     ("创建图集会生成清单与命令行参数", AtlasFolderPackBuildsManifestAndArguments),
@@ -4959,7 +4960,13 @@ static void BasePlateExportWritesFramesAndManifest()
     }
 }
 
-/// <summary>工具集清单：现在有哪两个工具、卡片文案齐不齐。</summary>
+/// <summary>
+/// 工具集清单：现在有哪两个工具、两段文案齐不齐。
+///
+/// 文案分两段是排版要求：左栏卡片只放标题 + 一行短句（<c>Summary</c>），
+/// 完整说明（<c>Description</c>）挂在右栏标题下面。绑错成同一段，
+/// 左栏会被挤成三行、右栏还和它一字不差地重复。
+/// </summary>
 static void AtlasToolCatalogListsBuiltInTools()
 {
     var tools = AtlasToolCatalog.Build();
@@ -4968,8 +4975,12 @@ static void AtlasToolCatalogListsBuiltInTools()
     AssertEqual("创建图集", tools[0].Title);
     AssertEqual(AtlasToolKind.Extract, tools[1].Kind);
     AssertEqual("拆分图集", tools[1].Title);
+    AssertEqual(true, tools.All(tool => !string.IsNullOrWhiteSpace(tool.Summary)));
     AssertEqual(true, tools.All(tool => !string.IsNullOrWhiteSpace(tool.Description)));
     AssertEqual(true, tools.All(tool => !string.IsNullOrWhiteSpace(tool.Glyph)));
+    // 简短就是简短：左栏那一行不该长到要折行（实测一行装得下 ~20 个汉字）。
+    AssertEqual(true, tools.All(tool => tool.Summary.Length <= 24));
+    AssertEqual(true, tools.All(tool => tool.Description.Length > tool.Summary.Length));
 }
 
 /// <summary>
@@ -5628,6 +5639,64 @@ static void EffectFramesJoinActionFingerprint()
     {
         Directory.Delete(root, recursive: true);
     }
+}
+
+/// <summary>
+/// 一次性探针（**不入常规回归**，名字带 MANUAL）：导一份 40×30 小样 + 一份真实底板，
+/// 摆到 %TEMP%\zd-psd-test 给画世界验（先试小的）。
+/// </summary>
+static void ManualBasePlatePsdProbe()
+{
+    var keep = Path.Combine(Path.GetTempPath(), "zd-psd-test");
+    Directory.CreateDirectory(keep);
+
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var framesFolder = Path.Combine(root, "src");
+        Directory.CreateDirectory(framesFolder);
+        var firstPath = Path.Combine(framesFolder, "1 a.png");
+        var secondPath = Path.Combine(framesFolder, "2 b.png");
+        WriteSolidImage(firstPath, Color.Red, 40, 30);
+        WriteSolidImage(secondPath, Color.Blue, 40, 30);
+        var frames = new List<SequenceFrameItem>
+        {
+            CreateBasePlateTestFrame(firstPath, index: 1, duration: 2, width: 40, height: 30),
+            CreateBasePlateTestFrame(secondPath, index: 2, duration: 1, width: 40, height: 30),
+            CreateBasePlateTestFrame(string.Empty, index: 3, duration: 1, width: 40, height: 30, isBlank: true)
+        };
+        var smallPlan = BasePlateExportPlanner.Build(root, "Misaka", "Sk2", frames, actionFps: 10);
+        var smallResult = new BasePlateExportService()
+            .ExportAsync(smallPlan, root, progress: null, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        File.Copy(smallResult.PsdFilePath, Path.Combine(keep, "1_小样_8层_40x30.psd"), overwrite: true);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+
+    var settingsPath = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+        "CrossingVoidZDTool", "settings.json");
+    using var settingsStream = File.OpenRead(settingsPath);
+    using var document = JsonDocument.Parse(settingsStream);
+    var workspace = document.RootElement.GetProperty("ProjectRootPath").GetString() ?? string.Empty;
+    var character = new CharacterWorkspaceService().LoadCharacters(workspace)
+        .Single(card => string.Equals(card.Code, "Misaka", StringComparison.OrdinalIgnoreCase));
+    var section = new SequenceFrameService()
+        .LoadSections(character, new CharacterSkillsService().Load(character))
+        .Single(item => string.Equals(item.Action.Code, "Click", StringComparison.OrdinalIgnoreCase));
+    var plan = BasePlateExportPlanner.Build(
+        workspace, character.Code, "Click", section.Frames,
+        new SequenceFrameService().GetActionFps(character, section.Action));
+    var result = new BasePlateExportService()
+        .ExportAsync(plan, workspace, progress: null, CancellationToken.None)
+        .GetAwaiter()
+        .GetResult();
+    File.Copy(result.PsdFilePath, Path.Combine(keep, "2_真样_16层_928x640.psd"), overwrite: true);
+    Console.WriteLine($"真样 {result.FrameCount} 层 {result.PsdBytes / 1024.0 / 1024.0:0.##} MB，都拷到 {keep}");
 }
 
 /// <summary>
@@ -6442,12 +6511,14 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // "角色层 + 特效层"叠放，两层共用一个变换），也是实打实加功能。
     // 5588 -> 5609：左侧新增「工具集」分区（一个导航项 + 一个页面壳，页面本体在
     // Controls/AtlasToolPanel.xaml 里，所以这里只多了 21 行）。同样是加功能。
+    // 5609 -> 5610：工具集页去掉 MaxWidth（右栏要占满剩下的宽度），顺手给整页 Grid
+    // 起个名字让 UI 冒烟能量宽度。多一行注释，不是文件在悄悄变胖。
     //
     // 注意：「把十二个遮罩层抽成 Controls/*.xaml」这条**已经被否掉了**：它们的
     // 手势语义本来就各不相同，收敛会悄悄改掉行为，而那些手势一条 UI 测试都没有。
     // 现在只保留护栏（每个全屏遮罩层至少有一种关法）。真要砍 XAML，
     // 先给这些手势补上测试覆盖，再谈收敛。
-    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5609);
+    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5610);
 
     // 4) Services 最大单文件。
     var largestService = Directory.EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories)

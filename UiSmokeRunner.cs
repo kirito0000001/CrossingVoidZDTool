@@ -399,6 +399,31 @@ internal static class UiSmokeRunner
             lines.Add($"INFO 工具集卡片={toolCards.Length} 个");
             Check("工具集列出了工具卡（至少两个）", toolCards.Length >= 2);
 
+            // 左栏卡片只放「标题 + 一行短句」，完整说明在右栏标题下面。
+            // 两处绑同一个字段时，左栏会被挤成三行、右栏还和它重复 —— 这正是一次改回来的东西。
+            var firstTool = AtlasToolCatalog.Build()[0];
+            var cardTexts = toolCards.Length == 0
+                ? Array.Empty<string>()
+                : FindAll<TextBlock>(toolCards[0]).Select(block => block.Text ?? string.Empty).ToArray();
+            lines.Add($"INFO 第一张卡文字={string.Join(" / ", cardTexts)}");
+            Check("左栏卡片是标题加简短简介", cardTexts.Contains(firstTool.Summary));
+            Check("左栏卡片不再重复完整说明", !cardTexts.Contains(firstTool.Description));
+            var pageTexts = toolsPage is null
+                ? Array.Empty<string>()
+                : FindAll<TextBlock>(toolsPage).Select(block => block.Text ?? string.Empty).ToArray();
+            Check("完整说明挂在右栏", pageTexts.Contains(firstTool.Description));
+
+            // 右栏要占满剩下的宽度：整页 Grid 一旦被 MaxWidth 卡住，右边就空出一大截。
+            var pageRoot = toolsPage is null ? null : FindFirstByName(toolsPage, "AtlasToolsPageRoot");
+            if (pageRoot is not null && toolsPage is not null)
+            {
+                var slack = toolsPage.ActualWidth - pageRoot.ActualWidth;
+                lines.Add(
+                    $"INFO 工具集宽度：页面={toolsPage.ActualWidth:0} 内容={pageRoot.ActualWidth:0} 余量={slack:0}");
+                Check("工具集内容没有被 MaxWidth 卡住", double.IsPositiveInfinity(pageRoot.MaxWidth));
+                Check("工具集右栏占满可用宽度", slack <= 40);
+            }
+
             var runButton = toolsPage is null ? null : FindFirstByName(toolsPage, "AtlasToolRunButton");
             Check(
                 "工具集的运行按钮已绑定命令",

@@ -3251,10 +3251,11 @@
                     RightTapped="PageBlankArea_RightTapped"
                     Visibility="Collapsed"
                     VerticalScrollBarVisibility="Auto">
+                    <!-- 不设 MaxWidth：左栏清单固定宽、右栏参数要**占满**剩下的宽度，
+                         卡在 1180 会让右侧空出一大截。 -->
                     <Grid
-                        MaxWidth="1180"
-                        Margin="0,0,12,0"
-                        HorizontalAlignment="Left">
+                        x:Name="AtlasToolsPageRoot"
+                        Margin="0,0,12,0">
                         <controls:AtlasToolPanel />
                     </Grid>
                 </ScrollViewer>

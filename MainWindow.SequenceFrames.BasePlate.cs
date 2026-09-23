@@ -86,17 +86,22 @@ namespace CrossingVoidZDTool
 
             // 导出**已经成功**之后的事都和"导出失败"无关，所以放在 try 之外：
             // 打开目录失败也只是记一条，不能把成功的导出报成失败。
-            CompleteGlobalProgress($"底板已导出：{result.FrameCount} 张", result.OutputDirectory);
+            CompleteGlobalProgress(
+                $"底板已导出：{result.FrameCount} 张 + 1 份 PSD",
+                $"{result.OutputDirectory}（{Path.GetFileName(result.PsdFilePath)} 可直接导入画世界 / PS）");
             await HideGlobalProgressAfterDelayAsync(900);
 
             AppendLog(LogKind.User,
                 $"导出底板：{plan.FileNamePrefix} → {result.FrameCount} 张 @{plan.OutputFps:0.##}fps，"
                 + $"{plan.CanvasWidth}×{plan.CanvasHeight}，{result.OutputDirectory}"
+                + $"，另附 {Path.GetFileName(result.PsdFilePath)}（{result.FrameCount} 个图层，"
+                + $"{result.PsdBytes / 1024.0 / 1024.0:0.##} MB，可直接导入画世界 / PS）"
                 + (result.RemovedStaleFiles > 0 ? $"，清掉上次残留 {result.RemovedStaleFiles} 个文件" : string.Empty));
             ShowFloatingTip(
                 InfoBarSeverity.Success,
-                $"底板已导出 {result.FrameCount} 张",
-                result.OutputDirectory);
+                $"底板已导出 {result.FrameCount} 张 + 多图层 PSD",
+                $"{result.OutputDirectory}{Environment.NewLine}"
+                + $"画世界 / PS 直接导入 {Path.GetFileName(result.PsdFilePath)} 即可（第 1 帧在最底层）。");
 
             // 底板是马上要拿去画特效的，直接把目录弹出来，省一次翻目录。
             try

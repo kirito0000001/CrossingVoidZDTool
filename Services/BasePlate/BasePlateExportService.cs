@@ -19,7 +19,9 @@ internal sealed record BasePlateExportResult(
     string OutputDirectory,
     int FrameCount,
     long TotalBytes,
-    int RemovedStaleFiles);
+    int RemovedStaleFiles,
+    string PsdFilePath,
+    long PsdBytes);
 
 /// <summary>
 /// 底板导出的「写盘」这一半。
@@ -30,7 +32,9 @@ internal sealed record BasePlateExportResult(
 /// <item>空白帧 = 生成一张同画布的**全透明** PNG，保住时间轴节奏；</item>
 /// <item>导出目录**只放这一次的结果**：写之前先清空它（只允许清
 /// <c>&lt;工作区&gt;/Export/&lt;角色&gt;/BasePlate/</c> 之下的目录，写错路径也不会误删别处）；</item>
-/// <item>顺带写一份 <c>frames.csv</c>，记「第几张 → 原序列第几帧 / 原文件名 / 占几格」。</item>
+/// <item>顺带写一份 <c>frames.csv</c>，记「第几张 → 原序列第几帧 / 原文件名 / 占几格」；</item>
+/// <item>再写一份**多图层 PSD**（<see cref="PsdWriter"/>）：一帧一个图层，按顺序排好，
+/// 空白帧也占一层 —— 给画世界 / Photoshop 直接导入，省掉"一张张导、还分不清先后"。</item>
 /// </list>
 /// </summary>
 internal sealed class BasePlateExportService
@@ -79,8 +83,38 @@ internal sealed class BasePlateExportService
         }
 
         WriteManifest(plan, outputDirectory);
+        var (psdPath, psdBytes) = WritePsd(plan, outputDirectory, progress);
         await Task.CompletedTask;
-        return new BasePlateExportResult(outputDirectory, plan.Frames.Count, totalBytes, removedStaleFiles);
+        return new BasePlateExportResult(
+            outputDirectory, plan.Frames.Count, totalBytes, removedStaleFiles, psdPath, psdBytes);
+    }
+
+    /// <summary>
+    /// 把刚写出来的那批 PNG 再打成一份多图层 PSD：一帧一层、按顺序排、空白帧也在里面。
+    ///
+    /// 图层名直接取帧号（<c>0001</c>…），和 PNG 文件名、frames.csv 的「输出帧」列一对一，
+    /// 画的时候看名字就知道在画第几帧。图层顺序是**第 1 帧在最下面**、往上依次叠
+    /// （用户确认过画世界要的就是这个方向）。
+    ///
+    /// 图层来源是**刚落到盘上的 PNG**，不是内存里的另一份像素 —— 这样 PSD 和旁边那堆
+    /// PNG 永远一致，不会出现"图集里是新的、PNG 是旧的"这种对不上的情况。
+    /// </summary>
+    private static (string Path, long Bytes) WritePsd(
+        BasePlateExportPlan plan,
+        string outputDirectory,
+        IProgress<BasePlateExportProgress>? progress)
+    {
+        var layers = plan.Frames
+            .Select(frame => new PsdLayerSource(
+                frame.OutputIndex.ToString("0000", CultureInfo.InvariantCulture),
+                Path.Combine(outputDirectory, BasePlateExportPlanner.FormatFrameFileName(plan, frame))))
+            .ToArray();
+        progress?.Report(new BasePlateExportProgress(
+            plan.Frames.Count, plan.Frames.Count, $"正在生成画世界工程（{layers.Length} 个图层）"));
+
+        var path = Path.Combine(outputDirectory, BasePlateExportPlanner.FormatPsdFileName(plan));
+        var bytes = PsdWriter.Write(path, plan.CanvasWidth, plan.CanvasHeight, layers);
+        return (path, bytes);
     }
 
     /// <summary>清空导出目录里的文件（含子目录），返回删掉的文件数。</summary>

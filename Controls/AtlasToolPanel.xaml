@@ -14,10 +14,6 @@
 
         <StackPanel Spacing="8">
             <TextBlock Style="{StaticResource SectionTitleStyle}" Text="工具集" />
-            <TextBlock
-                Style="{StaticResource SubtleTextStyle}"
-                Text="和角色无关的小工具都放这里。选一个工具，右边填输入、跑。"
-                TextWrapping="Wrap" />
             <ListView
                 x:Name="AtlasToolList"
                 ItemsSource="{Binding AtlasTools.Tools}"
@@ -32,7 +28,7 @@
                             </StackPanel>
                             <TextBlock
                                 Style="{StaticResource SubtleTextStyle}"
-                                Text="{Binding Description}"
+                                Text="{Binding Summary}"
                                 TextWrapping="Wrap" />
                         </StackPanel>
                     </DataTemplate>
@@ -66,6 +62,7 @@
                     <TextBox
                         Header="源目录（装 PNG 的目录）"
                         IsReadOnly="True"
+                        PlaceholderText="点右边「浏览…」选一个装 PNG 的目录"
                         Text="{Binding AtlasTools.CreateSourceFolder, Mode=OneWay}" />
                     <Button
                         Grid.Column="1"
@@ -75,6 +72,7 @@
                 </Grid>
                 <TextBox
                     Header="图集名（留空就用源目录名）"
+                    PlaceholderText="例如 Misaka_Sk2"
                     Text="{Binding AtlasTools.CreateAtlasName, Mode=TwoWay}" />
                 <Grid ColumnSpacing="10">
                     <Grid.ColumnDefinitions>
@@ -127,6 +125,7 @@
                     <TextBox
                         Header="输出目录（图集 PNG 与坐标 json 落这里）"
                         IsReadOnly="True"
+                        PlaceholderText="点右边「浏览…」选图集的落点"
                         Text="{Binding AtlasTools.CreateOutputFolder, Mode=OneWay}" />
                     <Button
                         Grid.Column="1"
@@ -150,6 +149,7 @@
                     <TextBox
                         Header="图集 PNG"
                         IsReadOnly="True"
+                        PlaceholderText="点右边「浏览…」选一张图集 PNG"
                         Text="{Binding AtlasTools.ExtractImagePath, Mode=OneWay}" />
                     <Button
                         Grid.Column="1"
@@ -165,6 +165,7 @@
                     <TextBox
                         Header="坐标 json（选图集时会自动找同名的）"
                         IsReadOnly="True"
+                        PlaceholderText="一般不用自己选；要指定就点右边「浏览…」"
                         Text="{Binding AtlasTools.ExtractDataPath, Mode=OneWay}" />
                     <Button
                         Grid.Column="1"
@@ -180,6 +181,7 @@
                     <TextBox
                         Header="输出目录"
                         IsReadOnly="True"
+                        PlaceholderText="点右边「浏览…」选拆出来的 PNG 落点"
                         Text="{Binding AtlasTools.ExtractOutputFolder, Mode=OneWay}" />
                     <Button
                         Grid.Column="1"

@@ -45,6 +45,30 @@ internal static class AtomicFileWriter
     }
 
     /// <summary>
+    /// 原子写入二进制（PSD 这类）。和 <see cref="WriteAllText"/> 同一条路：
+    /// 先落到带 GUID 的临时文件再整体替换，中途失败不留垃圾。
+    ///
+    /// 实现上先在内存里拼完整份字节再落盘：这类产物（底板 PSD）最多几 MB，
+    /// 而"边算边写"会让失败时留下一份半截文件——那比多占几 MB 内存糟得多。
+    /// </summary>
+    public static void WriteAllBytes(string path, byte[] bytes)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(bytes);
+        var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            File.WriteAllBytes(temporaryPath, bytes);
+            Replace(temporaryPath, path);
+        }
+        catch
+        {
+            TryDelete(temporaryPath);
+            throw;
+        }
+    }
+
+    /// <summary>
     /// 把临时文件顶替成目标文件。目标被占用时短暂重试——
     /// 这里是整条链路上最容易撞上「Unreal 正在读这个文件」的一步。
     /// </summary>
