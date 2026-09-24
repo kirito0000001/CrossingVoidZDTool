@@ -199,8 +199,10 @@ internal sealed partial class UnrealProjectSyncViewModel
     /// 就会被当成"查过了"，再也不补查（反过来也一样）。它必须和
     /// <see cref="RefreshFoundationChecks"/> 用的是同一个口径。
     /// </summary>
+    /// ⚠️ **没跑过检测就别写**（`WriteAllStepCaches` 会在每次防抖时把它们全写一遍，
+    /// 拿空列表盖回去等于把上一份有效结果删了 —— 2026-09-24）。
     internal bool SaveFoundationCache(CharacterCard? character) =>
-        character is not null && Step1FoundationCache.Save(
+        character is not null && FoundationChecks.Count > 0 && Step1FoundationCache.Save(
             character,
             FoundationChecks.ToArray(),
             RequiresAssetTypesFor(FoundationCheckStep));

@@ -25,7 +25,7 @@ internal static class Step5BlueprintSetupCache
 
     public static string GetFilePath(CharacterCard? character)
     {
-        var folder = UnrealSyncSessionCacheService.GetCacheFolderPath(character);
+        var folder = UnrealSyncCacheFolder.GetCacheFolderPath(character);
         return string.IsNullOrWhiteSpace(folder) ? string.Empty : Path.Combine(folder, FileName);
     }
 

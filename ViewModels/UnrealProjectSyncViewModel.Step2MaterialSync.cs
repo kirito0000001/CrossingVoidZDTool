@@ -323,8 +323,11 @@ internal sealed partial class UnrealProjectSyncViewModel
     // 这里装的是**检测结果 + 勾选**，所以带差异算法版本、对不上就当没缓存。
 
     /// <summary>把当前的素材差异 + 勾选写进第 2 步自己的缓存文件。</summary>
+    /// ⚠️ **树不归这一步就别写**：`WriteAllStepCaches` 每次防抖都会调它，
+    /// 而此时内存里可能是空的检测结果 —— 写下去就把上一份有效文件盖没了（2026-09-24）。
     internal bool SaveMaterialSyncCache(CharacterCard? character) =>
         character is not null &&
+        _loadedPublishStep == 2 &&
         Step2MaterialSyncCache.Save(
             character,
             _lastPublishChanges,
@@ -332,21 +335,6 @@ internal sealed partial class UnrealProjectSyncViewModel
             GetSelectedGroupAndLeafStableIds(),
             CurrentDetectionAlgorithmVersion);
 
-    /// <summary>
-    /// 从一份"正要落盘的会话缓存快照"里，把第 2 步那一份抄进它自己的小文件。
-    /// 用同一份快照是有意的：两个地方的内容因此不会各说各话。
-    /// </summary>
-    internal static bool SaveMaterialSyncCacheFromSnapshot(CharacterCard? character, UnrealSyncSessionCache cache) =>
-        character is not null &&
-        cache.WorkflowStep == 2 &&
-        cache.IsPublishDetection &&
-        cache.PublishChanges.Count > 0 &&
-        Step2MaterialSyncCache.Save(
-            character,
-            cache.PublishChanges,
-            cache.SelectedStableIds,
-            cache.SelectedGroupStableIds,
-            cache.DetectionAlgorithmVersion);
 
     /// <summary>
     /// 把第 2 步自己的小缓存回填成差异树（内存里已经有一棵树时不覆盖）。

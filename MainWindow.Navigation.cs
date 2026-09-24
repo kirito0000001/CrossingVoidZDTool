@@ -243,14 +243,17 @@ namespace CrossingVoidZDTool
                 : CharacterDesk.LastEditedCharacter?.IsCompleted == true
                     ? CharacterDesk.LastEditedCharacter.Code
                     : null;
-            var restoreResult = _applicationViewModel.UnrealProjectSync.RefreshDraftSources(
+            // 只恢复**现场**（引擎/工程/方向/角色/显示开关 + 导入快照）；
+            // 各步的结果等进那一步时读各自的小文件。返回非空 = 有现场但不能用，
+            // 那就记一条日志 + 一个提示，别动别的（晓桀：缺前置条件只用 log + 红/黄 tip）。
+            var restoreError = _applicationViewModel.UnrealProjectSync.RefreshDraftSources(
                 CharacterDesk.CompletedCharacters,
                 preferredCode);
-            if (restoreResult.Status == UnrealSyncSessionCacheLoadStatus.Invalid)
+            if (!string.IsNullOrWhiteSpace(restoreError.ErrorMessage))
             {
-                var exception = new InvalidDataException(restoreResult.ErrorMessage);
+                var exception = new InvalidDataException(restoreError.ErrorMessage);
                 AppendLog(LogKind.Error, "无法恢复虚幻同步进度，将忽略旧状态并返回底层检测。", exception);
-                ShowFloatingTip(InfoBarSeverity.Warning, "无法恢复同步进度", restoreResult.ErrorMessage);
+                ShowFloatingTip(InfoBarSeverity.Warning, "无法恢复同步进度", restoreError.ErrorMessage);
             }
 
             // 恢复页面只恢复缓存，不在启动阶段触发任何 Unreal 检测；进入新步骤或点击

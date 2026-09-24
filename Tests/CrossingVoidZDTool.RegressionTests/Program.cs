@@ -124,7 +124,6 @@ var tests = new (string Name, Action Run)[]
     ("蓝图置入按行写数据表而不是整表回灌", BlueprintSetupWritesRowsInsteadOfRefillingTable),
     ("蓝图置入中栏按组显示且隐藏无变化项", BlueprintSetupGroupsItemsAndHidesUnchanged),
     ("同步流程步号不会被夹回最后一步之前", WorkflowStepIsNotClampedBelowLastStep),
-    ("同步进度按角色和步骤存进角色目录", WorkflowStepCacheLivesInCharacterFolder),
     ("已加载的步骤不再重复触发虚幻检测", WorkflowStepSkipsDetectionWhenAlreadyLoaded),
     ("切换角色后各自的步骤与结果互不串台", WorkflowStateIsIsolatedPerCharacter),
     ("第四步序列差异存进自己的小缓存并能读回", SequenceSyncStepKeepsItsOwnCacheFile),
@@ -133,7 +132,6 @@ var tests = new (string Name, Action Run)[]
     ("角色目录里的路径落盘时不带盘符", CharacterOwnedPathsArePortableOnDisk),
     ("角色目录搬家后图标路径依然指得到", PortablePathsSurviveCharacterFolderMove),
     ("旧机器留下的图标路径会被修回来", StaleIconPathIsRepairedOnRead),
-    ("同步缓存只收编工具箱侧路径", SyncCacheKeepsUnrealSidePathsAbsolute),
     ("中栏任何状态都有东西显示", WorkspaceNeverShowsBlankPanel),
     ("中栏分组与条目始终一致", WorkspaceGroupsStayConsistentWithItems),
     ("直接改列表中栏也会跟着刷新", WorkspaceReactsToRawCollectionChanges),
@@ -165,7 +163,6 @@ var tests = new (string Name, Action Run)[]
     ("重命名中途失败要全部回滚", FailedBatchRenameRollsEverythingBack),
     ("外部取消不算命令执行失败", ExternalCancellationIsNotReportedAsFailure),
     ("手动备份和自动备份分开计数", ManualAndAutomaticBackupsAreCappedSeparately),
-    ("会话缓存读回后仍按大小写不敏感查表", SessionCacheKeepsCaseInsensitiveLookupAfterRoundTrip),
     ("语音与序列帧不再互相依赖", VoiceAndSequenceServicesDoNotDependOnEachOther),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("第四步序列同步自检", SequenceSyncSelfCheckPasses),
@@ -7679,14 +7676,14 @@ static void SequenceSyncStepKeepsItsOwnCacheFile()
         detector.SetLoadedPublishStep(4);
         detector.FlushSessionCache();
 
-        var misakaFolder = UnrealSyncSessionCacheService.GetCacheFolderPath(misaka);
+        var misakaFolder = UnrealSyncCacheFolder.GetCacheFolderPath(misaka);
         var step5Path = Path.Combine(misakaFolder, Step4SequenceSyncCache.FileName);
         AssertEqual(true, File.Exists(step5Path));
         // 没跑过这一步的角色目录里不该出现它
         AssertEqual(
             false,
             File.Exists(Path.Combine(
-                UnrealSyncSessionCacheService.GetCacheFolderPath(kirito),
+                UnrealSyncCacheFolder.GetCacheFolderPath(kirito),
                 Step4SequenceSyncCache.FileName)));
 
         // 换一个新会话，并把会话缓存那份删掉 —— 只剩它自己的小文件，照样要能恢复整棵树。
@@ -8193,62 +8190,6 @@ static void StaleIconPathIsRepairedOnRead()
     }
 }
 
-static void SyncCacheKeepsUnrealSidePathsAbsolute()
-{
-    // 分步缓存里两侧路径同名都叫 AssetPath：工具箱那侧要收编成相对，
-    // 虚幻那侧（引擎、工程、导出中间目录）在工作区外面，必须保持绝对。
-    var root = CreateTemporaryTestFolder();
-    try
-    {
-        var projectPath = Path.Combine(root, "Unreal", "CrossingVoid.uproject");
-        Directory.CreateDirectory(Path.GetDirectoryName(projectPath)!);
-        File.WriteAllText(projectPath, "{}");
-        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴");
-        Directory.CreateDirectory(character.ToolFolderPath);
-        var toolboxAsset = SeedIconFile(character, "ZDMaterial", "Click", "Frame0.png");
-        var unrealAsset = Path.Combine(root, "Unreal", "Intermediate", "ZDToolboxExport", "Frame0.png");
-
-        var service = new UnrealSyncSessionCacheService();
-        var cache = new UnrealSyncSessionCache
-        {
-            ProtocolVersion = 3,
-            ProjectPath = projectPath,
-            EnginePath = Path.Combine(root, "Engine", "UnrealEditor.exe"),
-            SelectedCharacterCode = character.Code,
-            WorkflowStep = 3,
-            PublishChanges =
-            [
-                new UnrealBridgeChange(
-                    "click.0",
-                    UnrealBridgeModule.SequenceFrames,
-                    "Click 第 0 帧",
-                    UnrealBridgeChangeKind.Added,
-                    new UnrealBridgeSnapshotItem("click.0", "click", UnrealBridgeModule.SequenceFrames, "Click 第 0 帧", "hash", "{}", toolboxAsset),
-                    new UnrealBridgeSnapshotItem("click.0", "click", UnrealBridgeModule.SequenceFrames, "Click 第 0 帧", "hash", "{}", unrealAsset),
-                    true)
-            ],
-        };
-        AssertEqual(true, service.Write(character, projectPath, cache));
-
-        var cachePath = Directory.GetFiles(
-            UnrealSyncSessionCacheService.GetCacheFolderPath(character), "sync-*-step3.json").Single();
-        var text = File.ReadAllText(cachePath);
-        AssertEqual(true, text.Contains("$char/ZDMaterial/Click/Frame0.png", StringComparison.Ordinal));
-        AssertEqual(true, text.Contains("Intermediate", StringComparison.Ordinal));
-        AssertEqual(false, text.Contains(character.FolderPath.Replace(@"\", @"\\"), StringComparison.OrdinalIgnoreCase));
-
-        var loaded = service.LoadStep(character, projectPath, character.Code, 3);
-        AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, loaded.Status);
-        AssertEqual(toolboxAsset, loaded.Cache!.PublishChanges[0].ToolboxItem!.AssetPath);
-        AssertEqual(unrealAsset, loaded.Cache.PublishChanges[0].UnrealItem!.AssetPath);
-        AssertEqual(projectPath, loaded.Cache.ProjectPath);
-    }
-    finally
-    {
-        Directory.Delete(root, recursive: true);
-    }
-}
-
 static void WorkflowStateIsIsolatedPerCharacter()
 {
     // 同步台一次只服务一个角色，但用户会来回切。切换时如果状态没清干净、
@@ -8323,8 +8264,8 @@ static void WorkflowStateIsIsolatedPerCharacter()
         viewModel.FlushSessionCache();
 
         // 两份缓存各自落在自己的角色目录下，互不覆盖
-        var misakaCache = UnrealSyncSessionCacheService.GetCacheFolderPath(misaka);
-        var kiritoCache = UnrealSyncSessionCacheService.GetCacheFolderPath(kirito);
+        var misakaCache = UnrealSyncCacheFolder.GetCacheFolderPath(misaka);
+        var kiritoCache = UnrealSyncCacheFolder.GetCacheFolderPath(kirito);
         AssertEqual(true, Directory.Exists(misakaCache));
         AssertEqual(true, Directory.Exists(kiritoCache));
         // 角色目录下有**两类**分步文件，别用 `*step4*.json` 一把捞：
@@ -8344,21 +8285,20 @@ static void WorkflowStateIsIsolatedPerCharacter()
         AssertEqual(1, Directory.GetFiles(misakaCache, "step5-blueprint-setup.json").Length);
         AssertEqual(0, Directory.GetFiles(kiritoCache, "step5-blueprint-setup.json").Length);
 
-        // 切回御坂：第五步的结果要能从它自己的缓存恢复回来
+        // 切回御坂：第五步的结果要能从它**自己的**小文件恢复回来
         viewModel.SelectSource(SourceOf(misaka));
-        var restored = new UnrealSyncSessionCacheService()
-            .LoadStep(misaka, projectPath, misaka.Code, 6);
-        AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, restored.Status);
-        AssertEqual(6, restored.Cache!.WorkflowStep);
-        AssertEqual(true, restored.Cache.IsBlueprintSetupLoaded);
-        AssertSequence(["bp.anti"], restored.Cache.BlueprintSetupItems.Select(item => item.StableId).ToArray());
+        var restoredBlueprint = Step5BlueprintSetupCache.TryLoad(misaka, misaka.Code);
+        AssertEqual(true, restoredBlueprint is not null);
+        AssertSequence(
+            ["bp.anti"],
+            restoredBlueprint!.Items.Select(item => item.StableId).ToArray());
 
         // 桐人的第三步缓存同样完好，没有被御坂的写入覆盖
-        var kiritoRestored = new UnrealSyncSessionCacheService()
-            .LoadStep(kirito, projectPath, kirito.Code, 4);
-        AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, kiritoRestored.Status);
-        AssertEqual(true, kiritoRestored.Cache!.IsLightConfigurationLoaded);
-        AssertSequence(["item.icon"], kiritoRestored.Cache.LightConfigurationItems.Select(item => item.StableId).ToArray());
+        var kiritoLight = Step3LightConfigurationCache.TryLoad(kirito, kirito.Code);
+        AssertEqual(true, kiritoLight is not null);
+        AssertSequence(
+            ["item.icon"],
+            kiritoLight!.Items.Select(item => item.StableId).ToArray());
     }
     finally
     {
@@ -8497,13 +8437,8 @@ static void MaterialSyncInvalidatesStaleLightConfiguration()
         var cachePath = Step3LightConfigurationCache.GetFilePath(character);
         AssertEqual(true, File.Exists(cachePath));
         AssertEqual(1, viewModel.LightConfigurationErrorCount);
-        // 先把整体会话缓存落盘 —— 那份里也装着第 3 步的结果，
-        // 是"作废"必须一起盖掉的第二处（第 3 步读不到自己的小文件时会回退到它）。
+        // 先把挂起的那份落盘（读盘前的老规矩）。
         viewModel.FlushSessionCache();
-        AssertEqual(
-            true,
-            new UnrealSyncSessionCacheService()
-                .LoadStep(character, projectPath, character.Code, 3).Cache!.IsLightConfigurationLoaded);
 
         // 素材刚写进工程 —— 这一步的结果前提变了，作废它。
         viewModel.InvalidateLightConfigurationResult();
@@ -8513,14 +8448,9 @@ static void MaterialSyncInvalidatesStaleLightConfiguration()
         AssertEqual(0, viewModel.LightConfigurationErrorCount);
         AssertEqual("尚未检测基础配置", viewModel.LightConfigurationSummaryText);
         AssertEqual(false, File.Exists(cachePath));
-        // 两层缓存都要盖掉：小文件删了，整体会话缓存里那份也得是"没查过"。
-        AssertEqual(
-            false,
-            new UnrealSyncSessionCacheService()
-                .LoadStep(character, projectPath, character.Code, 3).Cache!.IsLightConfigurationLoaded);
 
-        // 换一个新会话再进第 3 步：小缓存没了、会话缓存也已是空的，
-        // 不能把那份过期结果捡回来（原来的洞就在这里）。
+        // 换一个新会话再进第 3 步：小缓存没了就是"没查过"，
+        // 不能把那份过期结果捡回来（原来的洞就在这里 —— 那时还有整体缓存兜着）。
         var reader = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
         reader.Load(enginePath, projectPath);
         reader.IsEngineToToolbox = false;
@@ -8530,80 +8460,6 @@ static void MaterialSyncInvalidatesStaleLightConfiguration()
         AssertEqual(false, reader.IsLightConfigurationLoaded);
         AssertEqual(0, reader.LightConfigurationErrorCount);
         AssertEqual("尚未检测基础配置", reader.LightConfigurationSummaryText);
-    }
-    finally
-    {
-        Directory.Delete(root, recursive: true);
-    }
-}
-
-static void WorkflowStepCacheLivesInCharacterFolder()
-{
-    var root = CreateTemporaryTestFolder();
-    try
-    {
-        var character = CreateCharacter(root, "Misaka", "御坂美琴") with { IsCompleted = true };
-        const string projectPath = @"C:\Unreal\CrossingVoid.uproject";
-        var service = new UnrealSyncSessionCacheService();
-
-        // 没写过就是 Missing，不能报成损坏——第一次进这一步是正常情况。
-        AssertEqual(
-            UnrealSyncSessionCacheLoadStatus.Missing,
-            service.LoadStep(character, projectPath, character.Code, UnrealSyncWorkflow.MaxStep).Status);
-
-        // 每一步各自一个文件，互不覆盖。
-        for (var step = UnrealSyncWorkflow.MinStep; step <= UnrealSyncWorkflow.MaxStep; step++)
-        {
-            AssertEqual(true, service.Write(character, projectPath, new UnrealSyncSessionCache
-            {
-                ProjectPath = projectPath,
-                SelectedCharacterCode = character.Code,
-                WorkflowStep = step,
-                IsPublishDetection = true
-            }));
-        }
-
-        // 缓存要落在角色自己的目录里：角色之间不会撞车，导出角色时进度一起带走。
-        var cacheFolder = UnrealSyncSessionCacheService.GetCacheFolderPath(character);
-        AssertEqual(true, cacheFolder.StartsWith(character.ToolFolderPath, StringComparison.OrdinalIgnoreCase));
-        AssertEqual(
-            UnrealSyncWorkflow.MaxStep - UnrealSyncWorkflow.MinStep + 1,
-            Directory.GetFiles(cacheFolder, "*.json").Length);
-
-        for (var step = UnrealSyncWorkflow.MinStep; step <= UnrealSyncWorkflow.MaxStep; step++)
-        {
-            var loaded = service.LoadStep(character, projectPath, character.Code, step);
-            AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, loaded.Status);
-            AssertEqual(step, loaded.Cache!.WorkflowStep);
-        }
-
-        // 恢复现场时取最近写过的那一步。
-        AssertEqual(
-            UnrealSyncWorkflow.MaxStep,
-            service.LoadLatest(character, projectPath, character.Code).Cache!.WorkflowStep);
-
-        // 同一个角色对接另一个 Unreal 项目时不能读到这一份。
-        AssertEqual(
-            UnrealSyncSessionCacheLoadStatus.Missing,
-            service.LoadStep(character, @"D:\Other\Other.uproject", character.Code, UnrealSyncWorkflow.MaxStep).Status);
-
-        // 落盘被强杀打断会留下 0 字节文件，那是「没有缓存」，不是「缓存损坏」，
-        // 不该弹错误提示。
-        var emptyPath = Path.Combine(cacheFolder, Path.GetFileName(
-            Directory.GetFiles(cacheFolder, "*.json").OrderBy(path => path).First()));
-        File.WriteAllText(emptyPath, string.Empty);
-        AssertEqual(
-            UnrealSyncSessionCacheLoadStatus.Missing,
-            service.LoadStep(character, projectPath, character.Code, UnrealSyncWorkflow.MinStep).Status);
-
-        // 某一步的文件坏了，只该让那一步失效，不该拖垮整次恢复。
-        var brokenPath = Directory.GetFiles(cacheFolder, "*.json")
-            .OrderByDescending(path => path)
-            .First();
-        File.WriteAllText(brokenPath, "{ 这不是 JSON");
-        var latest = service.LoadLatest(character, projectPath, character.Code);
-        AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, latest.Status);
-        AssertEqual(UnrealSyncWorkflow.MaxStep - 1, latest.Cache!.WorkflowStep);
     }
     finally
     {
@@ -10457,44 +10313,6 @@ static void ManualAndAutomaticBackupsAreCappedSeparately()
         // 自动的也是 3 份，而且手动那 3 份一份不能少
         AssertEqual(3, afterAutomatic.Count(entry => entry.IsAutomatic));
         AssertEqual(3, afterAutomatic.Count(entry => !entry.IsAutomatic));
-    }
-    finally
-    {
-        Directory.Delete(root, recursive: true);
-    }
-}
-
-static void SessionCacheKeepsCaseInsensitiveLookupAfterRoundTrip()
-{
-    // System.Text.Json 对「有 setter 的集合属性」默认新建一个默认比较器的实例再赋值，
-    // 声明处的 OrdinalIgnoreCase 就丢了——而这类丢失是静默的：
-    // 基线查不到就把已同步的素材判成新增/冲突，第二步差异永远归不了零。
-    // 声明处标了 [JsonObjectCreationHandling(Populate)] 才保得住，这条用例是它的回归网。
-    var root = CreateTemporaryTestFolder();
-    try
-    {
-        var projectPath = Path.Combine(root, "CrossingVoid.uproject");
-        File.WriteAllText(projectPath, "{}");
-        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴") with { IsCompleted = true };
-        Directory.CreateDirectory(character.ToolFolderPath);
-
-        var service = new UnrealSyncSessionCacheService();
-        var cache = new UnrealSyncSessionCache
-        {
-            ProtocolVersion = 3,
-            ProjectPath = projectPath,
-            SelectedCharacterCode = character.Code,
-            WorkflowStep = 3,
-        };
-        cache.NormalizationDecisions["aBcDeF"] = "redirect";
-        cache.SelectedStableIds.Add("aBcDeF");
-        AssertEqual(true, service.Write(character, projectPath, cache));
-
-        var loaded = service.LoadStep(character, projectPath, character.Code, 3);
-        AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, loaded.Status);
-        // 大小写不同也要查得到——落盘再读回之后比较器不能退化
-        AssertEqual(true, loaded.Cache!.NormalizationDecisions.ContainsKey("ABCDEF"));
-        AssertEqual(true, loaded.Cache.SelectedStableIds.Contains("ABCDEF"));
     }
     finally
     {
@@ -13866,7 +13684,6 @@ static int RunUnrealSyncSmoke(string[] args)
     }
 
     var syncService = new UnrealProjectSyncService();
-    var cacheService = new UnrealSyncSessionCacheService();
     var failures = 0;
 
     foreach (var character in characters)
@@ -13943,20 +13760,18 @@ static int RunUnrealSyncSmoke(string[] args)
                 }
             }
 
-            // 缓存必须落在这个角色自己的目录里
-            var cacheFolder = UnrealSyncSessionCacheService.GetCacheFolderPath(character);
+            // 各步的小缓存必须落在这个角色自己的目录里（一步一个文件）
+            var cacheFolder = UnrealSyncCacheFolder.GetCacheFolderPath(character);
             var stepFiles = Directory.Exists(cacheFolder)
-                ? Directory.GetFiles(cacheFolder, "sync-*.json").Length
-                : 0;
-            Console.WriteLine($"  分步缓存：{cacheFolder}（{stepFiles} 个）");
-            for (var step = UnrealSyncWorkflow.MinStep; step <= UnrealSyncWorkflow.MaxStep; step++)
+                ? Directory.GetFiles(cacheFolder, "*.json")
+                    .Select(path => Path.GetFileName(path)!)
+                    .OrderBy(name => name, StringComparer.Ordinal)
+                    .ToArray()
+                : [];
+            Console.WriteLine($"  分步缓存：{cacheFolder}（{stepFiles.Length} 个）");
+            foreach (var name in stepFiles)
             {
-                var result = cacheService.LoadStep(character, projectPath, character.Code, step);
-                if (result.Status == UnrealSyncSessionCacheLoadStatus.Invalid)
-                {
-                    Console.WriteLine($"    !! 第 {step} 步缓存损坏：{result.ErrorMessage}");
-                    failures++;
-                }
+                Console.WriteLine($"    {name}");
             }
         }
         catch (Exception ex)
@@ -14018,10 +13833,11 @@ static int RunPortablePathMigration(string[] args)
             files.Add(toolboxDataPath);
         }
 
-        var cacheFolder = UnrealSyncSessionCacheService.GetCacheFolderPath(character);
+        var cacheFolder = UnrealSyncCacheFolder.GetCacheFolderPath(character);
         if (Directory.Exists(cacheFolder))
         {
-            files.AddRange(Directory.GetFiles(cacheFolder, "sync-*.json"));
+            // 一步一个文件之后这里要扫**全部**小文件（原来只扫共用的那份 sync-*.json）。
+            files.AddRange(Directory.GetFiles(cacheFolder, "*.json"));
         }
 
         var before = files.ToDictionary(path => path, File.ReadAllText, StringComparer.OrdinalIgnoreCase);
@@ -14033,7 +13849,6 @@ static int RunPortablePathMigration(string[] args)
         }
 
         // 分步缓存：同样过一遍读写。缓存本身是可再生的，读坏了就跳过。
-        var cacheService = new UnrealSyncSessionCacheService();
         foreach (var cachePath in files.Where(path => !string.Equals(path, toolboxDataPath, StringComparison.OrdinalIgnoreCase)))
         {
             try

@@ -140,13 +140,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             NotifyWorkspaceStateChanged();
         }
     }
-    private readonly UnrealSyncSessionCacheService _sessionCacheService = new();
-    private readonly SemaphoreSlim _sessionSaveSemaphore = new(1, 1);
     private int _sessionSaveVersion;
-    private UnrealSyncSessionCache? _loadedSessionCache;
-    private UnrealSyncSessionCache? _pendingSessionCache;
-    private string _pendingSessionProjectPath = string.Empty;
-    private CharacterCard? _pendingSessionCharacter;
     private bool _sessionRestored;
     private bool _isRestoringSession;
     private int _bulkSelectionUpdateDepth;
@@ -794,7 +788,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     public void Load(string enginePath, string projectPath)
     {
-        _loadedSessionCache = null;
         _isRestoringSession = true;
         try
         {
@@ -944,18 +937,18 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     // ── SetFoundationConfigurationError 搬到了 Step1Foundation.cs ──
     //    （它增删的是**第 1 步的检查项**，按"一步一个文件"该住那边；第 3 步那边照旧调用它。）
 
-    public UnrealSyncSessionCacheLoadResult RefreshDraftSources(IEnumerable<CharacterCard> characters, string? preferredCharacterCode = null)
+    public SessionRestoreOutcome RefreshDraftSources(IEnumerable<CharacterCard> characters, string? preferredCharacterCode = null)
     {
         _draftSources.Clear();
         _draftSources.AddRange(characters.Where(character => character.IsCompleted));
         RebuildSourceLists();
-        var result = RestoreSessionCache(preferredCharacterCode);
-        if (result.Status != UnrealSyncSessionCacheLoadStatus.Loaded)
+        var outcome = RestoreSessionState(preferredCharacterCode);
+        if (!outcome.Restored)
         {
             SelectDefaultPublishSource(preferredCharacterCode);
         }
 
-        return result;
+        return outcome;
     }
 
     public void SelectSource(UnrealSyncSourceItem? source)
@@ -996,44 +989,12 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             TryApplyFoundationCache(SelectedSource?.DraftCharacter);
         }
         ClearWorkspaceFailure();
-        if (!sameSource)
-        {
-            RestoreCharacterWorkflowStep();
-        }
-
+        // 切角色**不再回到"他上次停在哪一步"**（晓桀 2026-09-24：这个不要了）——
+        // 一律从第 1 步开始，往哪走由用户自己点。
         NotifyWorkspaceStateChanged();
         SaveSessionCache();
     }
 
-    /// <summary>
-    /// 切到另一个角色时，回到这个角色自己上次停的步骤。
-    ///
-    /// 以前切换只换数据、不换步号，于是「在御坂的第五步切到桐人」会停在
-    /// 桐人的第五步上——而桐人可能连第一步都没做完。更糟的是紧接着那次
-    /// 保存会在桐人目录里写一份空的第五步缓存，把他真实的进度盖出一个假象。
-    /// </summary>
-    private void RestoreCharacterWorkflowStep()
-    {
-        var character = SelectedSource?.DraftCharacter;
-        if (IsEngineToToolbox || character is null || string.IsNullOrWhiteSpace(ProjectPath))
-        {
-            return;
-        }
-
-        var cached = _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache;
-        var step = cached?.WorkflowStep is int value &&
-            value >= UnrealSyncWorkflow.MinStep && value <= UnrealSyncWorkflow.MaxStep
-                ? value
-                : UnrealSyncWorkflow.MinStep;
-        if (WorkflowStep != step)
-        {
-            ReturnToWorkflowStep(step);
-            return;
-        }
-
-        // 步号没变也要把这一步的缓存读回来，否则会显示上一个角色的内容。
-        RestoreWorkflowStepCache(step);
-    }
 
     public bool OpenNormalizationWorkspace()
     {
@@ -1046,17 +1007,9 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             return false;
         }
 
-        var inMemoryCache = _loadedSessionCache;
-        var stepCache = _sessionCacheService.LoadStep(character, ProjectPath, character.Code, 2).Cache;
-        // 先读第 2 步自己的缓存文件，没有再回退到整体缓存（兼容搬之前留下的旧决策）。
-        var cachedDecisions = LoadNormalizationDecisions(character, () =>
-            stepCache?.NormalizationDecisions ??
-            (inMemoryCache is not null && string.Equals(
-                inMemoryCache.SelectedCharacterCode,
-                character.Code,
-                StringComparison.OrdinalIgnoreCase)
-                ? inMemoryCache.NormalizationDecisions
-                : _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache?.NormalizationDecisions ?? []));
+        // 规整决策只认第 2 步自己的小文件（`step2-normalization.json`）——
+        // 原来这里还有"回退到整体会话缓存"的一层，那一坨已经删了（2026-09-24）。
+        var cachedDecisions = LoadNormalizationDecisions(character, () => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
         var rebuiltItems = BuildNormalizationItems(character, candidate, cachedDecisions);
         ApplyNormalizationItems(rebuiltItems);
         return true;
@@ -1079,15 +1032,8 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             return false;
         }
 
-        var inMemoryCache = _loadedSessionCache;
-        // 同上：先读自己的文件。
-        var cachedDecisions = LoadNormalizationDecisions(character, () =>
-            inMemoryCache is not null && string.Equals(
-                inMemoryCache.SelectedCharacterCode,
-                character.Code,
-                StringComparison.OrdinalIgnoreCase)
-                ? inMemoryCache.NormalizationDecisions
-                : _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache?.NormalizationDecisions ?? []);
+        // 同上：只读自己的文件。
+        var cachedDecisions = LoadNormalizationDecisions(character, () => new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase));
         var rebuiltItems = await Task.Run(() => BuildNormalizationItems(character, candidate, cachedDecisions));
         ApplyNormalizationItems(rebuiltItems);
         return true;
@@ -1132,6 +1078,14 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// 进入某一步时，把这一步**自己的小缓存**回填到界面。
+    ///
+    /// 「一步一个文件」改造完成后这里只剩"分发"：每一步怎么读都住在它自己那份文件里
+    /// （`TryApplyXxxCache`）。共用的一大坨会话缓存已经删掉（2026-09-24），
+    /// 所以原来那些"读不到小文件就回退到整体缓存"的分支整段消失 ——
+    /// **读不到就是"没查过"**，界面显示「尚未检测」，这是正确呈现。
+    /// </summary>
     private void RestoreWorkflowStepCache(int step)
     {
         var characterCode = SelectedSource?.DraftCharacter?.Code ?? SelectedSource?.UnrealCandidate?.Code;
@@ -1143,140 +1097,26 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         // 勾选是 180ms 防抖写盘的。这里只读磁盘，所以必须先把挂起的那份落盘，
         // 否则「勾选后立刻点同步」会读到勾选之前的旧缓存，把刚做的勾选整个抹掉。
         FlushSessionCache();
-        var result = _sessionCacheService.LoadStep(
-            SelectedSource?.DraftCharacter, ProjectPath, characterCode, step);
 
-        // 第 4 步先读自己的小缓存（`step4-sequence-sync.json`）：序列差异 + 勾选都在里面，
-        // 不依赖那份所有步骤共用、越来越大的会话缓存。
-        //
-        // 会话缓存仍然读进来放进 _loadedSessionCache —— 它是写盘时的"兜底快照"，
-        // 别的步骤没被这次改动的数据（规整决策、基础配置…）要靠它带过去，
-        // 不能因为这一步换了来源就把它们丢掉。
-        if (step == 4)
-        {
-            if (result.Status == UnrealSyncSessionCacheLoadStatus.Loaded && result.Cache is not null)
-            {
-                _loadedSessionCache = result.Cache;
-            }
-
-            if (TryApplySequenceSyncCache(SelectedSource?.DraftCharacter))
-            {
-                return;
-            }
-        }
-
-        // 第 2 步「同步素材」（合并后）同理：先读自己的小缓存 `step2-material-sync.json`。
-        if (step == 2)
-        {
-            if (result.Status == UnrealSyncSessionCacheLoadStatus.Loaded && result.Cache is not null)
-            {
-                _loadedSessionCache = result.Cache;
-            }
-
-            if (TryApplyMaterialSyncCache(SelectedSource?.DraftCharacter))
-            {
-                return;
-            }
-        }
-
-        if (result.Status != UnrealSyncSessionCacheLoadStatus.Loaded || result.Cache is null)
-        {
-            return;
-        }
-
-        var cache = result.Cache;
+        // 整段都在"恢复中"，免得回填触发的保存把刚读回来的东西又写一遍
+        // （`SaveSessionCache` 看到这个标志会直接返回）。
         _isRestoringSession = true;
         try
         {
-            _loadedSessionCache = cache;
-            if (step == 2)
+            switch (step)
             {
-                // 第 2 步（合并后的「同步素材」）：
-                // ① **内存里有东西就别拿会话缓存盖回去** —— 刚检测出来的结果比缓存新；
-                // ② **不再动"加载过"的标志** —— 那个现在归步加载表（`_stepLoads.IsLoaded(2)`）。
-                //    原来这里会从会话缓存重设 `IsNormalizationStepLoaded`，缓存里没有那几项时
-                //    就把它设成 false，于是"退回第 2 步"显示成「尚未检测」（2026-09-24 实测踩到）。
-                if (NormalizationItems.Count == 0)
-                {
-                    RestoreNormalizationItems(cache.NormalizationItems);
-                }
-
-                return;
-            }
-
-            if (step == 5)
-            {
-                // 第 5 步先读自己的小缓存（`step5-blueprint-setup.json`），
-                // 整体缓存只在没有小文件时兜底（兼容搬之前留下的旧进度）。
-                // 两件事都住它自己那个文件里 —— 这里只管"什么时候该试"。
-                if (TryApplyBlueprintSetupCache(SelectedSource?.DraftCharacter))
-                {
-                    return;
-                }
-
-                if (TryApplyBlueprintSetupFromSessionCache(cache))
-                {
-                    return;
-                }
-            }
-
-            if (step == 3)
-            {
-                // 第 3 步先读自己的小缓存（`step3-light-configuration.json`），
-                // 整体缓存只在没有小缓存时兜底（兼容搬之前留下的旧进度）。
-                // 两件事都住它自己那个文件里 —— 这里只管"什么时候该试"。
-                if (TryApplyLightConfigurationCache(SelectedSource?.DraftCharacter))
-                {
-                    return;
-                }
-
-                if (TryApplyLightConfigurationFromSessionCache(cache))
-                {
-                    return;
-                }
-            }
-
-            if (step is 2 or 4 && cache.IsPublishDetection)  // 差异树只归这两步（素材 / 序列）
-            {
-                // 这一步的树已经在内存里了，就别再拿缓存盖回去。
-                //
-                // 「重新加载序列同步」的流程是：检测 → 建树 → SetLoadedPublishStep(5)
-                // → ReturnToWorkflowStep(4)。最后这一步如果老老实实读缓存，
-                // 刚检测出来的结果马上会被上一次写下的那份覆盖掉 —— 用户按了刷新，
-                // 屏幕上却还是刷新前的内容，日志里却能同时看到两份不同的数字。
-                //
-                // 判定用 _loadedPublishStep：它记的就是「内存里这棵树属于哪一步」。
-                // 第二步和第四步共用同一棵树的槽位、范围不同，只有它能把两者分开。
-                // 换角色时 SelectSource 会 ResetImportOperation 把它清零，冷启动是 0，
-                // 这两种情况照常从缓存恢复。
-                if (HasImportDetection &&
-                    _loadedPublishStep == step &&
-                    SelectionTreeRoots.Count > 0 &&
-                    string.Equals(
-                        SelectedSource?.DraftCharacter?.Code ?? SelectedSource?.UnrealCandidate?.Code,
-                        cache.SelectedCharacterCode,
-                        StringComparison.OrdinalIgnoreCase))
-                {
-                    return;
-                }
-
-                SetLoadedPublishStep(step);
-                var changes = FilterCachedPublishChanges(cache, SelectedSource?.DraftCharacter).ToArray();
-                var roots = step == 4
-                    ? UnrealSyncSelectionTreeBuilder.FromSequenceChanges(changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: false)
-                    : UnrealSyncSelectionTreeBuilder.FromChanges(changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: true);
-                var selectedIds = cache.SelectedStableIds.Count > 0
-                    ? cache.SelectedStableIds
-                    : cache.PublishChanges.Where(change => change.IsSelected)
-                        .Select(change => change.StableId)
-                        .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                var selectedGroupIds = cache.SelectedGroupStableIds.Count > 0
-                    ? cache.SelectedGroupStableIds
-                    : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                var restoreIds = selectedIds.Union(selectedGroupIds, StringComparer.OrdinalIgnoreCase)
-                    .ToHashSet(StringComparer.OrdinalIgnoreCase);
-                ApplySelection(roots, restoreIds);
-                SetPublishSelectionTree(roots, changes);
+                case 2:
+                    TryApplyMaterialSyncCache(SelectedSource?.DraftCharacter);
+                    break;
+                case 3:
+                    TryApplyLightConfigurationCache(SelectedSource?.DraftCharacter);
+                    break;
+                case 4:
+                    TryApplySequenceSyncCache(SelectedSource?.DraftCharacter);
+                    break;
+                case 5:
+                    TryApplyBlueprintSetupCache(SelectedSource?.DraftCharacter);
+                    break;
             }
         }
         finally
@@ -1462,7 +1302,8 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             return null;
         }
 
-        var decisions = _loadedSessionCache?.NormalizationDecisions;
+        // 决策只从第 2 步自己的小文件读（不再看整体缓存）。
+        var decisions = Step2NormalizationCache.TryLoad(character, character.Code)?.Decisions;
         if (decisions is null || decisions.Count == 0)
         {
             return null;
@@ -1710,251 +1551,103 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         SaveSessionCache();
     }
 
-    private UnrealSyncSessionCacheLoadResult RestoreSessionCache(string? preferredCharacterCode)
+    /// <summary>
+    /// 冷启动恢复**现场**：全局现场（引擎/工程/方向/角色/上次检测时间/显示开关）
+    /// + 导入方向那一轮的候选快照。
+    ///
+    /// **不再恢复任何一步的结果**：各步的结果只认自己的小文件，进那一步时由
+    /// <see cref="RestoreWorkflowStepCache"/> 读回来。整体会话缓存（那一大坨
+    /// "所有步骤挤一起"）已经删掉（2026-09-24）。
+    ///
+    /// **也不再恢复"上次停在哪一步"**（晓桀明确不要）：冷启动一律第 1 步。
+    /// </summary>
+    private SessionRestoreOutcome RestoreSessionState(string? preferredCharacterCode)
     {
         if (_sessionRestored || string.IsNullOrWhiteSpace(ProjectPath))
         {
-            return new(UnrealSyncSessionCacheLoadStatus.Missing);
+            return new SessionRestoreOutcome(true, string.Empty);
         }
 
         _sessionRestored = true;
-        // 缓存现在按角色存在各自的工具目录下，所以要拿着角色卡去找，
-        // 没有指定角色时就在所有已完成角色里挑最近写过的那一份。
+
         var preferred = _draftSources.FirstOrDefault(item =>
-            string.Equals(item.Code, preferredCharacterCode, StringComparison.OrdinalIgnoreCase));
-        var loadResult = preferred is not null
-            ? _sessionCacheService.LoadLatest(preferred, ProjectPath, preferred.Code)
-            : _sessionCacheService.LoadLatest(_draftSources, ProjectPath);
-        var cache = loadResult.Cache;
-        if (loadResult.Status != UnrealSyncSessionCacheLoadStatus.Loaded || cache is null)
+                string.Equals(item.Code, preferredCharacterCode, StringComparison.OrdinalIgnoreCase))
+            ?? SelectedSource?.DraftCharacter
+            ?? _draftSources.FirstOrDefault();
+        if (preferred is null)
         {
-            return loadResult;
-        }
-        _loadedSessionCache = cache;
-
-        // 第 1 步「底层检测」**不再从这份整体缓存恢复**，它读自己的小缓存文件
-        // （`tool\UnrealSync\step1-foundation.json`）；整体缓存对它只写不读。
-        TryApplyFoundationCache(preferred);
-
-        if (!string.Equals(cache.EnginePath, EnginePath, StringComparison.OrdinalIgnoreCase))
-        {
-            return new(UnrealSyncSessionCacheLoadStatus.Invalid, ErrorMessage: "同步进度使用的 Unreal 引擎路径与当前设置不一致。");
+            return new SessionRestoreOutcome(false, string.Empty);
         }
 
-        // 第三步会在进入时清理第二步的差异树标记，因此不能只靠
-        // IsPublishDetection 判断是否存在可恢复的同步进度。
-        var hasProgress = cache.IsPublishDetection ||
-            cache.ImportSnapshot is not null ||
-            cache.IsLightConfigurationLoaded ||
-            cache.IsBlueprintSetupLoaded ||
-            cache.WorkflowStep >= 4;
-        if (string.IsNullOrWhiteSpace(cache.SelectedCharacterCode) || !hasProgress)
+        var state = SessionStateCache.TryLoad(preferred);
+        if (state is null)
         {
-            return new(UnrealSyncSessionCacheLoadStatus.Missing);
+            // 没有现场（第一次用 / 刚换过角色目录）：当作全新开始。
+            TryApplyFoundationCache(preferred);
+            return new SessionRestoreOutcome(false, string.Empty);
+        }
+
+        if (!string.IsNullOrWhiteSpace(state.EnginePath) &&
+            !string.Equals(state.EnginePath, EnginePath, StringComparison.OrdinalIgnoreCase))
+        {
+            return new SessionRestoreOutcome(false, "同步进度使用的 Unreal 引擎路径与当前设置不一致。");
+        }
+
+        // 工程对不上就当现场过期 —— 各步的小文件里没有工程信息，这道闸就设在这里。
+        if (!string.IsNullOrWhiteSpace(state.ProjectPath) &&
+            !string.Equals(state.ProjectPath, ProjectPath, StringComparison.OrdinalIgnoreCase))
+        {
+            return new SessionRestoreOutcome(false, "同步进度属于另一个 Unreal 工程，已忽略。");
+        }
+
+        var source = CharacterSources.FirstOrDefault(item =>
+            string.Equals(
+                item.UnrealCandidate?.Code ?? item.DraftCharacter?.Code,
+                state.CharacterCode,
+                StringComparison.OrdinalIgnoreCase));
+        if (!string.IsNullOrWhiteSpace(state.CharacterCode) && source is null)
+        {
+            return new SessionRestoreOutcome(false, $"同步进度中的角色 {state.CharacterCode} 已不在当前来源列表中。");
         }
 
         _isRestoringSession = true;
         try
         {
-            HideCompletedFoundationChecks = cache.HideCompletedFoundationChecks;
-            HideResolvedNormalizationItems = cache.HideResolvedNormalizationItems;
-            IsEngineToToolbox = cache.Direction == UnrealBridgeDirection.ImportFromUnreal;
-            var stage = PublishStages.FirstOrDefault(item => item.Stage == cache.Stage);
-            if (stage is not null) SelectedPublishStage = stage;
-            var source = CharacterSources.FirstOrDefault(item =>
-                string.Equals(item.UnrealCandidate?.Code ?? item.DraftCharacter?.Code, cache.SelectedCharacterCode, StringComparison.OrdinalIgnoreCase));
-            if (source is null)
+            HideCompletedFoundationChecks = state.HideCompletedFoundationChecks;
+            HideResolvedNormalizationItems = state.HideResolvedNormalizationItems;
+            IsEngineToToolbox = state.ImportDirection;
+            if (source is not null)
             {
-                return new(UnrealSyncSessionCacheLoadStatus.Invalid, ErrorMessage: $"同步进度中的角色 {cache.SelectedCharacterCode} 已不在当前来源列表中。");
+                SelectedSource = source;
             }
 
-            SelectedSource = source;
-            _lastContentDetectionAt = cache.DetectedAt == default ? null : cache.DetectedAt;
-            WorkflowStep = cache.WorkflowStep >= UnrealSyncWorkflow.MinStep &&
-                cache.WorkflowStep <= UnrealSyncWorkflow.MaxStep
-                    ? cache.WorkflowStep
-                    : UnrealSyncWorkflow.MinStep;
-            // 以前这里有一条"缓存说第 4 步、但没有差异检测结果 → 悄悄把人挪去第 3 步"。
-            // 删了（2026-09-24 第 4 步体检）：缺前置条件该**显示成"尚未检测"**，
-            // 而不是替用户换一步 —— 停在第 4 步看到"未检测"占位是**正确**的呈现
-            // （`WorkspaceNeverShowsBlankPanel` 那条用例管着"任何状态都有东西显示"）。
+            _lastContentDetectionAt = state.DetectedAt == default ? null : state.DetectedAt;
             OnPropertyChanged(nameof(ContentDetectionStatusText));
 
-            RestoreNormalizationItems(cache.NormalizationItems);
-            _detectionTotalCount = cache.DetectionTotalCount;
-            _detectionUnchangedCount = cache.DetectionUnchangedCount;
-            _detectionAddedCount = cache.DetectionAddedCount;
-            _detectionUpdatedCount = cache.DetectionUpdatedCount;
-            _detectionRenamedCount = cache.DetectionRenamedCount;
-            _detectionConflictCount = cache.DetectionConflictCount;
-            _detectionDeletedCount = cache.DetectionDeletedCount;
-            NotifyDetectionSummaryChanged();
-            // 这里原来会从会话缓存重设 `IsNormalizationStepLoaded`（下面那两行）。
-            // 它已经**没人读了** —— "这一步加载过没有"现在一律问步加载表（`_stepLoads.IsLoaded(2)`），
-            // 理由见 `UnrealProjectSyncViewModel.Workspace.cs` 的 `BuildWorkflowInputs`。
-            // 删掉是为了不留一个"看起来还在起作用"的假标志。
-            // 第 5 步先读自己的小缓存，整体缓存只在没有小缓存时兜底
-            // （构造细节都收在它自己那个文件里）。
-            if (!TryApplyBlueprintSetupCache(SelectedSource?.DraftCharacter))
+            // 第 1 步自己的小文件；其余各步等进那一步时再读（一步一个文件）。
+            TryApplyFoundationCache(source?.DraftCharacter ?? preferred);
+
+            // 导入方向：把上一轮的候选快照回填 —— 这是原来整体缓存里唯一没有替代品的东西。
+            var importDocument = ImportSnapshotCache.TryLoad(preferred, ProjectPath);
+            if (importDocument?.Snapshot is not null)
             {
-                TryApplyBlueprintSetupFromSessionCache(cache);
+                var roots = UnrealSyncSelectionTreeBuilder.FromSnapshot(importDocument.Snapshot);
+                ApplySelection(roots, importDocument.SelectedStableIds.ToHashSet(StringComparer.OrdinalIgnoreCase));
+                SetImportSelectionTree(
+                    roots,
+                    new HashSet<string>(StringComparer.OrdinalIgnoreCase),
+                    importDocument.Snapshot);
             }
-
-            // 第 3 步先读自己的小缓存，整体缓存只在没有小缓存时兜底
-            // （构造细节都收在它自己那个文件里）。
-            if (!TryApplyLightConfigurationCache(SelectedSource?.DraftCharacter))
-            {
-                TryApplyLightConfigurationFromSessionCache(cache);
-            }
-
-            if (cache.IsPublishDetection)
-            {
-                if (cache.DetectionAlgorithmVersion != CurrentDetectionAlgorithmVersion)
-                {
-                    cache.DetectionAlgorithmVersion = CurrentDetectionAlgorithmVersion;
-                    cache.PublishChanges.Clear();
-                    cache.SelectedStableIds.Clear();
-                    _lastPublishChanges.Clear();
-                    HasImportDetection = false;
-                    _loadedPublishStep = 0;
-                    ResetDetectionSummary();
-                    OnPropertyChanged(nameof(HasContentDetection));
-                    SetSelectionTree([]);
-                    ImportOperationTitle = "等待差异检测";
-                    ImportOperationMessage = "检测缓存已过期，请重新加载同步素材。";
-                    ImportDetailVisibility = Visibility.Collapsed;
-                    ImportResultVisibility = Visibility.Collapsed;
-                    ImportResultMessage = string.Empty;
-                }
-                else
-                {
-                    // 这一步的差异树**已经用刚检测出来的数据建好了**，就别再拿缓存盖回去。
-                    //
-                    // 缓存里存的是一份「待办清单」——两侧已经一致的项（Unchanged）按设计
-                    // 被剔掉了。盖回去之后，界面上会重新冒出一批早就同步完的动作，
-                    // 看着就像「刷新了却什么都没变」。用户点重新加载、看到列表照旧，
-                    // 就是这么来的。
-                    //
-                    // 只在这一步已经加载过、且还是同一个角色时才跳过；冷启动时
-                    // _loadedPublishStep 是 0，照常从缓存恢复。
-                    if (_loadedPublishStep == cache.WorkflowStep &&
-                        _loadedPublishStep is 2 or 4 &&
-                        SelectionTreeRoots.Count > 0 &&
-                        string.Equals(
-                            SelectedSource?.DraftCharacter?.Code,
-                            cache.SelectedCharacterCode,
-                            StringComparison.OrdinalIgnoreCase))
-                    {
-                        return loadResult;
-                    }
-
-                    var cachedComparison = FilterPublishChanges(cache.PublishChanges).ToArray();
-                    var cachedChanges = FilterCachedPublishChanges(cache, source.DraftCharacter).ToArray();
-                    var roots = cache.WorkflowStep == 4
-                        ? UnrealSyncSelectionTreeBuilder.FromSequenceChanges(cachedChanges, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: false)
-                        : UnrealSyncSelectionTreeBuilder.FromChanges(cachedChanges, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: true);
-                    var selectedIds = cache.SelectedStableIds.Count > 0
-                        ? cache.SelectedStableIds
-                        : cache.PublishChanges.Where(change => change.IsSelected).Select(change => change.StableId).ToHashSet(StringComparer.OrdinalIgnoreCase);
-                    ApplySelection(roots, selectedIds);
-                    if (cache.DetectionTotalCount == 0 && cachedChanges.Length > 0)
-                    {
-                        SetPublishDetectionSummary(cachedChanges);
-                    }
-                    SetPublishSelectionTree(roots, cachedComparison);
-                    // 只有第二步和第四步自己的缓存才算「这一步已加载」。
-                    // 从第五步的缓存恢复时，树里装的是上一步顺带留下的差异，
-                    // 认成第二步已加载会让人拿着旧范围的数据继续往下走。
-                    SetLoadedPublishStep(cache.WorkflowStep is 2 or 4 ? cache.WorkflowStep : 0);
-                }
-            }
-            else
-            {
-                var roots = UnrealSyncSelectionTreeBuilder.FromSnapshot(cache.ImportSnapshot!);
-                ApplySelection(roots, cache.SelectedStableIds);
-                SetImportSelectionTree(roots, new HashSet<string>(StringComparer.OrdinalIgnoreCase), cache.ImportSnapshot);
-            }
-
-            _lastContentDetectionAt = cache.DetectedAt == default ? null : cache.DetectedAt;
-            OnPropertyChanged(nameof(ContentDetectionStatusText));
-
-            return loadResult;
         }
         finally
         {
             _isRestoringSession = false;
         }
+
+        return new SessionRestoreOutcome(true, string.Empty);
     }
 
-    private void RestoreNormalizationItems(IEnumerable<UnrealSyncNormalizationCacheItem> cachedItems)
-    {
-        NormalizationItems.Clear();
-        foreach (var cached in cachedItems)
-        {
-            var candidates = cached.Candidates.ToArray();
-            var selectedCandidate = candidates.FirstOrDefault(candidate =>
-                string.Equals(candidate.StableId, cached.SelectedCandidateStableId, StringComparison.OrdinalIgnoreCase));
-            var item = new UnrealAssetNormalizationItem(
-                cached.StableId,
-                cached.Module,
-                cached.Category,
-                cached.UnrealAssetName,
-                cached.UnrealObjectPath,
-                cached.PreviewFilePath,
-                cached.ReferenceCount,
-                candidates,
-                cached.Decision == UnrealAssetNormalizationDecision.Redirect ? selectedCandidate : null,
-                cached.IsAlreadyNormalized);
-            if (cached.Decision == UnrealAssetNormalizationDecision.NotRequired)
-            {
-                item.MarkNotRequired();
-            }
-            else if (cached.Decision == UnrealAssetNormalizationDecision.Pending || selectedCandidate is null)
-            {
-                item.ClearRedirect();
-            }
 
-            NormalizationItems.Add(item);
-        }
-
-        RefreshVisibleNormalizationItems();
-        OnPropertyChanged(nameof(CanAdvanceWorkflow));
-    }
-
-    private IReadOnlyList<UnrealBridgeChange> FilterCachedPublishChanges(
-        UnrealSyncSessionCache cache,
-        CharacterCard? character)
-    {
-        var sequenceView = WorkflowStep == 4 ||
-            SelectedPublishStage?.Stage == UnrealBridgePublishStage.ZdAnimationTracks;
-        // 序列这一侧**不能**剔掉 Unchanged。第四步的树是按帧配对数出来的：
-        // 动作节点（sequence:<动作>）本身往往就是 Unchanged，剔掉之后
-        // 「Unreal 现有多少个帧位」无从得知，帧与帧的配对也全断了，
-        // 于是已经同步好的动作会重新显示成「删除 23 项 + 新增 23 项」。
-        // 第二步（素材）没有这个问题，那边只要待办清单。
-        var changes = FilterPublishChanges(cache.PublishChanges)
-            .Where(change => sequenceView || change.Kind != UnrealBridgeChangeKind.Unchanged)
-            .ToArray();
-        if (sequenceView)
-        {
-            return changes;
-        }
-
-        if (character is null)
-        {
-            return changes;
-        }
-
-        var state = new UnrealBridgeStateService().Load(character, ProjectPath);
-        if (state is null)
-        {
-            return changes;
-        }
-
-        return changes
-            .Where(change => !IsAlreadyVerified(change, state))
-            .ToArray();
-    }
 
     private static bool IsAlreadyVerified(
         UnrealBridgeChange change,
@@ -2026,172 +1719,86 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// 防抖写盘：**延迟 180ms 后在 UI 线程上同步写一遍**。
+    ///
+    /// 原来是"把整个 VM 拍成一大坨 `UnrealSyncSessionCache` → 丢线程池写 → 信号量互斥"
+    /// （因为那一坨是个大对象，边改边写会写出半截状态）。各步改成"一步一个文件"之后
+    /// 不需要快照了：每个文件由它自己那一步的保存方法从**当前内存状态**写出去，
+    /// 而延迟写是在 UI 线程上做的，不存在"边改边读"的竞争 ——
+    /// 于是那把 `_sessionSaveSemaphore` 和三个 `_pending*` 字段一起删掉
+    /// （那正是"UI 线程和线程池互相等"那一类死锁的来源，2026-09-24）。
+    /// </summary>
     private void SaveSessionCache()
     {
-        if (_isRestoringSession || string.IsNullOrWhiteSpace(ProjectPath)) return;
-        var existing = _loadedSessionCache;
-        var selectedCode = SelectedSource?.UnrealCandidate?.Code ?? SelectedSource?.DraftCharacter?.Code ?? existing?.SelectedCharacterCode ?? string.Empty;
-        var existingForSelectedCharacter = existing is not null && string.Equals(
-            existing.SelectedCharacterCode,
-            selectedCode,
-            StringComparison.OrdinalIgnoreCase)
-                ? existing
-                : null;
-        var selectedIds = GetSelectedStableIds().ToHashSet(StringComparer.OrdinalIgnoreCase);
-        var selectedByStableId = SelectionTreeRoots.SelectMany(root => root.Children)
-            .ToDictionary(item => item.StableId, item => item.IsChecked == true, StringComparer.OrdinalIgnoreCase);
-        var changes = _lastPublishChanges.Select(change => change with
-        {
-            IsSelected = selectedByStableId.GetValueOrDefault(change.StableId)
-        }).ToList();
-        var cache = new UnrealSyncSessionCache
-        {
-            EnginePath = EnginePath,
-            ProjectPath = ProjectPath,
-            DetectionAlgorithmVersion = CurrentDetectionAlgorithmVersion,
-            Direction = IsEngineToToolbox ? UnrealBridgeDirection.ImportFromUnreal : UnrealBridgeDirection.PublishToUnreal,
-            Stage = SelectedPublishStage?.Stage ?? UnrealBridgePublishStage.CharacterMaterials,
-            WorkflowStep = WorkflowStep,
-            SelectedCharacterCode = selectedCode,
-            DetectedAt = _lastContentDetectionAt ?? DateTimeOffset.Now,
-            IsPublishDetection = !IsEngineToToolbox,
-            DetectionTotalCount = _detectionTotalCount,
-            DetectionUnchangedCount = _detectionUnchangedCount,
-            DetectionAddedCount = _detectionAddedCount,
-            DetectionUpdatedCount = _detectionUpdatedCount,
-            DetectionRenamedCount = _detectionRenamedCount,
-            DetectionConflictCount = _detectionConflictCount,
-            DetectionDeletedCount = _detectionDeletedCount,
-            ImportSnapshot = _lastImportSnapshot ?? existingForSelectedCharacter?.ImportSnapshot,
-            // 第三步保存时也必须保留第二步差异；当前步骤文件由 WorkflowStep 隔离，
-            // 不能用空列表覆盖尚未执行完的第二步缓存。
-            PublishChanges = changes.Count > 0 ? changes : existingForSelectedCharacter?.PublishChanges ?? [],
-            SelectedStableIds = selectedIds,
-            SelectedGroupStableIds = UnrealSyncSelectionTreeBuilder.SelectedGroupAndLeafStableIds(SelectionTreeRoots)
-                .Where(id => SelectionTreeRoots.SelectMany(root => root.Children).All(item => !string.Equals(item.StableId, id, StringComparison.OrdinalIgnoreCase)))
-                .ToHashSet(StringComparer.OrdinalIgnoreCase),
-            NormalizationDecisions = NormalizationItems.Count == 0
-                ? existingForSelectedCharacter?.NormalizationDecisions ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
-                : NormalizationItems
-                    .Where(item => item.IsResolved)
-                     .ToDictionary(
-                         item => item.StableId,
-                         item => item.Decision == UnrealAssetNormalizationDecision.NotRequired
-                             ? "__not_required__"
-                             : item.SelectedCandidate?.StableId ?? string.Empty,
-                         StringComparer.OrdinalIgnoreCase),
-            NormalizationItems = NormalizationItems
-                .Select(item => new UnrealSyncNormalizationCacheItem
-                {
-                    StableId = item.StableId,
-                    Module = item.Module,
-                    Category = item.Category,
-                    UnrealAssetName = item.UnrealAssetName,
-                    UnrealObjectPath = item.UnrealObjectPath,
-                    PreviewFilePath = item.PreviewFilePath,
-                    ReferenceCount = item.ReferenceCount,
-                    Candidates = item.Candidates.ToList(),
-                    SelectedCandidateStableId = item.SelectedCandidate?.StableId ?? string.Empty,
-                    Decision = item.Decision,
-                    IsAlreadyNormalized = item.IsAlreadyNormalized
-                })
-                .ToList(),
-            IsNormalizationStepLoaded = IsNormalizationStepLoaded,
-            HideCompletedFoundationChecks = HideCompletedFoundationChecks,
-            HideResolvedNormalizationItems = HideResolvedNormalizationItems,
-            IsLightConfigurationLoaded = IsLightConfigurationLoaded,
-            LightConfigurationItems = _lastLightConfigurationItems.ToList(),
-            SelectedLightConfigurationIds = GetSelectedLightConfigurationIds().ToHashSet(StringComparer.OrdinalIgnoreCase),
-            LightConfigurationResultMessage = _lightConfigurationResultMessage,
-            IsBlueprintSetupLoaded = IsBlueprintSetupLoaded,
-            BlueprintSetupItems = _lastBlueprintSetupItems.ToList(),
-            SelectedBlueprintSetupIds = GetSelectedBlueprintSetupIds().ToHashSet(StringComparer.OrdinalIgnoreCase),
-            BlueprintSetupResultMessage = _blueprintSetupResultMessage
-        };
-        _loadedSessionCache = cache;
-        _pendingSessionCache = cache;
-        _pendingSessionProjectPath = ProjectPath;
-        // 缓存写在角色目录下，落盘时需要角色卡；这里连同快照一起捕获，
-        // 免得延迟落盘执行时选中的角色已经换掉了。
-        _pendingSessionCharacter = SelectedSource?.DraftCharacter;
-        var version = Interlocked.Increment(ref _sessionSaveVersion);
-        _ = PersistSessionCacheAfterDelayAsync(version, ProjectPath, _pendingSessionCharacter, cache);
-    }
-
-    private async Task PersistSessionCacheAfterDelayAsync(
-        int version,
-        string projectPath,
-        CharacterCard? character,
-        UnrealSyncSessionCache cache)
-    {
-        try
-        {
-            // 全程不回 UI 线程：FlushSessionCache 会在 UI 线程上同步等这个信号量，
-            // 续体一旦需要 UI 线程，两边就会互相等死。
-            await Task.Delay(180).ConfigureAwait(false);
-            if (version != Volatile.Read(ref _sessionSaveVersion)) return;
-            await _sessionSaveSemaphore.WaitAsync().ConfigureAwait(false);
-            try
-            {
-                if (version != Volatile.Read(ref _sessionSaveVersion)) return;
-                await Task.Run(() => _sessionCacheService.Write(character, projectPath, cache)).ConfigureAwait(false);
-                // 第 2 步「规整素材」另外写一份**自己的**缓存文件（一步一个文件）：
-                // 决策是这一步的私有数据，不该挤在所有步骤共用的大缓存里。
-                // 整体缓存照旧写（兼容旧版本），但它对第 2 步只是备份，读的时候优先读下面这份。
-                if (cache.NormalizationDecisions.Count > 0)
-                {
-                    await Task.Run(() => Step2NormalizationCache.Save(character, cache.NormalizationDecisions))
-                        .ConfigureAwait(false);
-                }
-                // 第 4 步「序列同步」同样另写一份自己的缓存文件（一步一个文件）。
-                // 用刚写的这份快照，两个文件里第四步的内容不会各说各话。
-                await Task.Run(() => SaveSequenceSyncCacheFromSnapshot(character, cache)).ConfigureAwait(false);
-                // 第 2 步「同步素材」也抄一份（同一份快照，所以两个地方不会各说各话）。
-                await Task.Run(() => SaveMaterialSyncCacheFromSnapshot(character, cache)).ConfigureAwait(false);
-                if (version == Volatile.Read(ref _sessionSaveVersion)) _pendingSessionCache = null;
-            }
-            finally
-            {
-                _sessionSaveSemaphore.Release();
-            }
-        }
-        catch
-        {
-            // A later interaction or window-close flush will retry the latest snapshot.
-        }
-    }
-
-    // ── SaveSelectionStateToSessionCache 搬到了 Step2MaterialSync.cs（FlushSessionCache 仍在这里）──
-
-    public void FlushSessionCache()
-    {
-        var cache = _pendingSessionCache;
-        var projectPath = _pendingSessionProjectPath;
-        var character = _pendingSessionCharacter;
-        if (cache is null || string.IsNullOrWhiteSpace(projectPath)) return;
-        Interlocked.Increment(ref _sessionSaveVersion);
-        // 这个方法会在 UI 线程上被调用，绝不能无限期阻塞：
-        // 拿不到信号量就直接放弃这次落盘，交给防抖保存完成，界面不能因此卡死。
-        if (!_sessionSaveSemaphore.Wait(TimeSpan.FromSeconds(2)))
+        if (_isRestoringSession || string.IsNullOrWhiteSpace(ProjectPath))
         {
             return;
         }
 
-        try
-        {
-            _sessionCacheService.Write(character, projectPath, cache);
-            // 防抖那条路会被这次 flush 顶掉（版本号一变它就放弃），
-            // 所以这里也得补写一次第四步自己的小文件，否则刚改的勾选只进了会话缓存。
-            SaveSequenceSyncCacheFromSnapshot(character, cache);
-            // 第 2 步同理。
-            SaveMaterialSyncCacheFromSnapshot(character, cache);
-            _pendingSessionCache = null;
-        }
-        finally
-        {
-            _sessionSaveSemaphore.Release();
-        }
+        var version = Interlocked.Increment(ref _sessionSaveVersion);
+        _ = WriteCachesAfterDelayAsync(version);
     }
+
+    private async Task WriteCachesAfterDelayAsync(int version)
+    {
+        await Task.Delay(180);
+        // 这期间又改过一次就交给后面那次写（版本号一变就放弃这一次）。
+        if (version != Volatile.Read(ref _sessionSaveVersion))
+        {
+            return;
+        }
+
+        WriteAllStepCaches(SelectedSource?.DraftCharacter);
+    }
+
+    /// <summary>立刻写一遍。读盘之前调它，保证磁盘上就是当前状态。</summary>
+    public void FlushSessionCache()
+    {
+        Interlocked.Increment(ref _sessionSaveVersion);
+        WriteAllStepCaches(SelectedSource?.DraftCharacter);
+    }
+
+    /// <summary>
+    /// 把「当前内存里的各步现场」整份写一遍：第 1~5 步各自的文件 + 全局现场 + 导入现场。
+    ///
+    /// 这就是原来那个 `SaveSessionCache` 的正身 —— 那时它先把整个 VM 拍成一大坨
+    /// `UnrealSyncSessionCache` 再落盘（所有步骤挤一起，bug 的温床）；现在各步只认自己的文件，
+    /// 它退化成"挨个调各步自己的保存方法"（2026-09-24）。
+    ///
+    /// ⚠️ **只在 UI 线程上调用**：各步的保存方法读的就是 VM 自己的集合。
+    /// ⚠️ **不写第 2 步的规整决策**：那个文件有自己的即时写入口
+    /// （`SaveNormalizationDecisionsCache`，用户改一个决策就写一次），不必在这里批量补。
+    /// </summary>
+    private void WriteAllStepCaches(CharacterCard? character)
+    {
+        if (character is null || string.IsNullOrWhiteSpace(ProjectPath))
+        {
+            return;
+        }
+
+        SaveFoundationCache(character);
+        SaveMaterialSyncCache(character);
+        SaveLightConfigurationCache(character);
+        SaveSequenceSyncCache(character);
+        SaveBlueprintSetupCache(character);
+        SessionStateCache.Save(character, new SessionStateCacheDocument
+        {
+            CharacterCode = character.Code,
+            EnginePath = EnginePath,
+            ProjectPath = ProjectPath,
+            ImportDirection = IsEngineToToolbox,
+            DetectedAt = _lastContentDetectionAt ?? default,
+            HideCompletedFoundationChecks = HideCompletedFoundationChecks,
+            HideResolvedNormalizationItems = HideResolvedNormalizationItems
+        });
+        ImportSnapshotCache.Save(character, ProjectPath, _lastImportSnapshot, GetSelectedStableIds());
+    }
+
+
+
+    // ── SaveSelectionStateToSessionCache 搬到了 Step2MaterialSync.cs（FlushSessionCache 仍在这里）──
+
 
     private void UpdateImportSelectionSummary()
     {

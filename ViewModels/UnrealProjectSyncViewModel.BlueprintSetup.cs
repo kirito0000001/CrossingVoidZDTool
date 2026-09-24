@@ -131,8 +131,10 @@ internal sealed partial class UnrealProjectSyncViewModel
     // ── 自己的缓存文件 ────────────────────────────────────────────────────
 
     /// <summary>把当前扫描结果写进第 5 步自己的缓存文件。</summary>
+    /// ⚠️ **没扫过就别写**（防抖会全量写一遍，空结果不该覆盖有效文件）。
     internal bool SaveBlueprintSetupCache(CharacterCard? character) =>
         character is not null &&
+        IsBlueprintSetupLoaded &&
         Step5BlueprintSetupCache.Save(
             character,
             _lastBlueprintSetupItems,
@@ -170,35 +172,6 @@ internal sealed partial class UnrealProjectSyncViewModel
         return true;
     }
 
-    /// <summary>
-    /// 从**整体会话缓存**里兜底恢复这一步的结果。
-    ///
-    /// 只在"没有自己的小文件"时才用得上 —— 为的是兼容"一步一个文件"改造**之前**
-    /// 留下的旧进度。原来这段构造代码在共享文件里被抄了两遍（进出这一步、冷启动恢复现场各一次），
-    /// 现在收在这里；顺手带上"内存里已经有结果就别覆盖"那道闸。
-    /// </summary>
-    internal bool TryApplyBlueprintSetupFromSessionCache(UnrealSyncSessionCache cache)
-    {
-        if (IsBlueprintSetupLoaded || !cache.IsBlueprintSetupLoaded)
-        {
-            return false;
-        }
-
-        SetBlueprintSetupResult(
-            new UnrealBlueprintSetupResult
-            {
-                Succeeded = true,
-                CharacterCode = cache.SelectedCharacterCode,
-                Items = cache.BlueprintSetupItems,
-                ErrorMessage = cache.BlueprintSetupResultMessage
-            },
-            cache.SelectedBlueprintSetupIds,
-            selectPendingByDefault: false);
-
-        _blueprintSetupResultMessage = cache.BlueprintSetupResultMessage;
-        OnPropertyChanged(nameof(BlueprintSetupResultMessage));
-        return true;
-    }
 
     /// <summary>
     /// 作废这一步的检测结果：**内存清空 + 小文件删掉 + 整体会话缓存里那份盖掉**。

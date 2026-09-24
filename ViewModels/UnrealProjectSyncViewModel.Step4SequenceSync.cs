@@ -114,8 +114,10 @@ internal sealed partial class UnrealProjectSyncViewModel
     // ── 自己的缓存文件 ────────────────────────────────────────────────────
 
     /// <summary>把当前这棵序列差异树 + 勾选写进第 4 步自己的缓存文件。</summary>
+    /// ⚠️ **树不归这一步就别写**（同第 2 步：防抖会全量写一遍，空状态不该覆盖有效文件）。
     internal bool SaveSequenceSyncCache(CharacterCard? character) =>
         character is not null &&
+        _loadedPublishStep == 4 &&
         Step4SequenceSyncCache.Save(
             character,
             _lastPublishChanges,
@@ -123,25 +125,6 @@ internal sealed partial class UnrealProjectSyncViewModel
             GetSelectedGroupAndLeafStableIds(),
             CurrentDetectionAlgorithmVersion);
 
-    /// <summary>
-    /// 从一份"正要落盘的会话缓存快照"里，把第四步那一份抄进它自己的小文件。
-    ///
-    /// 用同一份快照是有意的：两个文件里第四步的内容因此不会各说各话 ——
-    /// "界面上是新树、缓存里还是旧树"这类错就是两份来源各自演化来的。
-    /// 快照里的 <c>WorkflowStep</c> 不是 4（正在最后一步收尾）时什么都不写，
-    /// 那种时刻由 <c>SetLoadedPublishStep(4)</c> 那条路负责。
-    /// </summary>
-    internal static bool SaveSequenceSyncCacheFromSnapshot(CharacterCard? character, UnrealSyncSessionCache cache) =>
-        character is not null &&
-        cache.WorkflowStep == 4 &&
-        cache.IsPublishDetection &&
-        cache.PublishChanges.Count > 0 &&
-        Step4SequenceSyncCache.Save(
-            character,
-            cache.PublishChanges,
-            cache.SelectedStableIds,
-            cache.SelectedGroupStableIds,
-            cache.DetectionAlgorithmVersion);
 
     /// <summary>
     /// 把第 4 步自己的小缓存回填成差异树（内存里已经有一棵树时不覆盖）。

@@ -154,8 +154,10 @@ internal sealed partial class UnrealProjectSyncViewModel
     // ── 自己的缓存文件 ────────────────────────────────────────────────────
 
     /// <summary>把当前检测结果写进第 3 步自己的缓存文件。</summary>
+    /// ⚠️ **没检测过就别写**（防抖会全量写一遍，空结果不该覆盖有效文件）。
     internal bool SaveLightConfigurationCache(CharacterCard? character) =>
         character is not null &&
+        IsLightConfigurationLoaded &&
         Step3LightConfigurationCache.Save(
             character,
             _lastLightConfigurationItems,
@@ -198,40 +200,6 @@ internal sealed partial class UnrealProjectSyncViewModel
         return true;
     }
 
-    /// <summary>
-    /// 从**整体会话缓存**里兜底恢复这一步的结果。
-    ///
-    /// 只在"没有自己的小文件"时才用得上 —— 为的是兼容"一步一个文件"改造**之前**
-    /// 留下的旧进度（那时候第 3 步的结果只存在整体缓存里）。
-    ///
-    /// 原来这段构造代码在共享文件里被抄了两遍（进入某一步时一处、打开页面恢复现场时一处），
-    /// 现在收在它自己的文件里；那两处只管"什么时候该试"。
-    /// 顺手带上"内存里已经有结果就别覆盖"这道闸：旧写法在第二处没有它，
-    /// 会把刚测出来的结果会话缓存盖回去。
-    /// </summary>
-    internal bool TryApplyLightConfigurationFromSessionCache(UnrealSyncSessionCache cache)
-    {
-        if (IsLightConfigurationLoaded || !cache.IsLightConfigurationLoaded)
-        {
-            return false;
-        }
-
-        SetLightConfigurationResult(
-            new UnrealLightConfigurationResult
-            {
-                Succeeded = true,
-                CharacterCode = cache.SelectedCharacterCode,
-                Items = cache.LightConfigurationItems,
-                ErrorMessage = cache.LightConfigurationResultMessage
-            },
-            cache.SelectedLightConfigurationIds,
-            selectPendingByDefault: false);
-
-        // SetLightConfigurationResult 会按"刚检测完"的口径重写文案，这里换回缓存里那句。
-        _lightConfigurationResultMessage = cache.LightConfigurationResultMessage;
-        OnPropertyChanged(nameof(LightConfigurationResultMessage));
-        return true;
-    }
 
     /// <summary>
     /// 作废这一步的检测结果：**内存清空 + 缓存文件删掉**，界面回到「尚未检测基础配置」。

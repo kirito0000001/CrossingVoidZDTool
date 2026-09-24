@@ -29,7 +29,7 @@ internal static class Step4SequenceSyncCache
 
     public static string GetFilePath(CharacterCard? character)
     {
-        var folder = UnrealSyncSessionCacheService.GetCacheFolderPath(character);
+        var folder = UnrealSyncCacheFolder.GetCacheFolderPath(character);
         return string.IsNullOrWhiteSpace(folder) ? string.Empty : Path.Combine(folder, FileName);
     }
 

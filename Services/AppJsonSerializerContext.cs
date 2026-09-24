@@ -37,7 +37,6 @@ namespace CrossingVoidZDTool.Services;
 [JsonSerializable(typeof(UnrealBridgeExecutionProgress))]
 [JsonSerializable(typeof(UnrealBridgeExecutionResult))]
 [JsonSerializable(typeof(UnrealBridgeExecutionItemResult))]
-[JsonSerializable(typeof(UnrealSyncSessionCache))]
 // 第一步「底层检测」自己的小缓存（一步一个文件，只装这一步的东西）。
 [JsonSerializable(typeof(Step1FoundationCacheDocument))]
 // 第二步「规整素材」自己的小缓存（用户做过的规整决策）。
@@ -50,7 +49,13 @@ namespace CrossingVoidZDTool.Services;
 [JsonSerializable(typeof(Step4SequenceSyncCacheDocument))]
 // 第五步「蓝图置入」自己的小缓存（扫描出来的字段 + 勾选）。
 [JsonSerializable(typeof(Step5BlueprintSetupCacheDocument))]
-[JsonSerializable(typeof(UnrealSyncNormalizationCacheItem))]
+
+// 全局现场（引擎/工程路径、方向、角色、上次检测时间、显示开关）。
+[JsonSerializable(typeof(SessionStateCacheDocument))]
+// 导入方向（虚幻→工具箱）的候选快照 + 勾选。
+[JsonSerializable(typeof(ImportSnapshotCacheDocument))]
+[JsonSerializable(typeof(UnrealBridgeSnapshot))]
+[JsonSerializable(typeof(UnrealBridgeSnapshotItem))]
 [JsonSerializable(typeof(UnrealAssetNormalizationCandidate))]
 [JsonSerializable(typeof(UnrealRemotePythonJob))]
 [JsonSerializable(typeof(UnrealLightConfigurationRequest))]
