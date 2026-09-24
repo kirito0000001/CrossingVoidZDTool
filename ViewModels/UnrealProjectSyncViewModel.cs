@@ -223,15 +223,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     // ── 第二步「规整素材」的状态搬到了 UnrealProjectSyncViewModel.Step2Normalization.cs ──
     public bool IsDetectionWorkspace => !IsNormalizationWorkspace;
-    /// <summary>
-    /// 第五步「序列同步」和第七步「特效同步」共用同一块工作区（差异列表 / 同步按钮同构），
-    /// 区别只在计划来源（`BuildSequenceSyncPlan` vs `BuildEffectSyncPlan`）。
-    /// </summary>
-    public bool IsSequenceSynchronizationWorkspace =>
-        !IsEngineToToolbox && WorkflowStep is 5 or 7;
-    public Visibility SequenceSynchronizationDetailsVisibility => IsSequenceSynchronizationWorkspace
-        ? Visibility.Visible
-        : Visibility.Collapsed;
+    // ── 第五步「序列同步」的工作区开关 / 口径 / 缓存都搬到了 Step5SequenceSync.cs ──
     public string WorkspaceTitle => IsEngineToToolbox ? "检测与选择" : WorkflowStep switch
     {
         1 => "底层检测",
@@ -392,13 +384,23 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     /// <summary>差异检测完成或从缓存恢复后，记下这棵树属于哪一步。</summary>
     public void SetLoadedPublishStep(int step)
     {
+        // 这个字段经 IsWorkflowStepLoaded 直接决定中栏状态。以前它是个纯赋值，
+        // 三个调用点都恰好跟在 ReturnToWorkflowStep 后面才没出事——那是运气不是保障。
+        // 第五步的树在这里才真正"定归属"（检测流程是先建树、后认领），
+        // 所以这就是把序列差异写进它自己那份小缓存的最好时机。
+        //
+        // 写在**早退之前**：刷新时这棵树本来就归第五步，早退会把它漏掉。
+        // 从缓存恢复时不写：那是读回来的东西，原样写回去只是白一次磁盘。
+        if (step == 5 && !_isRestoringSession)
+        {
+            SaveSequenceSyncCache(SelectedSource?.DraftCharacter);
+        }
+
         if (_loadedPublishStep == step)
         {
             return;
         }
 
-        // 这个字段经 IsWorkflowStepLoaded 直接决定中栏状态。以前它是个纯赋值，
-        // 三个调用点都恰好跟在 ReturnToWorkflowStep 后面才没出事——那是运气不是保障。
         _loadedPublishStep = step;
         NotifyWorkspaceStateChanged();
     }
@@ -913,8 +915,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         _syncService.ValidatePublishCharacterFolders(ProjectPath, characterCode, requireAssetTypes);
     }
 
-    public void ValidateSequenceCharacterFolders(string projectPath, string characterCode) =>
-        _syncService.ValidateSequenceCharacterFolders(projectPath, characterCode);
+    // ── ValidateSequenceCharacterFolders 搬到了 Step5SequenceSync.cs ──
 
     public void SetFoundationConfigurationError(UnrealLightConfigurationResultItem error)
     {
@@ -1139,6 +1140,26 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         FlushSessionCache();
         var result = _sessionCacheService.LoadStep(
             SelectedSource?.DraftCharacter, ProjectPath, characterCode, step);
+
+        // 第 5 步先读自己的小缓存（`step5-sequence-sync.json`）：序列差异 + 勾选都在里面，
+        // 不依赖那份所有步骤共用、越来越大的会话缓存。
+        //
+        // 会话缓存仍然读进来放进 _loadedSessionCache —— 它是写盘时的"兜底快照"，
+        // 别的步骤没被这次改动的数据（规整决策、基础配置…）要靠它带过去，
+        // 不能因为这一步换了来源就把它们丢掉。
+        if (step == 5)
+        {
+            if (result.Status == UnrealSyncSessionCacheLoadStatus.Loaded && result.Cache is not null)
+            {
+                _loadedSessionCache = result.Cache;
+            }
+
+            if (TryApplySequenceSyncCache(SelectedSource?.DraftCharacter))
+            {
+                return;
+            }
+        }
+
         if (result.Status != UnrealSyncSessionCacheLoadStatus.Loaded || result.Cache is null)
         {
             return;
@@ -2146,6 +2167,9 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                     await Task.Run(() => Step2NormalizationCache.Save(character, cache.NormalizationDecisions))
                         .ConfigureAwait(false);
                 }
+                // 第 5 步「序列同步」同样另写一份自己的缓存文件（一步一个文件）。
+                // 用刚写的这份快照，两个文件里第五步的内容不会各说各话。
+                await Task.Run(() => SaveSequenceSyncCacheFromSnapshot(character, cache)).ConfigureAwait(false);
                 if (version == Volatile.Read(ref _sessionSaveVersion)) _pendingSessionCache = null;
             }
             finally
@@ -2178,6 +2202,9 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         try
         {
             _sessionCacheService.Write(character, projectPath, cache);
+            // 防抖那条路会被这次 flush 顶掉（版本号一变它就放弃），
+            // 所以这里也得补写一次第五步自己的小文件，否则刚改的勾选只进了会话缓存。
+            SaveSequenceSyncCacheFromSnapshot(character, cache);
             _pendingSessionCache = null;
         }
         finally

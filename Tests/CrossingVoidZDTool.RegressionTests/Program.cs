@@ -127,6 +127,7 @@ var tests = new (string Name, Action Run)[]
     ("同步进度按角色和步骤存进角色目录", WorkflowStepCacheLivesInCharacterFolder),
     ("已加载的步骤不再重复触发虚幻检测", WorkflowStepSkipsDetectionWhenAlreadyLoaded),
     ("切换角色后各自的步骤与结果互不串台", WorkflowStateIsIsolatedPerCharacter),
+    ("第五步序列差异存进自己的小缓存并能读回", SequenceSyncStepKeepsItsOwnCacheFile),
     ("角色目录里的路径落盘时不带盘符", CharacterOwnedPathsArePortableOnDisk),
     ("角色目录搬家后图标路径依然指得到", PortablePathsSurviveCharacterFolderMove),
     ("旧机器留下的图标路径会被修回来", StaleIconPathIsRepairedOnRead),
@@ -7589,6 +7590,104 @@ static void RefreshKeepsFreshSequenceTreeOverCache()
         AssertEqual(
             true,
             reader.SelectionTreeRoots[0].DetailText.Contains("Unreal 现有 23 个帧位", StringComparison.Ordinal));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SequenceSyncStepKeepsItsOwnCacheFile()
+{
+    // 第五步的差异（序列帧）和第三步的差异（图 / 声音）本来就是两回事，
+    // 以前都挤在同一份"所有步骤共用"的会话缓存里。现在第五步有自己的一份小文件：
+    //   - 检测完（建树 + 认领归属）就该出现；
+    //   - 只落在跑过这一步的角色目录里；
+    //   - 就算会话缓存被删掉，它自己也能把整棵树恢复回来。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var projectPath = Path.Combine(root, "CrossingVoid.uproject");
+        File.WriteAllText(projectPath, "{}");
+        var enginePath = Path.Combine(root, "UnrealEditor.exe");
+        File.WriteAllText(enginePath, "x");
+        var misaka = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴") with { IsCompleted = true };
+        var kirito = CreateCharacter(Path.Combine(root, "SAO_Kirito"), "SAO_Kirito", "桐人[SAO]") with { IsCompleted = true };
+        Directory.CreateDirectory(misaka.ToolFolderPath);
+        Directory.CreateDirectory(kirito.ToolFolderPath);
+
+        const string actionCode = "Sk2";
+        var actionId = SequenceFrameIdentity.BuildActionStableId(actionCode);
+        var actionPayload = SequenceFrameIdentity.BuildActionPayload(
+            actionCode, 14, SequenceFrameIdentity.BuildAtlasLayout("Misaka_Sk2"), 23, 0);
+        var actionNode = new UnrealBridgeChange(
+            actionId,
+            UnrealBridgeModule.SequenceFrames,
+            "二技能",
+            UnrealBridgeChangeKind.Unchanged,
+            new UnrealBridgeSnapshotItem(
+                actionId, $"module:{UnrealBridgeModule.SequenceFrames}", UnrealBridgeModule.SequenceFrames,
+                "二技能", "TOOLBOX-ACTION", actionPayload, string.Empty),
+            new UnrealBridgeSnapshotItem(
+                actionId, $"module:{UnrealBridgeModule.SequenceFrames}", UnrealBridgeModule.SequenceFrames,
+                "二技能", "UNREAL-ACTION", actionPayload, string.Empty,
+                "/Game/GameActor2D/Misaka/Misaka_AnimMaps.Misaka_AnimMaps"),
+            false,
+            actionId);
+        var frameChange = CreateSequenceDeleteChange(
+            actionCode, "/Game/GameActor2D/Misaka/Material/Sk2/Sk2_Frame22.Sk2_Frame22");
+        var changes = new List<UnrealBridgeChange> { actionNode, frameChange };
+
+        UnrealSyncSourceItem SourceOf(UnrealProjectSyncViewModel viewModel, CharacterCard character) =>
+            viewModel.CharacterSources.Single(item =>
+                string.Equals(item.DraftCharacter?.Code, character.Code, StringComparison.OrdinalIgnoreCase));
+
+        // 走"刚检测完"那条路：建树 → 认领归属（和壳侧检测收尾的顺序一致）。
+        var detector = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        detector.Load(enginePath, projectPath);
+        detector.IsEngineToToolbox = false;
+        detector.RefreshDraftSources([misaka, kirito]);
+        detector.SelectSource(SourceOf(detector, misaka));
+        detector.ReturnToWorkflowStep(5);
+        detector.SetPublishSelectionTree(
+            UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
+                changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: false),
+            changes);
+        detector.SetLoadedPublishStep(5);
+        detector.FlushSessionCache();
+
+        var misakaFolder = UnrealSyncSessionCacheService.GetCacheFolderPath(misaka);
+        var step5Path = Path.Combine(misakaFolder, Step5SequenceSyncCache.FileName);
+        AssertEqual(true, File.Exists(step5Path));
+        // 没跑过这一步的角色目录里不该出现它
+        AssertEqual(
+            false,
+            File.Exists(Path.Combine(
+                UnrealSyncSessionCacheService.GetCacheFolderPath(kirito),
+                Step5SequenceSyncCache.FileName)));
+
+        // 换一个新会话，并把会话缓存那份删掉 —— 只剩它自己的小文件，照样要能恢复整棵树。
+        var syncCacheFiles = Directory.GetFiles(misakaFolder, "sync-*.json");
+        AssertEqual(true, syncCacheFiles.Length > 0);
+        foreach (var path in syncCacheFiles)
+        {
+            File.Delete(path);
+        }
+
+        var reader = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        reader.Load(enginePath, projectPath);
+        reader.IsEngineToToolbox = false;
+        reader.RefreshDraftSources([misaka, kirito]);
+        reader.SelectSource(SourceOf(reader, misaka));
+        reader.ReturnToWorkflowStep(5);
+        AssertEqual(true, reader.IsWorkflowStepLoaded(5));
+        var restoredRoots = reader.SelectionTreeRoots.ToArray();
+        AssertEqual(1, restoredRoots.Length);
+        AssertEqual(true, restoredRoots[0].Children.Any(child => child.StableId == frameChange.StableId));
+        // Unchanged 的动作节点也要在：序列树靠它才知道"Unreal 现有几个帧位"。
+        AssertEqual(
+            true,
+            restoredRoots[0].DetailText.Contains("Unreal 现有 23 个帧位", StringComparison.Ordinal));
     }
     finally
     {

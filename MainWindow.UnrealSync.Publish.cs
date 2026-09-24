@@ -157,16 +157,19 @@ namespace CrossingVoidZDTool
                 var baseline = new UnrealBridgeStateService().Load(character, _applicationViewModel.UnrealProjectSync.ProjectPath);
                 var selectionBeforeDetection = _applicationViewModel.UnrealProjectSync.GetSelectedGroupAndLeafStableIds();
                 AppendLog(LogKind.Info, $"[Refresh Selection] before={selectionBeforeDetection.Count} ids={string.Join(",", selectionBeforeDetection.Take(12))}");
-                if (_workflowStepAfterPublishDetection == 5)
-                    _applicationViewModel.UnrealProjectSync.ValidateSequenceCharacterFolders(_applicationViewModel.UnrealProjectSync.ProjectPath, character.Code);
-                else
-                    _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code);
+                // 校验哪套目录、导哪些数据、默认勾不勾，口径都在
+                // UnrealProjectSyncViewModel.Step5SequenceSync.cs 里，别在这儿再写一遍 == 5。
+                _applicationViewModel.UnrealProjectSync.ValidateFoldersForStep(
+                    _workflowStepAfterPublishDetection,
+                    _applicationViewModel.UnrealProjectSync.ProjectPath,
+                    character.Code);
                 ShowGlobalProgress("检测同步差异", character.Code);
                 // 第七步和第五步共用同一个导出范围（都要序列帧那一套数据），只是计划不同。
-                var detectionExportScope = _applicationViewModel.UnrealProjectSync.WorkflowStep is 5 or 7
-                    || _workflowStepAfterPublishDetection is 5 or 7
-                    ? UnrealProjectSyncExportScope.CharacterSequences
-                    : UnrealProjectSyncExportScope.CharacterMaterials;
+                var detectionExportScope = UnrealProjectSyncViewModel.UsesSequenceData(
+                    _applicationViewModel.UnrealProjectSync.WorkflowStep)
+                    || UnrealProjectSyncViewModel.UsesSequenceData(_workflowStepAfterPublishDetection)
+                        ? UnrealProjectSyncExportScope.CharacterSequences
+                        : UnrealProjectSyncExportScope.CharacterMaterials;
                 var detectionExportRun = await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
                     [character.Code],
                     new Progress<ProgressUpdate>(update =>
@@ -189,12 +192,11 @@ namespace CrossingVoidZDTool
                 {
                     var toolboxSnapshot = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character);
                     var unrealSnapshot = new UnrealBridgeSemanticSnapshotService().Build(candidate);
-                    var allowedModules = _workflowStepAfterPublishDetection == 5
-                        ? new[] { UnrealBridgeModule.SequenceFrames }
-                        : new[] { UnrealBridgeModule.BaseMaterials, UnrealBridgeModule.Voices };
+                    var allowedModules = UnrealProjectSyncViewModel.DetectionModulesFor(
+                        _workflowStepAfterPublishDetection);
                     toolboxSnapshot = toolboxSnapshot with { Items = toolboxSnapshot.Items.Where(item => allowedModules.Contains(item.Module)).ToArray() };
                     unrealSnapshot = unrealSnapshot with { Items = unrealSnapshot.Items.Where(item => allowedModules.Contains(item.Module)).ToArray() };
-                    if (_workflowStepAfterPublishDetection == 5)
+                    if (UnrealProjectSyncViewModel.UsesRecordedSequenceContent(_workflowStepAfterPublishDetection))
                     {
                         // 同上：序列检测要比「素材内容」，Unreal 侧用上次同步记下的摘要。
                         unrealSnapshot = UnrealBridgeSequenceFingerprintService.ApplyRecordedContent(character, unrealSnapshot);
@@ -211,23 +213,19 @@ namespace CrossingVoidZDTool
                         .ToArray();
                 }, GetGlobalProgressCancellationToken());
                 var changes = detectionResult;
-                if (_workflowStepAfterPublishDetection == 5)
+                // 把发布阶段拨到这一步该在的地方。
+                // 不拨的话，会话里残留的"序列动画轨道"会让 FilterPublishChanges 把素材变更整批丢掉 ——
+                // 界面就变成"共检查 0 项、无差异 0 项"（2026-09-24 实测）。
+                if (_workflowStepAfterPublishDetection is 3 or 5)
                 {
+                    var stageForStep = UnrealProjectSyncViewModel.PublishStageFor(_workflowStepAfterPublishDetection);
                     _applicationViewModel.UnrealProjectSync.SelectedPublishStage =
-                        _applicationViewModel.UnrealProjectSync.PublishStages.First(stage =>
-                            stage.Stage == UnrealBridgePublishStage.ZdAnimationTracks);
-                }
-                else if (_workflowStepAfterPublishDetection == 3)
-                {
-                    // 第三步是"素材"那一路：把阶段拨回角色素材。
-                    // 不拨的话，会话里残留的"序列动画轨道"会让 FilterPublishChanges 把素材变更整批丢掉 ——
-                    // 界面就变成"共检查 0 项、无差异 0 项"（2026-09-24 实测）。
-                    _applicationViewModel.UnrealProjectSync.SelectedPublishStage =
-                        _applicationViewModel.UnrealProjectSync.PublishStages.First(stage =>
-                            stage.Stage == UnrealBridgePublishStage.CharacterMaterials);
+                        _applicationViewModel.UnrealProjectSync.PublishStages.First(stage => stage.Stage == stageForStep);
                 }
                 changes = _applicationViewModel.UnrealProjectSync.FilterPublishChanges(changes).ToArray();
-                AppendLog(LogKind.Info, $"[Step5 Detection] character={character.Code} changes={changes.Length} stepAfterPublishDetection={_workflowStepAfterPublishDetection} selectPendingByDefault={_workflowStepAfterPublishDetection != 5}");
+                var selectPendingByDefault =
+                    UnrealProjectSyncViewModel.SelectsPendingChangesByDefault(_workflowStepAfterPublishDetection);
+                AppendLog(LogKind.Info, $"[Step5 Detection] character={character.Code} changes={changes.Length} stepAfterPublishDetection={_workflowStepAfterPublishDetection} selectPendingByDefault={selectPendingByDefault}");
                 LogSequenceChanges("[Step5 Detection Item]", changes);
                 var matchedChanges = changes
                     .Where(change => change.ToolboxItem is not null && change.UnrealItem is not null)
@@ -250,7 +248,7 @@ namespace CrossingVoidZDTool
                     changes,
                     UnrealBridgePublishSupportPolicy.CanExecute,
                     GetGlobalProgressCancellationToken(),
-                    selectPendingByDefault: _workflowStepAfterPublishDetection != 5);
+                    selectPendingByDefault: selectPendingByDefault);
                 _applicationViewModel.UnrealProjectSync.RestoreSelectionState(selectionBeforeDetection);
                 // 与同步路径对称：建树时写入的是默认勾选态，恢复完必须再存一次，
                 // 否则紧接着的 ReturnToWorkflowStep 会用默认态重建这棵树。

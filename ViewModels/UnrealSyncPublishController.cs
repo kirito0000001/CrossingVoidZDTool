@@ -152,7 +152,8 @@ internal sealed class UnrealSyncPublishController(
         _sync.SetPublishRunning(true);
         // 第五步「序列同步」和第七步「特效同步」共用这条发布链路（同一条检测/发布管线），
         // 区别只在最终用哪个计划：第五步 = BuildSequenceSyncPlan，第七步 = BuildEffectSyncPlan。
-        var isSequenceSynchronization = _sync.WorkflowStep is 5 or 7;
+        // 「这一步要不要序列数据」的口径按步号问 ViewModel（Step5SequenceSync.cs），别在这里写字面量。
+        var isSequenceSynchronization = UnrealProjectSyncViewModel.UsesSequenceData(_sync.WorkflowStep);
         // 百分比按各阶段实测耗时分配；备份开着时它会占掉大半条，这是事实。
         var progressPlan = WorkflowProgressPlan.ForSequenceSync(_host.Settings.BackupBeforeUnrealSync);
         _host.ShowGlobalProgress("同步前检测", character.Code);
@@ -178,10 +179,7 @@ internal sealed class UnrealSyncPublishController(
             UnrealProjectSyncCharacterCandidate latestCandidate;
             try
             {
-                if (isSequenceSynchronization)
-                    _sync.ValidateSequenceCharacterFolders(_sync.ProjectPath, character.Code);
-                else
-                    _sync.ValidatePublishCharacterFolders(character.Code);
+                _sync.ValidateFoldersForStep(_sync.WorkflowStep, _sync.ProjectPath, character.Code);
                 // 第三步执行前累计校验第一至第三步；不会检查尚未进入的后续阶段。
                 var preflightExportRun = await _sync.ExportProjectCharactersAsync(
                     [character.Code],
@@ -192,7 +190,7 @@ internal sealed class UnrealSyncPublishController(
                         update.Detail,
                         update.IsIndeterminate)),
                     _host.GetGlobalProgressCancellationToken(),
-                    isSequenceSynchronization ? UnrealProjectSyncExportScope.CharacterSequences : UnrealProjectSyncExportScope.CharacterMaterials);
+                    UnrealProjectSyncViewModel.ExportScopeFor(_sync.WorkflowStep));
                 // 导出结果以前在这里被整个丢掉。Warning 记的是「退出码非 0 但清单照常写出来了」，
                 // 也就是编辑器在别处报过错——多半无关，但同步出问题时它是唯一的线索。
                 // 检测那条链路（DetectUnrealPublishChangesAsync）一直有这一行，只有同步这条漏了。
@@ -237,13 +235,11 @@ internal sealed class UnrealSyncPublishController(
             var latestUnrealSnapshot = new UnrealBridgeSemanticSnapshotService().Build(latestCandidate);
             // 序列：把「上次同步时记下的素材内容摘要」补进 Unreal 侧载荷，
             // 和工具箱侧的当前值一比就知道素材内容有没有被换掉。
-            if (isSequenceSynchronization)
+            if (UnrealProjectSyncViewModel.UsesRecordedSequenceContent(_sync.WorkflowStep))
             {
                 latestUnrealSnapshot = UnrealBridgeSequenceFingerprintService.ApplyRecordedContent(character, latestUnrealSnapshot);
             }
-            var latestAllowedModules = isSequenceSynchronization
-                ? new[] { UnrealBridgeModule.SequenceFrames }
-                : new[] { UnrealBridgeModule.BaseMaterials, UnrealBridgeModule.Voices };
+            var latestAllowedModules = UnrealProjectSyncViewModel.DetectionModulesFor(_sync.WorkflowStep);
             latestToolboxSnapshot = latestToolboxSnapshot with { Items = latestToolboxSnapshot.Items.Where(item => latestAllowedModules.Contains(item.Module)).ToArray() };
             latestUnrealSnapshot = latestUnrealSnapshot with { Items = latestUnrealSnapshot.Items.Where(item => latestAllowedModules.Contains(item.Module)).ToArray() };
             var latestChanges = new UnrealBridgeDiffService().Compare(
@@ -278,7 +274,7 @@ internal sealed class UnrealSyncPublishController(
                 _host.GetGlobalProgressCancellationToken(),
                 // 同步路径里 _host.WorkflowStepAfterPublishDetection 早已被检测流程清零，
                 // 用它判断会恒传 true，把第五步默认勾选成"全选"，和检测路径语义相反。
-                selectPendingByDefault: !isSequenceSynchronization);
+                selectPendingByDefault: UnrealProjectSyncViewModel.SelectsPendingChangesByDefault(_sync.WorkflowStep));
             _sync.RestoreSelectionState(selectionBeforeRefresh);
             // 重建树时写过一次缓存，那时勾选还是默认态。恢复完必须再存一次，
             // 否则后面任何一次「读缓存重建」都会拿到默认态而不是用户的勾选。
@@ -299,7 +295,7 @@ internal sealed class UnrealSyncPublishController(
                     latestChanges,
                     UnrealBridgePublishSupportPolicy.CanExecute,
                     _host.GetGlobalProgressCancellationToken(),
-                    selectPendingByDefault: !isSequenceSynchronization);
+                    selectPendingByDefault: UnrealProjectSyncViewModel.SelectsPendingChangesByDefault(_sync.WorkflowStep));
                 _sync.SetLoadedPublishStep(driftedStep);
                 _host.CompleteGlobalProgress(
                     "同步内容发生变化",
