@@ -64,16 +64,29 @@ internal sealed partial class UnrealProjectSyncViewModel
     public int LightConfigurationUnchangedCount => _lastLightConfigurationItems.Count(item =>
         item.Status == UnrealLightConfigurationStatus.Unchanged);
 
+    /// <summary>
+    /// 「这一次运行读不到它」的项数（资产在工程里，但当前实例加载不了 —— 离线实例常见）。
+    /// **不算错误**：它既不进错误计数、也不参与"有错误"的判断。
+    /// </summary>
+    public int LightConfigurationUnavailableCount => _lastLightConfigurationItems.Count(item =>
+        item.Status == UnrealLightConfigurationStatus.Unavailable);
+
     public int LightConfigurationSelectedCount => LightConfigurationItems.Count(item => item.IsSelected);
 
     public string LightConfigurationSummaryText => !IsLightConfigurationLoaded
         ? "尚未检测基础配置"
         : $"共检查 {_lastLightConfigurationItems.Count} 项：无差异 {LightConfigurationUnchangedCount}，"
-          + $"待设置 {LightConfigurationPendingCount}，错误 {LightConfigurationErrorCount}";
+          + $"待设置 {LightConfigurationPendingCount}，错误 {LightConfigurationErrorCount}"
+          // 「读不到」只在真出现时才占一格，平时那行字不用变长。
+          + (LightConfigurationUnavailableCount > 0
+              ? $"，读不到 {LightConfigurationUnavailableCount}"
+              : string.Empty);
 
     public string LightConfigurationEmptyTitle => LightConfigurationErrorCount > 0
         ? "基础配置存在错误"
-        : "基础配置没有改动";
+        : LightConfigurationUnavailableCount > 0
+            ? "本次读不到依赖资产"
+            : "基础配置没有改动";
 
     public string LightConfigurationSelectionText =>
         $"已选择 {LightConfigurationSelectedCount} / {LightConfigurationPendingCount} 项";
@@ -313,6 +326,7 @@ internal sealed partial class UnrealProjectSyncViewModel
         OnPropertyChanged(nameof(LightConfigurationResultMessage));
         OnPropertyChanged(nameof(LightConfigurationPendingCount));
         OnPropertyChanged(nameof(LightConfigurationErrorCount));
+        OnPropertyChanged(nameof(LightConfigurationUnavailableCount));
         OnPropertyChanged(nameof(LightConfigurationUnchangedCount));
         OnPropertyChanged(nameof(LightConfigurationSelectedCount));
         OnPropertyChanged(nameof(CanApplyLightConfiguration));

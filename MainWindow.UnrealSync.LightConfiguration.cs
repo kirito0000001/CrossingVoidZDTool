@@ -82,34 +82,7 @@ namespace CrossingVoidZDTool
                     result,
                     new HashSet<string>(StringComparer.OrdinalIgnoreCase),
                     selectPendingByDefault: false);
-                var foundationError = result.Items.FirstOrDefault(item =>
-                    item.StableId == "foundation.assets" &&
-                    item.Status == UnrealLightConfigurationStatus.Error);
-                if (foundationError is not null)
-                {
-                    // 仍然汇总到第 1 步的检查列表（那是"配置错误"的落点，回到第 1 步看得到），
-                    // 但**不再把人挪走** —— 他站在第 3 步，红条就在眼前。
-                    sync.SetFoundationConfigurationError(foundationError);
-                    AppendLog(
-                        LogKind.Error,
-                        $"[Light Config] 基础配置依赖有问题：{FormatSyncLogValue(foundationError.ErrorMessage)}");
-                    if (IsOfflineAssetLoadFailure(foundationError))
-                    {
-                        // 离线实例加载不到资产 —— 这是**扫描环境**的问题，不是工程资产的问题。
-                        // 以前这种假报也会把人踢回第 1 步，看着像"第 1 步的东西坏了"（2026-09-24 实测）。
-                        AppendLog(
-                            LogKind.Warning,
-                            "离线实例加载不到依赖资产，已留在第 3 步；建议重试，或关掉 Unreal 编辑器后重跑。");
-                        ShowFloatingTip(
-                            InfoBarSeverity.Warning,
-                            "离线实例读不到依赖资产",
-                            "已留在基础配置这一步；建议重试，或关掉 Unreal 编辑器后重跑。");
-                    }
-                    else
-                    {
-                        ShowFloatingTip(InfoBarSeverity.Error, "基础配置依赖有问题", foundationError.ErrorMessage);
-                    }
-                }
+                HandleLightConfigurationFoundationIssue(sync, result);
                 if (!result.Succeeded)
                 {
                     throw new InvalidOperationException(result.ErrorMessage);
@@ -117,7 +90,11 @@ namespace CrossingVoidZDTool
 
                 var remaining = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Pending);
                 var errors = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Error);
-                CompleteGlobalProgress("基础配置已应用", $"已验证 {result.AppliedStableIds.Count} 项；剩余 {remaining} 项，错误 {errors} 项。");
+                var unavailable = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Unavailable);
+                CompleteGlobalProgress(
+                    "基础配置已应用",
+                    $"已验证 {result.AppliedStableIds.Count} 项；剩余 {remaining} 项，错误 {errors} 项"
+                    + (unavailable > 0 ? $"，本次读不到 {unavailable} 项（请连上编辑器重跑）" : string.Empty) + "。");
                 ShowFloatingTip(InfoBarSeverity.Success, "基础配置已应用", $"已验证 {result.AppliedStableIds.Count} 项配置。");
                 AppendLog(LogKind.User, $"应用 Unreal 基础配置：{character.Code}，Applied={result.AppliedStableIds.Count}，Remaining={remaining}，Errors={errors}。");
                 await HideGlobalProgressAfterDelayAsync();
@@ -145,17 +122,48 @@ namespace CrossingVoidZDTool
         }
 
         /// <summary>
-        /// 这条错误是不是"离线实例加载不到资产"造成的**假报**。
+        /// 处理"基础配置依赖"那一条：**读不到** 和 **真有问题** 两条路分开走。
         ///
-        /// 两个条件同时成立才算：
-        /// ① 上一次任务确实是离线跑的（<see cref="_lastUnrealTaskRanOffline"/>）；
-        /// ② 文案是脚本里 `_load_asset` 失败时写的那种"未找到…"。
-        /// 只认①会吞掉真缺资产的情况，只认②会把在线跑出来的真错误也当环境问题 —— 所以两条都要。
+        /// 第一种是**运行环境**的事 —— 离线实例（`UnrealEditor-Cmd -run=pythonscript`）
+        /// 加载不了 WidgetBlueprint / MetaSoundSource 这类"类由编辑器模块提供"的资产。
+        /// 脚本现在会自己分清（先问资产注册表：资产在、只是这个实例加载不了它），
+        /// 所以这里**认状态**，不再靠"离线 + 文案含未找到"去猜。
+        /// 这一档只记一条 warning + 一个黄色 tip，**不算错误、也不往第 1 步挂错误** ——
+        /// 那等于把假报升级成"底层检测红"（2026-09-24 实测踩过）。
+        ///
+        /// 第二种才是真问题：错误 log + 红色 tip，并汇总到第 1 步的检查列表
+        /// （那是"配置错误"的落点，回到第 1 步看得到），但**不把人挪走**。
         /// </summary>
-        private bool IsOfflineAssetLoadFailure(UnrealLightConfigurationResultItem item) =>
-            _lastUnrealTaskRanOffline &&
-            !string.IsNullOrEmpty(item.ErrorMessage) &&
-            item.ErrorMessage.Contains("未找到", StringComparison.Ordinal);
+        private void HandleLightConfigurationFoundationIssue(
+            UnrealProjectSyncViewModel sync,
+            UnrealLightConfigurationResult result)
+        {
+            var item = result.Items.FirstOrDefault(entry =>
+                entry.StableId == "foundation.assets" &&
+                entry.Status is UnrealLightConfigurationStatus.Error or UnrealLightConfigurationStatus.Unavailable);
+            if (item is null)
+            {
+                return;
+            }
+
+            if (item.Status == UnrealLightConfigurationStatus.Unavailable)
+            {
+                AppendLog(
+                    LogKind.Warning,
+                    $"[Light Config] 本次运行读不到依赖资产，已留在第 3 步：{FormatSyncLogValue(item.ErrorMessage)}");
+                ShowFloatingTip(
+                    InfoBarSeverity.Warning,
+                    "离线实例读不到依赖资产",
+                    "已留在基础配置这一步；请连上 Unreal 编辑器后重跑。");
+                return;
+            }
+
+            sync.SetFoundationConfigurationError(item);
+            AppendLog(
+                LogKind.Error,
+                $"[Light Config] 基础配置依赖有问题：{FormatSyncLogValue(item.ErrorMessage)}");
+            ShowFloatingTip(InfoBarSeverity.Error, "基础配置依赖有问题", item.ErrorMessage);
+        }
 
         private async Task ReloadUnrealLightConfigurationStepAsync(UnrealProjectSyncViewModel sync)
         {
@@ -182,35 +190,14 @@ namespace CrossingVoidZDTool
                 sync.ReturnToWorkflowStep(3);
                 var result = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
                 sync.SetLightConfigurationResult(result);
-                var foundationError = result.Items.FirstOrDefault(item =>
-                    item.StableId == "foundation.assets" &&
-                    item.Status == UnrealLightConfigurationStatus.Error);
-                if (foundationError is not null)
-                {
-                    // 仍然汇总到第 1 步的检查列表（那是"配置错误"的落点，回到第 1 步看得到），
-                    // 但**不再把人挪走** —— 他站在第 3 步，红条就在眼前。
-                    sync.SetFoundationConfigurationError(foundationError);
-                    AppendLog(
-                        LogKind.Error,
-                        $"[Light Config] 基础配置依赖有问题：{FormatSyncLogValue(foundationError.ErrorMessage)}");
-                    if (IsOfflineAssetLoadFailure(foundationError))
-                    {
-                        AppendLog(
-                            LogKind.Warning,
-                            "离线实例加载不到依赖资产，已留在第 3 步；建议重试，或关掉 Unreal 编辑器后重跑。");
-                        ShowFloatingTip(
-                            InfoBarSeverity.Warning,
-                            "离线实例读不到依赖资产",
-                            "已留在基础配置这一步；建议重试，或关掉 Unreal 编辑器后重跑。");
-                    }
-                    else
-                    {
-                        ShowFloatingTip(InfoBarSeverity.Error, "基础配置依赖有问题", foundationError.ErrorMessage);
-                    }
-                }
+                HandleLightConfigurationFoundationIssue(sync, result);
                 var pending = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Pending);
                 var errors = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Error);
-                CompleteGlobalProgress("基础配置检测完成", $"待设置 {pending} 项，错误 {errors} 项。");
+                var unavailable = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Unavailable);
+                CompleteGlobalProgress(
+                    "基础配置检测完成",
+                    $"待设置 {pending} 项，错误 {errors} 项"
+                    + (unavailable > 0 ? $"，本次读不到 {unavailable} 项（请连上编辑器重跑）" : string.Empty) + "。");
                 await HideGlobalProgressAfterDelayAsync();
             }
             catch (OperationCanceledException ex)

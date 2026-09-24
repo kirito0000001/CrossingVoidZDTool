@@ -52,9 +52,70 @@ def _scan_progress(message, sub_percent, detail=""):
     _progress(message, start + (end - start) * sub / 100.0, detail)
 
 
+class _AssetUnavailable(RuntimeError):
+    """资产**在**、但这一次运行读不到它 —— 和"工程里没有"是两件事。
+
+    典型是离线实例（`UnrealEditor-Cmd -run=pythonscript`）：WidgetBlueprint /
+    MetaSoundSource 这类资产的类由**编辑器模块**（UMGEditor / MetasoundEditor）提供，
+    commandlet 里那些模块没加载，`load_asset` 就返回 None。
+    实测同一份工程：**在线扫 23 项 0 错，离线扫 4 项全"未找到"**（2026-09-24，晓桀截图那次）。
+
+    分这一档是为了不再**谎报"未找到"** —— 那不是工程的问题，是这次跑的环境；
+    界面上它该显示成"读不到，请连上编辑器重跑"，而不是「配置错误」。
+    """
+
+
 STATUS_UNCHANGED = 0
 STATUS_PENDING = 1
 STATUS_ERROR = 2
+STATUS_UNAVAILABLE = 3
+
+# ZDBridge 预加载的结果：{对象路径(小写): {packageExists, loaded, className, ...}}。
+# 它是"资产到底在不在"的**权威**答案（C++ 侧问的是包，不吃 Python 那层的行为），
+# 所以 `_load_asset` 失败时先查它，再退到资产注册表。
+_BRIDGE_ASSET_RECORDS = {}
+
+
+def _preload_via_bridge(request):
+    """让 ZDBridge 在 **C++ 侧**把这一步要读的三个依赖资产加载进内存。
+
+    为什么必须这样：离线实例（`UnrealEditor-Cmd -run=pythonscript`）里，Python 的
+    `EditorAssetLibrary.load_asset` 对 WidgetBlueprint / MetaSoundSource 返回 None ——
+    实测同一份工程 **在线 23 项 0 错 / 离线 4 项全"未找到"**，而那两个资产一直都在。
+    C++ 侧靠**模块依赖**（UMGEditor / MetasoundEngine）加载，不吃 Python 这一层；
+    加载过之后下面那些 `_load_asset` 就是命中内存里那一份，不再是"从磁盘现加载"。
+
+    插件没编译 / 没有这个助手时静默跳过 —— 退回脚本自己加载的老路（可回退）。
+    """
+    global _BRIDGE_ASSET_RECORDS
+    _BRIDGE_ASSET_RECORDS = {}
+    library = getattr(unreal, "ZDBridgeLibrary", None)
+    resolver = getattr(library, "resolve_light_configuration_assets", None) if library else None
+    if resolver is None:
+        return
+
+    try:
+        payload = resolver(
+            _get(request, "ItemObjectPath", "itemObjectPath", default=""),
+            _get(request, "TeamSelectObjectPath", "teamSelectObjectPath", default=""),
+            _get(request, "MetaSoundObjectPath", "metaSoundObjectPath", default=""))
+        data = json.loads(payload)
+    except Exception as error:
+        unreal.log_warning("ZDBridge 预加载依赖失败，回退到脚本自己加载：{}".format(error))
+        return
+
+    for item in data.get("items") or []:
+        _BRIDGE_ASSET_RECORDS[str(item.get("objectPath", "")).strip().lower()] = item
+
+    unreal.log("ZDBridge ResolveLightConfigurationAssets: loaded={}/{} widgetClass={} metaClass={}".format(
+        data.get("loadedCount", 0),
+        len(data.get("items") or []),
+        data.get("hasWidgetBlueprintClass"),
+        data.get("hasMetaSoundSourceClass")))
+    if not data.get("ok"):
+        unreal.log_warning("ZDBridge 有依赖没加载到：" + json.dumps(
+            [item for item in (data.get("items") or []) if not item.get("loaded")],
+            ensure_ascii=False))
 
 # 必须与 C# 的 VoiceMaterialService.Specs 逐字一致。
 # 回归用例「语音分类表与桥接脚本标签一致」会校验这张表——
@@ -157,6 +218,15 @@ def _load_asset(object_path, label, expected_class=""):
         raise RuntimeError("{}缺少目标路径".format(label))
     asset = unreal.EditorAssetLibrary.load_asset(package_path)
     if asset is None:
+        # **读不到 ≠ 没有**。先查 ZDBridge 的预加载记录（C++ 侧问的包存在性，最权威），
+        # 再退到资产注册表；两者只要有一个说"在"，那就是"这一次运行读不到它"。
+        record = _BRIDGE_ASSET_RECORDS.get(str(object_path).strip().lower())
+        existed = record.get("packageExists") if record is not None else None
+        if existed is None:
+            existed = bool(unreal.EditorAssetLibrary.does_asset_exist(package_path))
+        if existed:
+            raise _AssetUnavailable(
+                "本次运行读不到{}（资产在工程里，但当前实例加载不了它）：{}".format(label, object_path))
         raise RuntimeError("未找到{}：{}".format(label, object_path))
     actual_class = _asset_class_name(asset)
     if expected_class and expected_class.lower() not in actual_class.lower():
@@ -237,8 +307,12 @@ def _voice_display_value(object_path):
 
 
 def _entry(stable_id, group, display_name, target_path, target_field,
-           source_summary, current_value=None, target_value=None, equal=None, error=""):
-    status = STATUS_ERROR if error else STATUS_UNCHANGED if equal else STATUS_PENDING
+           source_summary, current_value=None, target_value=None, equal=None, error="",
+           unavailable=False):
+    status = (STATUS_UNAVAILABLE if unavailable
+              else STATUS_ERROR if error
+              else STATUS_UNCHANGED if equal
+              else STATUS_PENDING)
     current_values = []
     target_values = []
     if isinstance(current_value, list):
@@ -262,9 +336,16 @@ def _entry(stable_id, group, display_name, target_path, target_field,
 
 
 def _error_entry(stable_id, group, display_name, target_path, target_field, source_summary, error):
+    """出错与"这次读不到"各归各的档 —— **判断只看 error 的类型，调用方一处都不用改**。
+
+    为什么必须分：离线实例读不到 WidgetBlueprint / MetaSoundSource 时，原来报的是
+    「未找到…」—— 谎报成"工程里没有"，界面上显示「配置错误」且勾不动，
+    用户只能怀疑自己的工程坏了（2026-09-24 晓桀截图报的正是这个）。
+    """
     return _entry(
-        stable_id, group, display_name, target_path, target_field,
-        source_summary, error=str(error))
+        stable_id, group, display_name, target_path, target_field, source_summary,
+        error=str(error),
+        unavailable=isinstance(error, _AssetUnavailable))
 
 
 def _mapping_to_dict(value):
@@ -636,6 +717,8 @@ def _build_entries(request):
     team_voice_path = _get(request, "TeamVoiceObjectPath", "teamVoiceObjectPath", default="")
     item_path = _get(request, "ItemObjectPath", "itemObjectPath", default="")
     meta_path = _get(request, "MetaSoundObjectPath", "metaSoundObjectPath", default="")
+    _scan_progress("正在加载依赖资产…", 1, "先让 ZDBridge 在 C++ 侧把它们读进内存")
+    _preload_via_bridge(request)
     _scan_progress("正在加载 Item 资产与依赖…", 2, item_path)
     try:
         context = _collect_context(request)
@@ -1034,12 +1117,18 @@ def _execute(request):
             item["errorMessage"] = execution_errors[item["stableId"]]
     selected_results = [item for item in entries if item["stableId"] in selected]
     has_errors = any(item["status"] == STATUS_ERROR for item in entries)
+    # "这次读不到"**不算工程有问题**，也不该把整次扫描判失败 ——
+    # 否则离线一跑第 3 步就是一片红，而那几条其实什么都没证明。
+    unavailable = [item for item in entries if item["status"] == STATUS_UNAVAILABLE]
     succeeded = not has_errors and len(selected_results) == len(selected) and all(
         item["status"] == STATUS_UNCHANGED for item in selected_results)
     mode = str(_get(request, "Mode", "mode", default="Scan")).lower()
     error_message = ""
     if has_errors:
         error_message = "基础配置存在结构或资产错误"
+    elif unavailable:
+        error_message = "有 {} 项本次运行读不到（资产仍在工程里，离线实例常见）：{}。请连上 Unreal 编辑器后重跑".format(
+            len(unavailable), "、".join(item["displayName"] for item in unavailable))
     elif mode == "apply" and not succeeded:
         error_message = "部分基础配置在复扫后仍未达到目标值"
     return {

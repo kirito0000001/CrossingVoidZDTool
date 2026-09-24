@@ -102,8 +102,12 @@ namespace CrossingVoidZDTool
         /// <summary>
         /// 上一次走 <see cref="RunUnrealTaskWithOfflineFallbackAsync{T}"/> 的任务是不是**离线**跑的。
         ///
-        /// 用途只有一个：离线实例加载不到资产时，报出来的"未找到 X"是**扫描环境**的问题，
-        /// 不是工程资产的问题 —— 调用方据此决定"别把步骤踢回去、也别让人去改工程"。
+        /// 只留给诊断：离线（commandlet 上下文）实例加载不到 WidgetBlueprint / MetaSound
+        /// 这类资产，"慢 + 找不到资产"看着像工程坏了 —— 有这一位就能一眼分辨是这条路造成的。
+        ///
+        /// ⚠️ 判断"这一条是不是离线假报"**不再靠它**：桥接脚本自己会问资产注册表，
+        /// 把"资产在、这次读不到"标成 `Unavailable`，比"离线 + 文案含未找到"准
+        /// （2026-09-24 改，见 `HandleLightConfigurationFoundationIssue`）。
         /// </summary>
         private bool _lastUnrealTaskRanOffline;
 

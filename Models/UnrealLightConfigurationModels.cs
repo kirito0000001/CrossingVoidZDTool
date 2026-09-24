@@ -11,7 +11,19 @@ internal enum UnrealLightConfigurationStatus
 {
     Unchanged,
     Pending,
-    Error
+    Error,
+
+    /// <summary>
+    /// 资产**在工程里**、但**这一次运行读不到它** —— 和「工程里没有」是两件事。
+    ///
+    /// 离线实例（`UnrealEditor-Cmd -run=pythonscript`）读不到 WidgetBlueprint /
+    /// MetaSoundSource 这类"类由编辑器模块提供"的资产（实测：同一份工程在线 23 项 0 错、
+    /// 离线 4 项全报"未找到"）。所以它**不算错误**、不进错误计数、也不可勾选 ——
+    /// 界面上只该说"读不到，请连上编辑器重跑"，不能冒充「配置错误」。
+    ///
+    /// 数值必须与桥接脚本的 `STATUS_UNAVAILABLE = 3` 对齐（枚举按数字序列化）。
+    /// </summary>
+    Unavailable
 }
 
 internal sealed class UnrealLightConfigurationRequest
@@ -98,18 +110,29 @@ internal sealed class UnrealLightConfigurationViewItem : ObservableObject
     public string GroupName => Source.GroupName;
     public string DisplayName => Source.DisplayName;
     public bool IsError => Source.Status == UnrealLightConfigurationStatus.Error;
+
+    /// <summary>
+    /// 资产在工程里、但这**一次运行**读不到它（离线实例常见）。**不是错误**，
+    /// 所以红色说明块不管它（那块只服务真错误）—— 但原因必须看得见，
+    /// 于是让它走中性那一块、把说明放在"现在"这一栏（见 <see cref="CurrentValueText"/>）。
+    /// </summary>
+    public bool IsUnavailable => Source.Status == UnrealLightConfigurationStatus.Unavailable;
     public bool IsListValue => Source.CurrentValues.Count > 0 ||
         Source.TargetValues.Count > 0 ||
         Source.StableId is "item.keywords" or "item.passive";
     public bool IsCountOnly => Source.StableId is "meta.waves" or "meta.weights";
-    public bool IsTagList => IsListValue && !IsCountOnly &&
+    public bool IsTagList => !IsUnavailable && IsListValue && !IsCountOnly &&
         (Source.CurrentValues.Count > 1 || Source.TargetValues.Count > 1 || Source.StableId is "item.keywords" or "item.passive");
-    public string CurrentValueText => IsTagList ? string.Empty : IsCountOnly
-        ? FormatCount(Source.CurrentValues, Source.CurrentSummary)
-        : FormatValue(Source.CurrentSummary);
-    public string TargetValueText => IsTagList ? string.Empty : IsCountOnly
-        ? FormatCount(Source.TargetValues, Source.TargetSummary)
-        : FormatValue(Source.TargetSummary);
+    public string CurrentValueText => IsUnavailable
+        ? FormatValue(Source.ErrorMessage)
+        : IsTagList ? string.Empty : IsCountOnly
+            ? FormatCount(Source.CurrentValues, Source.CurrentSummary)
+            : FormatValue(Source.CurrentSummary);
+    public string TargetValueText => IsUnavailable
+        ? string.Empty
+        : IsTagList ? string.Empty : IsCountOnly
+            ? FormatCount(Source.TargetValues, Source.TargetSummary)
+            : FormatValue(Source.TargetSummary);
     public IReadOnlyList<string> CurrentValueItems => IsTagList
         ? GetValues(Source.CurrentValues, Source.CurrentSummary)
         : Array.Empty<string>();
@@ -169,6 +192,7 @@ internal sealed class UnrealLightConfigurationViewItem : ObservableObject
     {
         UnrealLightConfigurationStatus.Pending => "待设置",
         UnrealLightConfigurationStatus.Error => "配置错误",
+        UnrealLightConfigurationStatus.Unavailable => "读不到",
         _ => "无变化"
     };
     public bool IsSelectable => Source.Status == UnrealLightConfigurationStatus.Pending;

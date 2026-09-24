@@ -208,7 +208,7 @@ var tests = new (string Name, Action Run)[]
     ("无旧基线时已有配对素材先迁移为未修改", UnrealBridgeDiffMigratesMatchedItemsWithoutBaseline),
     ("特殊字符清洗后的语音仍按规范路径配对", UnrealBridgeDiffPairsSanitizedVoiceNames),
     ("规范连字符语音不会误报改名", UnrealBridgeDiffKeepsCanonicalVoiceNameUnchanged),
-    ("虚幻基础配置使用独立第三步工作区", UnrealLightConfigurationUsesDedicatedFourthStep),
+    ("虚幻基础配置使用独立第三步工作区", UnrealLightConfigurationUsesDedicatedStepFile),
     ("虚幻基础配置脚本遵守确认字段白名单", UnrealLightConfigurationScriptUsesConfirmedWhitelist),
     ("新基线按源文件哈希识别工具箱更新", UnrealBridgeDiffDetectsSourceFileChangeAfterMigration),
     ("虚幻执行计划只包含选中项且删除排最后", UnrealBridgeExecutionPlanUsesSelectedChangesAndDeletesLast),
@@ -9589,7 +9589,7 @@ static void UnrealBridgeDiffKeepsCanonicalVoiceNameUnchanged()
     AssertEqual(false, change.IsSelected);
 }
 
-static void UnrealLightConfigurationUsesDedicatedFourthStep()
+static void UnrealLightConfigurationUsesDedicatedStepFile()
 {
     var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService())
     {
@@ -9620,16 +9620,46 @@ static void UnrealLightConfigurationUsesDedicatedFourthStep()
                 GroupName = "Item 配置",
                 DisplayName = "生命值",
                 Status = UnrealLightConfigurationStatus.Unchanged
+            },
+            // 「资产在工程里、但这一次运行读不到它」——离线实例（commandlet）读不到
+            // WidgetBlueprint / MetaSoundSource 这类"类由编辑器模块提供"的资产。
+            // 实测：同一份工程在线 23 项 0 错、离线 4 项全报"未找到"（2026-09-24 晓桀截图）。
+            // 它**不算错误**：离线一跑第 3 步就一片红，而那几条其实什么都没证明。
+            new UnrealLightConfigurationResultItem
+            {
+                StableId = "foundation.assets",
+                GroupName = "依赖检查",
+                DisplayName = "基础配置依赖",
+                TargetPath = "/Game/ITems/CharItemS/Item_Misaka.Item_Misaka",
+                TargetField = "资产和默认对象",
+                SourceSummary = "第一步至第二步产物",
+                Status = UnrealLightConfigurationStatus.Unavailable,
+                ErrorMessage = "本次运行读不到角色入队语音 UI（资产在工程里，但当前实例加载不了它）：/Game/UIWidget/2DPvpUI/UI_TeamSelect.UI_TeamSelect"
             }
         }
     });
 
     AssertEqual("基础配置", viewModel.WorkspaceTitle);
-    AssertEqual(1, viewModel.LightConfigurationItems.Count);
+    AssertEqual(2, viewModel.LightConfigurationItems.Count);
     AssertEqual(1, viewModel.LightConfigurationSelectedCount);
     AssertEqual(1, viewModel.LightConfigurationPendingCount);
     AssertEqual(1, viewModel.LightConfigurationUnchangedCount);
     AssertEqual(true, viewModel.CanApplyLightConfiguration);
+
+    // 「读不到」单独占一档：不进错误计数、不可勾选、显示成「读不到」，
+    // 而且原因要看得见（红色说明块只服务真错误，所以它走中性那一块）。
+    AssertEqual(0, viewModel.LightConfigurationErrorCount);
+    AssertEqual(1, viewModel.LightConfigurationUnavailableCount);
+    var unavailableItem = viewModel.LightConfigurationItems.Single(item => item.StableId == "foundation.assets");
+    AssertEqual(false, unavailableItem.IsError);
+    AssertEqual(false, unavailableItem.IsSelectable);
+    AssertEqual("读不到", unavailableItem.StatusText);
+    AssertEqual(true, unavailableItem.CurrentValueText.Contains("本次运行读不到", StringComparison.Ordinal));
+    AssertEqual(
+        true,
+        viewModel.LightConfigurationSummaryText.Contains("读不到 1", StringComparison.Ordinal));
+    // 中栏标题也不能说"没有改动"——那 4 项什么都没查成，得说清是"读不到"。
+    AssertEqual("本次读不到依赖资产", viewModel.LightConfigurationEmptyTitle);
 }
 
 static void LightConfigurationOnlyTouchesItsOwnStep()
