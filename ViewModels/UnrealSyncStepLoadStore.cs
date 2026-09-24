@@ -26,7 +26,7 @@ internal sealed class UnrealSyncStepLoadStore
     /// 这一步现在有没有可用数据。
     /// 第三、五步问的是同一棵树归谁；其余步看各自的标志。
     /// </summary>
-    public bool IsLoaded(int step) => step is 3 or 5
+    public bool IsLoaded(int step) => step is 2 or 5
         ? _hasPublishTree && _publishTreeOwnerStep == step
         : _loaded[ToKnownStep(step)];
 
@@ -66,13 +66,13 @@ internal sealed class UnrealSyncStepLoadStore
         return true;
     }
 
-    /// <summary>差异树跑完了，并且归这一步（只可能是第三或第五步）。</summary>
+    /// <summary>差异树跑完了，并且归这一步（只可能是第二或第五步）。</summary>
     public bool ClaimPublishTree(int step)
     {
-        if (step is not (3 or 5))
+        if (step is not (2 or 5))
         {
             throw new ArgumentOutOfRangeException(
-                nameof(step), step, "差异树只可能归第三或第五步——这两步共用同一棵，范围不同。");
+                nameof(step), step, "差异树只可能归第二或第五步——这两步共用同一棵，范围不同。");
         }
 
         if (_hasPublishTree && _publishTreeOwnerStep == step)

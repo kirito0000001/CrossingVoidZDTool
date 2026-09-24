@@ -91,7 +91,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         // 旧名字保留成门面：读写都落到状态对象，历史调用点一行不用改。
         set
         {
-            if (value is 3 or 5)
+            if (value is 2 or 5)
             {
                 _stepLoads.ClaimPublishTree(value);
             }
@@ -162,7 +162,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     private int _detectionConflictCount;
     private int _detectionDeletedCount;
     // ── 第四步「基础配置」的状态搬到了 UnrealProjectSyncViewModel.Step4LightConfiguration.cs ──
-    // ── 第三步「同步素材」的发布过滤器（PublishFilter / ApplyPublishFilter）搬到了 Step3PublishSelection.cs ──
+    // ── 第三步「同步素材」的发布过滤器（PublishFilter / ApplyPublishFilter）搬到了 Step2MaterialSync.cs ──
     /// <summary>
     /// 当前步号。
     ///
@@ -219,19 +219,19 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     // ── 第四步的 LightConfigurationItems 也搬到了 Step4LightConfiguration.cs ──
     // ── 第一步「底层检测」的状态与逻辑都搬到了 UnrealProjectSyncViewModel.Step1Foundation.cs ──
-    // ── 第三步「同步素材」的发布阶段 / 差异树 / 计数搬到了 Step3PublishSelection.cs ──
+    // ── 第三步「同步素材」的发布阶段 / 差异树 / 计数搬到了 Step2MaterialSync.cs ──
 
     // ── 第二步「规整素材」的状态搬到了 UnrealProjectSyncViewModel.Step2Normalization.cs ──
-    public bool IsDetectionWorkspace => !IsNormalizationWorkspace;
     // ── 第五步「序列同步」的工作区开关 / 口径 / 缓存都搬到了 Step5SequenceSync.cs ──
     public string WorkspaceTitle => IsEngineToToolbox ? "检测与选择" : WorkflowStep switch
     {
         1 => "底层检测",
-        2 => "素材规整",
-        3 => "同步素材",
+        // 第 2 步 = 合并后的「同步素材」（规整 + 素材同步）。**第 3 步的号放空**，所以这里没有 3。
+        2 => "同步素材",
         4 => "基础配置",
         5 => "序列同步",
         6 => "蓝图置入",
+        7 => "特效同步",
         _ => "同步结果"
     };
     public string WorkspaceDescription => IsEngineToToolbox
@@ -239,34 +239,36 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         : WorkflowStep switch
         {
             1 => "检查 Unreal 目录和角色 Item 是否符合规范。",
-            2 => "确认 Unreal 旧素材与工具箱规范素材的对应关系。",
-            3 => "勾选本次需要同步到 Unreal 的素材。",
+            2 => "先确认 Unreal 旧素材与工具箱规范素材的对应关系，再勾选本次要同步的素材。",
             4 => "检查并应用角色入队语音、Item、MetaSound 和语音并发设置。",
             5 => "同步当前角色的序列、帧素材、AnimMaps 映射和语音轨道。",
             6 => "把角色数据写入角色蓝图和 2DInfor 数据表：对局设置、动作序列、技能与护援连携。",
+            7 => "把特效网格与材质实例同步到 Unreal。",
             _ => "查看最近一次同步执行结果。"
         };
 
     // ── 第四步「基础配置」的计数 / 文案 / 可用性也都搬到了 Step4LightConfiguration.cs ──
 
+    /// <summary>
+    /// 这一步**有没有数据**（不是"完成了没有"）。
+    ///
+    /// ③「每一步都不阻断同步」之后，「下一步」的判据统一成这一条 ——
+    /// 不再要求"全合规 / 规整全处理完 / 没有待同步"（那等于给每一步都装一道门）。
+    /// 名字保留成 `CanAdvanceWorkflow` 是为了不动那八处 `OnPropertyChanged`。
+    /// </summary>
     public bool CanAdvanceWorkflow => WorkflowStep switch
     {
-        1 => SelectedSource?.DraftCharacter is not null &&
-            FoundationChecks.Count > 0 && FoundationChecks.All(item => item.IsCompliant),
-        2 => SelectedSource?.DraftCharacter is not null &&
-            IsNormalizationStepLoaded && NormalizationItems.All(item => item.IsResolved),
-        3 => IsPublishSelectionReady,
-        4 => IsLightConfigurationLoaded &&
-            LightConfigurationPendingCount == 0 &&
-            LightConfigurationErrorCount == 0,
-        5 => HasImportDetection &&
-            _lastPublishChanges.All(change => change.Kind == UnrealBridgeChangeKind.Unchanged),
-        6 => false,
-        _ => false
+        // 第 1 步：跑过底层检测就有数据（不要求 16 项全绿）
+        1 => FoundationChecks.Count > 0,
+        // 第 2 步（合并后的「同步素材」）和第 5 步：检测过就有数据（不要求规整全处理完）
+        2 or 5 => HasImportDetection,
+        // 第 4 步：检测过就有数据（不要求 0 待设置 / 0 错误）
+        4 => IsLightConfigurationLoaded,
+        _ => true
     };
 
     public bool HasPublishSelection => !IsEngineToToolbox && _importSelectedCount > 0;
-    // ── HasNoPublishChanges / PublishActionText 搬到了 Step3PublishSelection.cs ──
+    // ── HasNoPublishChanges / PublishActionText 搬到了 Step2MaterialSync.cs ──
     public bool CanStartPublish => HasPublishSelection &&
         !IsPublishRunning && IsWorkflowOperationIdle;
 
@@ -389,11 +391,21 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         // 第五步的树在这里才真正"定归属"（检测流程是先建树、后认领），
         // 所以这就是把序列差异写进它自己那份小缓存的最好时机。
         //
-        // 写在**早退之前**：刷新时这棵树本来就归第五步，早退会把它漏掉。
+        // 写在**早退之前**：刷新时这棵树本来就归第 5 步，早退会把它漏掉。
         // 从缓存恢复时不写：那是读回来的东西，原样写回去只是白一次磁盘。
-        if (step == 5 && !_isRestoringSession)
+        //
+        // 第 2 步「同步素材」同理：检测是先建树、后认领，所以"认领"就是把它那份差异
+        // 写进自己的小缓存（`step2-material-sync.json`）的最好时机。
+        if (!_isRestoringSession)
         {
-            SaveSequenceSyncCache(SelectedSource?.DraftCharacter);
+            if (step == 5)
+            {
+                SaveSequenceSyncCache(SelectedSource?.DraftCharacter);
+            }
+            else if (step == 2)
+            {
+                SaveMaterialSyncCache(SelectedSource?.DraftCharacter);
+            }
         }
 
         if (_loadedPublishStep == step)
@@ -434,7 +446,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     public string WorkflowStep1StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 1);
     public string WorkflowStep2StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 2);
-    public string WorkflowStep3StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 3);
     public string WorkflowStep4StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 4);
     public string WorkflowStep5StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 5);
     /// <summary>
@@ -445,21 +456,24 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     /// 所以这一步现在只会照规则显示"未开始"，不会谎报完成。
     /// </summary>
     public string WorkflowStep7StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 7);
+    /// <summary>「下一步」按钮上的文案：要写的是**下一步**叫什么，不是当前步。</summary>
     public string WorkflowNextText => WorkflowStep switch
     {
-        1 => "规整素材",
-        2 => "同步素材",
-        3 => "基础配置",
+        // 第 1 步的下一步 = 合并后的第 2 步「同步素材」
+        1 => "同步素材",
+        // 第 2 步的下一步要**跨过放空的第 3 步**，直接进基础配置
+        2 => "基础配置",
         4 => "序列同步",
         5 => "蓝图置入",
         6 => "特效同步",
         _ => "已完成"
     };
+
     public string WorkflowReloadText => WorkflowStep switch
     {
         1 => "重新加载底层检测",
-        2 => "重新加载规整素材",
-        3 => "重新加载同步素材",
+        // 第 2 步是合并后的「同步素材」（规整 + 素材同步），不再是"重新加载规整素材"
+        2 => "重新加载同步素材",
         4 => "重新加载基础配置",
         5 => "重新加载序列同步",
         6 => "重新加载蓝图置入",
@@ -467,21 +481,20 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         _ => "重新加载同步结果"
     };
 
-    // ── 发布确认栏 / 选择栏的可见性见 Step3PublishSelection.cs（WorkflowNextButtonVisibility 由流程表决定，仍留这里）──
+    // ── 发布确认栏 / 选择栏的可见性见 Step2MaterialSync.cs（WorkflowNextButtonVisibility 由流程表决定，仍留这里）──
     public Visibility WorkflowNextButtonVisibility => Visibility.Visible;
-    public bool WorkflowNextButtonEnabled => WorkflowStep switch
-    {
-        3 => HasNoPublishChanges && IsWorkflowOperationIdle,
-        4 => CanAdvanceWorkflow && IsWorkflowOperationIdle,
-        5 => CanAdvanceWorkflow && IsWorkflowOperationIdle,
-        // 第六步（蓝图置入）之后还有第七步「特效同步」——以前这里写死 false，
-        // 于是"下一步"永远是灰的「已完成」，用户根本进不去第七步。
-        6 => CanAdvanceWorkflow && IsWorkflowOperationIdle,
-        7 => false,
-        _ => WorkflowStep < 3 && CanAdvanceWorkflow && IsWorkflowOperationIdle
-    };
+    /// <summary>
+    /// 「下一步」按钮能不能点。
+    ///
+    /// ③ 之后判据收成两句：**这一步有数据**（`CanAdvanceWorkflow`）+ **别正在跑**。
+    /// 不再按步写一堆分支 —— 原来那张表里还留着**已放空的第 3 步**的一支，
+    /// 而第 6 步那支读的 `CanAdvanceWorkflow` 又恒为 false（等于按钮永远是灰的）。
+    /// 第 7 步是最后一步，恒灰。
+    /// </summary>
+    public bool WorkflowNextButtonEnabled =>
+        WorkflowStep != UnrealSyncWorkflow.MaxStep && CanAdvanceWorkflow && IsWorkflowOperationIdle;
 
-    // ── IsPublishSelectionReady / CanExecutePublishChange 搬到了 Step3PublishSelection.cs ──
+    // ── IsPublishSelectionReady / CanExecutePublishChange 搬到了 Step2MaterialSync.cs ──
 
     public string EnginePath
     {
@@ -718,7 +731,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         private set => SetProperty(ref _canImportSelection, value);
     }
 
-    // ── SelectionContentVisibility 搬到了 Step3PublishSelection.cs ──
+    // ── SelectionContentVisibility 搬到了 Step2MaterialSync.cs ──
 
     public string SourceGroupTitle => IsEngineToToolbox ? "Unreal 角色" : "已完成角色";
 
@@ -795,7 +808,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             VisibleNormalizationItems = [];
             FoundationChecks.Clear();
             VisibleFoundationChecks = [];
-            IsNormalizationWorkspace = false;
             WorkflowStep = 1;
         }
         finally
@@ -959,7 +971,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             ResetImportOperation();
             ClearLightConfigurationState();
             ClearBlueprintSetupState();
-            CloseNormalizationWorkspace();
             SetNormalizationStepLoaded(false);
             NormalizationItems.Clear();
             VisibleNormalizationItems = [];
@@ -974,11 +985,12 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         }
         if (!IsEngineToToolbox && !string.IsNullOrWhiteSpace(nextCode))
         {
-            if (!sameSource || FoundationChecks.Count == 0)
-            {
-                Detect();
-                RefreshFoundationChecks(nextCode);
-            }
+            // ② 去掉自动检测（晓桀 2026-09-24：「只由我进行检测操作」）：
+            // 切角色**不再顺手查一遍**第 1 步的检查项，只把上一位的清掉、
+            // 再读**这一位自己的检查项缓存**。读缓存不是检测；没有缓存就空着，
+            // 要不要查由用户点「重新加载」。
+            ClearFoundationChecks();
+            TryApplyFoundationCache(SelectedSource?.DraftCharacter);
         }
         ClearWorkspaceFailure();
         if (!sameSource)
@@ -1020,7 +1032,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         RestoreWorkflowStepCache(step);
     }
 
-    public bool OpenNormalizationWorkspace(bool activateWorkspace = true)
+    public bool OpenNormalizationWorkspace()
     {
         var character = SelectedSource?.DraftCharacter;
         var candidate = SelectedSource?.UnrealCandidate ??
@@ -1043,11 +1055,17 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 ? inMemoryCache.NormalizationDecisions
                 : _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache?.NormalizationDecisions ?? []));
         var rebuiltItems = BuildNormalizationItems(character, candidate, cachedDecisions);
-        ApplyNormalizationItems(rebuiltItems, activateWorkspace);
+        ApplyNormalizationItems(rebuiltItems);
         return true;
     }
 
-    public async Task<bool> OpenNormalizationWorkspaceAsync(bool activateWorkspace = true)
+    /// <summary>
+    /// 用**当前 Unreal 候选**重建规整项，并把缓存里的旧决策回填上去。
+    ///
+    /// 合并后这一步和素材差异树吃的是**同一次导出的同一份候选** ——
+    /// 所以它只是"再算一遍规整"，不再切工作区、也不再单独跑导出。
+    /// </summary>
+    public async Task<bool> RebuildNormalizationItemsAsync()
     {
         var character = SelectedSource?.DraftCharacter;
         var candidate = SelectedSource?.UnrealCandidate ??
@@ -1068,7 +1086,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 ? inMemoryCache.NormalizationDecisions
                 : _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache?.NormalizationDecisions ?? []);
         var rebuiltItems = await Task.Run(() => BuildNormalizationItems(character, candidate, cachedDecisions));
-        ApplyNormalizationItems(rebuiltItems, activateWorkspace);
+        ApplyNormalizationItems(rebuiltItems);
         return true;
     }
 
@@ -1088,29 +1106,17 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             if (step == 5)
             {
                 SelectedPublishStage = PublishStages.FirstOrDefault(item => item.Stage == UnrealBridgePublishStage.ZdAnimationTracks);
-                IsNormalizationWorkspace = false;
                 WorkflowStep = 5;
                 RestoreWorkflowStepCache(5);
                 return;
             }
 
-            if (step == 2)
-            {
-                IsNormalizationWorkspace = true;
-                WorkflowStep = 2;
-                RestoreWorkflowStepCache(2);
-                return;
-            }
-
+            // 第 2 步不需要特判了：合并后它没有"规整工作区"要开，
+            // 落步 + 读自己的缓存就是它该做的全部。
             WorkflowStep = step;
-            IsNormalizationWorkspace = false;
             RestoreWorkflowStepCache(step);
-            if (step == 1 && FoundationChecks.Count == 0 &&
-                SelectedSource?.DraftCharacter is { Code: var characterCode })
-            {
-                Detect();
-                RefreshFoundationChecks(characterCode);
-            }
+            // ② 去掉自动检测：进第 1 步**不再自动查一遍**。
+            //    检查项要么是刚才从这位角色自己的缓存读回来的，要么就等用户点「重新加载」。
         }
         finally
         {
@@ -1151,6 +1157,20 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             }
         }
 
+        // 第 2 步「同步素材」（合并后）同理：先读自己的小缓存 `step2-material-sync.json`。
+        if (step == 2)
+        {
+            if (result.Status == UnrealSyncSessionCacheLoadStatus.Loaded && result.Cache is not null)
+            {
+                _loadedSessionCache = result.Cache;
+            }
+
+            if (TryApplyMaterialSyncCache(SelectedSource?.DraftCharacter))
+            {
+                return;
+            }
+        }
+
         if (result.Status != UnrealSyncSessionCacheLoadStatus.Loaded || result.Cache is null)
         {
             return;
@@ -1163,8 +1183,16 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             _loadedSessionCache = cache;
             if (step == 2)
             {
-                RestoreNormalizationItems(cache.NormalizationItems);
-                IsNormalizationStepLoaded = cache.IsNormalizationStepLoaded || cache.NormalizationItems.Count > 0;
+                // 第 2 步（合并后的「同步素材」）：
+                // ① **内存里有东西就别拿会话缓存盖回去** —— 刚检测出来的结果比缓存新；
+                // ② **不再动"加载过"的标志** —— 那个现在归步加载表（`_stepLoads.IsLoaded(2)`）。
+                //    原来这里会从会话缓存重设 `IsNormalizationStepLoaded`，缓存里没有那几项时
+                //    就把它设成 false，于是"退回第 2 步"显示成「尚未检测」（2026-09-24 实测踩到）。
+                if (NormalizationItems.Count == 0)
+                {
+                    RestoreNormalizationItems(cache.NormalizationItems);
+                }
+
                 return;
             }
 
@@ -1211,7 +1239,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 }
             }
 
-            if (step is 3 or 5 && cache.IsPublishDetection)
+            if (step is 2 or 5 && cache.IsPublishDetection)
             {
                 // 这一步的树已经在内存里了，就别再拿缓存盖回去。
                 //
@@ -1260,36 +1288,15 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         }
     }
 
-    public bool AdvanceWorkflowStep()
-    {
-        if (WorkflowStep == 1)
-        {
-            if (!HasContentDetection)
-            {
-                return false;
-            }
-
-            return OpenNormalizationWorkspace();
-        }
-
-        if (WorkflowStep == 2)
-        {
-            if (NormalizationItems.Any(item => !item.IsResolved))
-            {
-                return false;
-            }
-
-            IsNormalizationWorkspace = false;
-            if (!RefreshPublishTreeDisplay())
-            {
-                return false;
-            }
-            WorkflowStep = 3;
-            return true;
-        }
-
-        return WorkflowStep == 3;
-    }
+    /// <summary>
+    /// 合并后这里**不再切工作区、也不再改步号**。
+    ///
+    /// 旧时它干两件事：第 1 步 → 打开"规整工作区"，第 2 步 → 切到第 3 步。
+    /// 现在第 2 步（同步素材）本身就是规整 + 素材差异**同屏**，没有"进入规整工作区"这一说；
+    /// 往前走统一由流程控制器 <c>GoToNextStepAsync</c> 负责。
+    /// 方法留着是因为壳里同步成功后还会调它一次（那时候它本来也只是把界面推一下）。
+    /// </summary>
+    public bool AdvanceWorkflowStep() => true;
 
     public bool ReloadPublishResult()
     {
@@ -1304,7 +1311,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         return true;
     }
 
-    // ── SetSelectionTree 搬到了 Step3PublishSelection.cs（导入方向也走它）──
+    // ── SetSelectionTree 搬到了 Step2MaterialSync.cs（导入方向也走它）──
 
     public void SetImportSelectionTree(
         IEnumerable<UnrealSyncSelectionTreeItem> roots,
@@ -1354,7 +1361,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         ImportResultVisibility = Visibility.Visible;
     }
 
-    // ── SetPublishSelectionTree / SetPublishSelectionTreeAsync / FilterPublishChanges 搬到了 Step3PublishSelection.cs ──
+    // ── SetPublishSelectionTree / SetPublishSelectionTreeAsync / FilterPublishChanges 搬到了 Step2MaterialSync.cs ──
 
     public bool MatchesCurrentPublishChanges(IReadOnlyList<UnrealBridgeChange> latestChanges)
     {
@@ -1541,14 +1548,12 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
         OnPropertyChanged(nameof(CanStartPublish));
         OnPropertyChanged(nameof(PublishActionText));
-        // 第五步是最后一步：完成后必须留在第五步。以前无条件跳到第四步，
-        // 序列同步一成功用户就被踢回基础配置，检测结果和选择树全被清空，
-        // 只能重走第四步再回来重新检测。
+        // **不再改步号**：完成一次同步之后该停在哪，由**调用方**决定
+        // （发布链路自己会 `ReturnToWorkflowStep(...)`；第七步回 7、第五步回 5、第 2 步回 2）。
+        // 这里原来无条件跳到第 4 步 —— 第 2 步（素材）同步完也被弹到基础配置，
+        // 而导航那条路以前还会顺手调它一次，等于"离开第 2 步"就把它的检测结果扔了
+        // （2026-09-24 实测：从基础配置往回切，第 2 步变成"尚未检测"）。
         var wasSequenceStep = WorkflowStep == 5;
-        if (!wasSequenceStep)
-        {
-            WorkflowStep = 4;
-        }
 
         ImportOperationTitle = wasSequenceStep ? "序列同步完成" : "素材同步完成";
         ImportOperationMessage = wasSequenceStep
@@ -1589,7 +1594,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         ImportOperationMessage = message;
     }
 
-    // ── GetSelectedStableIds / GetSelectedGroupAndLeafStableIds 搬到了 Step3PublishSelection.cs ──
+    // ── GetSelectedStableIds / GetSelectedGroupAndLeafStableIds 搬到了 Step2MaterialSync.cs ──
 
     private void ImportSelectionItem_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -1677,7 +1682,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         }
     }
 
-    // ── RestoreSelectionState 搬到了 Step3PublishSelection.cs ──
+    // ── RestoreSelectionState 搬到了 Step2MaterialSync.cs ──
 
     private void SelectionGroup_GroupSelectionChanged(object? sender, EventArgs e)
     {
@@ -1787,8 +1792,10 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             _detectionConflictCount = cache.DetectionConflictCount;
             _detectionDeletedCount = cache.DetectionDeletedCount;
             NotifyDetectionSummaryChanged();
-            IsNormalizationStepLoaded = cache.IsNormalizationStepLoaded ||
-                cache.WorkflowStep >= 3 || cache.NormalizationItems.Count > 0;
+            // 这里原来会从会话缓存重设 `IsNormalizationStepLoaded`（下面那两行）。
+            // 它已经**没人读了** —— "这一步加载过没有"现在一律问步加载表（`_stepLoads.IsLoaded(2)`），
+            // 理由见 `UnrealProjectSyncViewModel.Workspace.cs` 的 `BuildWorkflowInputs`。
+            // 删掉是为了不留一个"看起来还在起作用"的假标志。
             if (cache.IsBlueprintSetupLoaded)
             {
                 SetBlueprintSetupResult(
@@ -1852,7 +1859,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                     // 只在这一步已经加载过、且还是同一个角色时才跳过；冷启动时
                     // _loadedPublishStep 是 0，照常从缓存恢复。
                     if (_loadedPublishStep == cache.WorkflowStep &&
-                        _loadedPublishStep is 3 or 5 &&
+                        _loadedPublishStep is 2 or 5 &&
                         SelectionTreeRoots.Count > 0 &&
                         string.Equals(
                             SelectedSource?.DraftCharacter?.Code,
@@ -1879,7 +1886,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                     // 只有第三步和第五步自己的缓存才算「这一步已加载」。
                     // 从第六步的缓存恢复时，树里装的是上一步顺带留下的差异，
                     // 认成第三步已加载会让人拿着旧范围的数据继续往下走。
-                    SetLoadedPublishStep(cache.WorkflowStep is 3 or 5 ? cache.WorkflowStep : 0);
+                    SetLoadedPublishStep(cache.WorkflowStep is 2 or 5 ? cache.WorkflowStep : 0);
                 }
             }
             else
@@ -1890,7 +1897,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             }
 
             _lastContentDetectionAt = cache.DetectedAt == default ? null : cache.DetectedAt;
-            IsNormalizationWorkspace = cache.IsPublishDetection && WorkflowStep == 2;
             OnPropertyChanged(nameof(ContentDetectionStatusText));
 
             return loadResult;
@@ -2161,6 +2167,8 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 // 第 5 步「序列同步」同样另写一份自己的缓存文件（一步一个文件）。
                 // 用刚写的这份快照，两个文件里第五步的内容不会各说各话。
                 await Task.Run(() => SaveSequenceSyncCacheFromSnapshot(character, cache)).ConfigureAwait(false);
+                // 第 2 步「同步素材」也抄一份（同一份快照，所以两个地方不会各说各话）。
+                await Task.Run(() => SaveMaterialSyncCacheFromSnapshot(character, cache)).ConfigureAwait(false);
                 if (version == Volatile.Read(ref _sessionSaveVersion)) _pendingSessionCache = null;
             }
             finally
@@ -2174,7 +2182,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         }
     }
 
-    // ── SaveSelectionStateToSessionCache 搬到了 Step3PublishSelection.cs（FlushSessionCache 仍在这里）──
+    // ── SaveSelectionStateToSessionCache 搬到了 Step2MaterialSync.cs（FlushSessionCache 仍在这里）──
 
     public void FlushSessionCache()
     {
@@ -2196,6 +2204,8 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             // 防抖那条路会被这次 flush 顶掉（版本号一变它就放弃），
             // 所以这里也得补写一次第五步自己的小文件，否则刚改的勾选只进了会话缓存。
             SaveSequenceSyncCacheFromSnapshot(character, cache);
+            // 第 2 步同理。
+            SaveMaterialSyncCacheFromSnapshot(character, cache);
             _pendingSessionCache = null;
         }
         finally
@@ -2262,7 +2272,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         OnPropertyChanged(nameof(PublishConflictText));
     }
 
-    // ── ApplyPublishFilter / ShouldShowPublishChild 搬到了 Step3PublishSelection.cs ──
+    // ── ApplyPublishFilter / ShouldShowPublishChild 搬到了 Step2MaterialSync.cs ──
 
     private void ResetImportOperation()
     {

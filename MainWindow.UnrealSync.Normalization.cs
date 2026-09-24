@@ -18,31 +18,10 @@ namespace CrossingVoidZDTool
     /// <summary>第二步「规整素材」：确认 Unreal 旧素材与工具箱规范素材的对应关系。</summary>
     public sealed partial class MainWindow
     {
-        private async void OpenUnrealNormalizationButton_Click(object sender, RoutedEventArgs e)
-        {
-            if (!TryBeginUnrealWorkflowOperation())
-            {
-                return;
-            }
-
-            try
-            {
-                ShowGlobalProgress("加载规整素材列表", _applicationViewModel.UnrealProjectSync.SelectedSource?.DraftCharacter?.Code ?? string.Empty);
-                if (!await _applicationViewModel.UnrealProjectSync.OpenNormalizationWorkspaceAsync())
-                {
-                    ShowFloatingTip(InfoBarSeverity.Warning, "无法打开素材规整", "请先选择已完成角色，并至少检测一次当前 Unreal 内容。");
-                    return;
-                }
-
-                CompleteGlobalProgress("规整素材列表已加载", "已复用当前 Unreal 素材数据。");
-                AppendLog(LogKind.User, "打开 Unreal 素材规整工作区。");
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            finally
-            {
-                EndUnrealWorkflowOperation();
-            }
-        }
+        // ── 「打开素材规整」和「重新加载规整素材」两个入口都删了 ──
+        // 合并后第 2 步既是规整又是素材同步：规整项由这一步**自己的检测**（同一次导出）
+        // 重建，不再需要单独的入口，也不再需要单独跑一次导出。
+        // 两个处理器都已经没有 XAML 按钮接着，留着只会让人以为还有这条路。
 
         private async void ChooseUnrealNormalizationRedirectButton_Click(object sender, RoutedEventArgs e)
         {
@@ -131,53 +110,6 @@ namespace CrossingVoidZDTool
             if (sender is Button { Tag: UnrealAssetNormalizationItem { IsAudio: true, HasPreview: true } item } button)
             {
                 PlayVoiceFile(item.PreviewFilePath, button);
-            }
-        }
-
-        private async Task ReloadUnrealNormalizationStepAsync(UnrealProjectSyncViewModel sync)
-        {
-            var characterCode = sync.SelectedSource?.DraftCharacter?.Code;
-            if (string.IsNullOrWhiteSpace(characterCode))
-            {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
-                return;
-            }
-            if (!TryBeginUnrealWorkflowOperation())
-            {
-                return;
-            }
-
-            ShowGlobalProgress("重新加载规整素材", characterCode);
-            try
-            {
-                await sync.ExportProjectCharactersAsync(
-                    [characterCode],
-                    cancellationToken: GetGlobalProgressCancellationToken(),
-                    scope: UnrealProjectSyncExportScope.Normalization);
-                if (!await sync.OpenNormalizationWorkspaceAsync())
-                {
-                    throw new InvalidOperationException("无法读取当前角色的 Unreal 素材，请先检查项目和角色来源。");
-                }
-
-                CompleteGlobalProgress("规整素材已重新加载", sync.NormalizationSummaryText);
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (OperationCanceledException ex)
-            {
-                CompleteGlobalProgress("重新加载已取消", characterCode);
-                AppendLog(LogKind.Warning, "重新加载 Unreal 规整素材已取消。", ex);
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            catch (Exception ex)
-            {
-                CompleteGlobalProgress("重新加载规整素材失败", ex.Message);
-                ShowFloatingTip(InfoBarSeverity.Error, "重新加载规整素材失败", ex.Message);
-                AppendLog(LogKind.Error, "重新加载 Unreal 规整素材失败。", ex);
-                await HideGlobalProgressAfterDelayAsync();
-            }
-            finally
-            {
-                EndUnrealWorkflowOperation();
             }
         }
     }

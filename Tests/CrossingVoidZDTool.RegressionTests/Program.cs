@@ -167,9 +167,9 @@ var tests = new (string Name, Action Run)[]
     ("语音与序列帧不再互相依赖", VoiceAndSequenceServicesDoNotDependOnEachOther),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
     ("第五步序列同步自检", SequenceSyncSelfCheckPasses),
-    ("依次检测卡在第一个待处理步骤", DetectAllStepsStopsAtFirstBlockedStep),
+    ("依次检测不再因待处理步骤停下", DetectAllStepsIgnoresPendingSteps),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
-    ("进入某一步先落步再检测", EnteringStepNavigatesBeforeDetecting),
+    ("重新加载先落步再检测", ReloadingStepNavigatesBeforeDetecting),
     ("每一步的进度都按阶段分段", WorkflowProgressIsPhasedForEveryStep),
     ("在线执行不可用时退回离线", RemoteExecutionFallsBackToOffline),
     ("依次检测只检测不写入", DetectAllStepsNeverWrites),
@@ -6289,9 +6289,10 @@ static void DetectAllStepsNeverWrites()
         };
 
         controller.EnterStepAsync(4).GetAwaiter().GetResult();
-        // 控制器等到了检测真的跑完才返回
-        AssertEqual(true, finished);
-        AssertSequence([4], host.DetectedSteps.ToArray());
+        // ② 去掉自动检测之后：**进步骤本身一次虚幻都不跑**。
+        // 检测只剩「重新加载」和「依次检测后续步骤」两个手动入口。
+        AssertEqual(false, finished);
+        AssertSequence([], host.DetectedSteps.ToArray());
     }
     finally
     {
@@ -6299,14 +6300,16 @@ static void DetectAllStepsNeverWrites()
     }
 }
 
-static void DetectAllStepsStopsAtFirstBlockedStep()
+static void DetectAllStepsIgnoresPendingSteps()
 {
-    // 依次检测的价值是把六步的等待一次排完，不是替人做决定：
-    // 走到一个还有事要做的步骤就得停下来说清楚卡在哪。
+    // 2026-09-24 改：③「以后每一步都不会阻断同步」——
+    // 所以"走到还有事要做的步骤就停下"这条**不再成立**。依次检测现在的价值是
+    // 把各步的结果一次摆完，要不要处理由人自己定；**检查将来是一个独立阶段**。
+    // （检测**失败**仍然会停，见下一条用例。）
     var (sync, controller, host, root) = CreateWorkflowController(4);
     try
     {
-        // 第四步检测完还留着没处理的项 -> 不满足离开条件
+        // 第四步检测完留着一堆没处理的项 —— 以前这会把它卡住
         host.OnDetect = _ =>
         {
             sync.SetLightConfigurationResult(new UnrealLightConfigurationResult
@@ -6327,12 +6330,15 @@ static void DetectAllStepsStopsAtFirstBlockedStep()
 
         controller.DetectAllStepsAsync().GetAwaiter().GetResult();
 
-        // 只检测了第四步就停住，绝不能顺手把第五、六步也跑掉
-        AssertSequence([4], host.DetectedSteps.ToArray());
-        AssertEqual(4, sync.WorkflowStep);
+        // 一路检测到最大步，不再停在第 4 步。
+        // 用 Range 写而不是写死 4,5,6,7：以后挪号（合并第 2 步）这条不用再改。
+        AssertSequence(
+            Enumerable.Range(4, UnrealSyncWorkflow.MaxStep - 3).ToArray(),
+            host.DetectedSteps.ToArray());
+        AssertEqual(UnrealSyncWorkflow.MaxStep, sync.WorkflowStep);
         var notice = host.Notices.Single();
-        AssertEqual("第四步尚未完成", notice.Title);
-        AssertEqual(UnrealSyncNoticeSeverity.Informational, notice.Severity);
+        AssertEqual("六步检测已跑完", notice.Title);
+        AssertEqual(UnrealSyncNoticeSeverity.Success, notice.Severity);
     }
     finally
     {
@@ -6367,10 +6373,14 @@ static void DetectAllStepsStopsOnStepFailure()
     }
 }
 
-static void EnteringStepNavigatesBeforeDetecting()
+static void ReloadingStepNavigatesBeforeDetecting()
 {
-    // 「进入某一步」的本职是落步，检测只是顺带。两件事绑死的话，
-    // 检测失败或被别的操作占用就会把人卡在上一步，界面停在原地却已经跑起了虚幻。
+    // 「重新加载」= 落步 + 检测。两件事绑死的话，检测失败就会把人卡在原地，
+    // 界面停在旧步骤却已经跑起了虚幻 —— 所以先落步是本职。
+    //
+    // 2026-09-24 改：**进步骤本身不再检测**（晓桀「只由我进行检测操作」），
+    // 检测只剩「重新加载」与「依次检测后续步骤」两个手动入口。
+    // 所以这条改走「重新加载」—— 要验的那个不变量（先落步、失败也不回退）一个字没变。
     var (sync, controller, host, root) = CreateWorkflowController();
     try
     {
@@ -6384,7 +6394,7 @@ static void EnteringStepNavigatesBeforeDetecting()
         var threw = false;
         try
         {
-            controller.EnterStepAsync(4).GetAwaiter().GetResult();
+            controller.ReloadCurrentStepAsync().GetAwaiter().GetResult();
         }
         catch (InvalidOperationException)
         {
@@ -7466,13 +7476,13 @@ static void ReclassifiedVoiceSurvivesBaselineFilter()
             },
         });
 
-        // 先把这条差异写进第三步的分步缓存
+        // 先把这条差异写进第 2 步（合并后的「同步素材」）的分步缓存
         var writer = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
         writer.Load(enginePath, projectPath);
         writer.IsEngineToToolbox = false;
         writer.RefreshDraftSources([character]);
         writer.SelectSource(writer.CharacterSources.Single());
-        writer.ReturnToWorkflowStep(3);
+        writer.ReturnToWorkflowStep(2);
         writer.SetPublishSelectionTree(
             UnrealSyncSelectionTreeBuilder.FromChanges(
                 [change], UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: true),
@@ -8377,19 +8387,20 @@ static void WorkflowStepIsNotClampedBelowLastStep()
         AssertEqual(UnrealSyncWorkflow.MinStep, sync.WorkflowStep);
         AssertEqual(0, host.DetectedSteps.Count);
 
-        // 已经有数据的步骤不重复检测：进**第六步（蓝图置入）**只该记一条复用日志。
-        // 这里写死 6：最大步已经是 7「特效同步」，而那一步没有"蓝图结果"这种缓存可复用。
+        // ② 去掉自动检测之后：**进步骤一次虚幻都不跑**（原来这里会顺手检测一次、
+        // 然后靠"本步已有缓存"跳过）。写死 6 只是因为这条用例本来就停在第六步。
         controller.EnterStepAsync(6).GetAwaiter().GetResult();
-        AssertSequence([6], host.DetectedSteps.ToArray());
+        AssertSequence([], host.DetectedSteps.ToArray());
         sync.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
         {
             Succeeded = true, CharacterCode = "Misaka", Items = []
         });
         controller.EnterStepAsync(6).GetAwaiter().GetResult();
-        AssertSequence([6], host.DetectedSteps.ToArray());
-        AssertEqual(1, host.Logs.Count(log => log.Contains("复用本步缓存", StringComparison.Ordinal)));
+        AssertSequence([], host.DetectedSteps.ToArray());
 
-        // 「重新加载」是明确要求重查，有缓存也得真跑
+        // 检测只剩手动入口：「重新加载」每次都真跑，不因为"已经有数据"就跳过。
+        controller.ReloadCurrentStepAsync().GetAwaiter().GetResult();
+        AssertSequence([6], host.DetectedSteps.ToArray());
         controller.ReloadCurrentStepAsync().GetAwaiter().GetResult();
         AssertSequence(
             [6, 6],
@@ -15243,8 +15254,9 @@ static void ChangingWorkflowStepNotifiesEveryDeclaredProperty()
         }
     };
 
-    viewModel.ReturnToWorkflowStep(3);
-    AssertEqual(3, viewModel.WorkflowStep);
+    // 第 2 步 = 合并后的「同步素材」（第 3 步的号已放空，别拿它当例子）
+    viewModel.ReturnToWorkflowStep(2);
+    AssertEqual(2, viewModel.WorkflowStep);
 
     var missing = UnrealSyncDerivedNotifications.WorkflowStep
         .Where(name => !fired.Contains(name))
@@ -15330,22 +15342,22 @@ static void WorkflowStateProjectionFollowsStepSemantics()
         UnrealSyncWorkspaceState.Failed,
         UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, hasFailure: true, isRunning: true)));
 
-    // 三、五步共用同一棵差异树，但归属不同：树属于第三步时，第五步仍算「没加载」
-    var step3Owned = Inputs(3, step3Loaded: true, hasDetection: true, step35Count: 2);
-    AssertEqual(true, UnrealSyncWorkflowState.IsStepLoaded(step3Owned, 3));
-    AssertEqual(false, UnrealSyncWorkflowState.IsStepLoaded(step3Owned, 5));
+    // 第 2 步（素材）和第五步共用同一棵差异树，但归属不同：树属于第 2 步时，第五步仍算「没加载」
+    var materialOwned = Inputs(2, step2Loaded: true, hasDetection: true, step35Count: 2);
+    AssertEqual(true, UnrealSyncWorkflowState.IsStepLoaded(materialOwned, 2));
+    AssertEqual(false, UnrealSyncWorkflowState.IsStepLoaded(materialOwned, 5));
     AssertEqual(
         UnrealSyncWorkspaceState.HasContent,
-        UnrealSyncWorkflowState.ResolveWorkspaceState(step3Owned));
+        UnrealSyncWorkflowState.ResolveWorkspaceState(materialOwned));
 
-    // **每一步的缓存互不影响**：第二步已经加载过，不能因为现在站在第三步、
-    // 第三步还没检测就把它算成没加载；反过来也不作废已经设置好的数据。
-    var step2LoadedStep3Empty = Inputs(3, step2Loaded: true, step2Count: 5);
-    AssertEqual(true, UnrealSyncWorkflowState.IsStepLoaded(step2LoadedStep3Empty, 2));
-    AssertEqual(false, UnrealSyncWorkflowState.IsStepLoaded(step2LoadedStep3Empty, 3));
+    // **每一步的缓存互不影响**：第 2 步已经加载过，不能因为现在站在第四步、
+    // 第四步还没检测就把它算成没加载；反过来也不作废已经设置好的数据。
+    var step2LoadedStep4Empty = Inputs(4, step2Loaded: true, step2Count: 5);
+    AssertEqual(true, UnrealSyncWorkflowState.IsStepLoaded(step2LoadedStep4Empty, 2));
+    AssertEqual(false, UnrealSyncWorkflowState.IsStepLoaded(step2LoadedStep4Empty, 4));
     AssertEqual(
         UnrealSyncWorkspaceState.NotDetected,
-        UnrealSyncWorkflowState.ResolveWorkspaceState(step2LoadedStep3Empty));
+        UnrealSyncWorkflowState.ResolveWorkspaceState(step2LoadedStep4Empty));
 
     // 四、六步的徽标文案
     AssertEqual("待处理", UnrealSyncWorkflowState.StepStatusText(Inputs(2, step4Loaded: true), 4));

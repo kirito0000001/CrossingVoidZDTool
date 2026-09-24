@@ -178,6 +178,21 @@ internal sealed partial class UnrealProjectSyncViewModel
     }
 
     /// <summary>
+    /// 把上一位角色的检查项清掉。
+    ///
+    /// 换角色时必须清：`TryApplyFoundationCache` 在"内存里已经有检查项"时会直接返回，
+    /// 不清就会把**别人**的结果留在界面上，而新角色的缓存永远读不进来。
+    /// </summary>
+    internal void ClearFoundationChecks()
+    {
+        FoundationChecks.Clear();
+        VisibleFoundationChecks = [];
+        OnPropertyChanged(nameof(FoundationSummaryText));
+        OnPropertyChanged(nameof(CanAdvanceWorkflow));
+        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
+    }
+
+    /// <summary>
     /// 把当前检查项写进第 1 步自己的缓存文件。
     ///
     /// 那个"要不要查类型"的开关**跟检查本身一起存**：存的时候是"不查"、读的时候要"查"，

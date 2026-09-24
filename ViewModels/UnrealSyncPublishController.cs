@@ -177,60 +177,48 @@ internal sealed class UnrealSyncPublishController(
             var selectionBeforeRefresh = _sync.GetSelectedGroupAndLeafStableIds();
             _host.AppendLog(LogKind.Info, $"[Pre-Refresh Selection] count={selectionBeforeRefresh.Count} ids={string.Join(",", selectionBeforeRefresh.Take(12))}");
             UnrealProjectSyncCharacterCandidate latestCandidate;
-            try
-            {
-                _sync.ValidateFoldersForStep(_sync.WorkflowStep, _sync.ProjectPath, character.Code);
-                // 第三步执行前累计校验第一至第三步；不会检查尚未进入的后续阶段。
-                var preflightExportRun = await _sync.ExportProjectCharactersAsync(
-                    [character.Code],
-                    // 这一段以前完全没有进度回调，十几秒里进度条一动不动。
-                    new Progress<ProgressUpdate>(update => _host.UpdateGlobalProgress(
-                        $"阶段 1/4 · {update.Message}",
-                        progressPlan[WorkflowProgressPlan.PreflightExport].At(update.Percent),
-                        update.Detail,
-                        update.IsIndeterminate)),
-                    _host.GetGlobalProgressCancellationToken(),
-                    UnrealProjectSyncViewModel.ExportScopeFor(_sync.WorkflowStep));
-                // 导出结果以前在这里被整个丢掉。Warning 记的是「退出码非 0 但清单照常写出来了」，
-                // 也就是编辑器在别处报过错——多半无关，但同步出问题时它是唯一的线索。
-                // 检测那条链路（DetectUnrealPublishChangesAsync）一直有这一行，只有同步这条漏了。
-                _host.LogExportWarning(preflightExportRun);
-                _sync.ValidatePublishCharacterFolders(character.Code, requireAssetTypes: !isSequenceSynchronization);
-                latestCandidate = _sync.CharacterCandidates.FirstOrDefault(item =>
-                    string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase))
-                    ?? throw new InvalidOperationException(
-                        $"未找到 Unreal 角色 Item 资产。\n正确名称示例：Item_{character.Code}\n期望路径：/Game/ITems/CharItemS/Item_{character.Code}.Item_{character.Code}");
-            }
-            catch
-            {
-                _sync.ReturnToWorkflowStep(1);
-                throw;
-            }
+            // **只跑这一步自己阶段的事**：导出 → 拿到最新候选。
+            //
+            // 晓桀 2026-09-24：「同步的时候不需要检测以前的了，只管自己阶段的」——
+            // 这里原来还调了 `ValidateFoldersForStep` + `ValidatePublishCharacterFolders`，
+            // 那是**第 1 步（底层检测）和第 2 步（底层/规整态）**的校验，属于"以前的"；
+            // 而且两个都会抛错拦住同步，和 ③「每一步都不阻断同步」也冲突。都去掉了。
+            //
+            // 也**不再用 try/catch 把人挪走**：原来失败（**包括取消**）会 `ReturnToWorkflowStep(1)`，
+            // 于是"取消同步"会把他从自己的步骤踢回第 1 步（实测踩到）。
+            // 人本来就站在要同步的那一步上，失败只需要把话说清楚，不该改变他站哪儿。
+            var preflightExportRun = await _sync.ExportProjectCharactersAsync(
+                [character.Code],
+                // 这一段以前完全没有进度回调，十几秒里进度条一动不动。
+                new Progress<ProgressUpdate>(update => _host.UpdateGlobalProgress(
+                    $"阶段 1/4 · {update.Message}",
+                    progressPlan[WorkflowProgressPlan.PreflightExport].At(update.Percent),
+                    update.Detail,
+                    update.IsIndeterminate)),
+                _host.GetGlobalProgressCancellationToken(),
+                UnrealProjectSyncViewModel.ExportScopeFor(_sync.WorkflowStep));
+            // 导出结果以前在这里被整个丢掉。Warning 记的是「退出码非 0 但清单照常写出来了」，
+            // 也就是编辑器在别处报过错——多半无关，但同步出问题时它是唯一的线索。
+            // 检测那条链路（DetectUnrealPublishChangesAsync）一直有这一行，只有同步这条漏了。
+            _host.LogExportWarning(preflightExportRun);
+            latestCandidate = _sync.CharacterCandidates.FirstOrDefault(item =>
+                string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase))
+                ?? throw new InvalidOperationException(
+                    $"未找到 Unreal 角色 Item 资产。\n正确名称示例：Item_{character.Code}\n期望路径：/Game/ITems/CharItemS/Item_{character.Code}.Item_{character.Code}");
 
-            try
+            // 第 2 步（素材）同步前把规整态按最新候选重算一遍 —— 这属于**这一步自己阶段**的事。
+            if (!isSequenceSynchronization && !await _sync.RebuildNormalizationItemsAsync())
             {
-                if (!isSequenceSynchronization && !await _sync.OpenNormalizationWorkspaceAsync())
-                {
-                    throw new InvalidOperationException("同步前无法重新加载素材规整状态。");
-                }
+                throw new InvalidOperationException("同步前无法重新加载素材规整状态。");
             }
-            catch
-            {
-                _sync.ReturnToWorkflowStep(2);
-                throw;
-            }
-            if (!isSequenceSynchronization && _sync.NormalizationItems.Any(item => !item.IsResolved))
-            {
-                _sync.ReturnToWorkflowStep(2);
-                _host.CompleteGlobalProgress("需要重新确认规整", "检测发现部分重定向映射已失效，请完成第二步后再同步。");
-                _host.ShowFloatingTip(InfoBarSeverity.Warning, "规整状态已变化", "请先完成第二步素材规整。");
-                await _host.HideGlobalProgressAfterDelayAsync();
-                return;
-            }
+            // ③「每一步都不阻断同步」：原来这里有一道门 ——「规整项没处理完就不让同步，
+            // 提示'请先完成第二步'」。已摘掉：检查将来是**一个独立阶段**，
+            // 不该长在"同步"这个动作的门口。要提醒也得由那个阶段去提醒。
+            //
             // 第五步和第七步共用这条发布链路，但**同步完要回到自己那一步**：
             // 第七步同步完跳回第五步，用户会以为特效跑到序列步去了（实测就是这么发生的）。
             _sync.ReturnToWorkflowStep(
-                _sync.WorkflowStep == 7 ? 7 : isSequenceSynchronization ? 5 : 3);
+                _sync.WorkflowStep == 7 ? 7 : isSequenceSynchronization ? 5 : 2);
             var latestToolboxSnapshot = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character);
             var latestUnrealSnapshot = new UnrealBridgeSemanticSnapshotService().Build(latestCandidate);
             // 序列：把「上次同步时记下的素材内容摘要」补进 Unreal 侧载荷，
@@ -758,7 +746,7 @@ internal sealed class UnrealSyncPublishController(
                 rescanned,
                 baseline);
             stateService.Save(character, projectPath, verifiedState);
-            _sync.OpenNormalizationWorkspace(activateWorkspace: false);
+            _sync.OpenNormalizationWorkspace();
             if (deferredCount > 0)
             {
                 var remainingChanges = new UnrealBridgeDiffService().Compare(

@@ -2687,7 +2687,7 @@
                                     </ScrollViewer>
                                      <Grid
                                          Grid.Row="1"
-                                         Visibility="{Binding UnrealProjectSync.IsNormalizationWorkspace, Mode=OneWay}">
+                                         Visibility="{Binding UnrealProjectSync.NormalizationDetailsVisibility, Mode=OneWay}">
                                          <ListView
                                              ItemsSource="{Binding UnrealProjectSync.VisibleNormalizationItems, Mode=OneWay}"
                                             SelectionMode="None"
@@ -2798,18 +2798,8 @@
                                                         <ColumnDefinition Width="Auto" />
                                                     </Grid.ColumnDefinitions>
                                                     <TextBlock FontSize="16" Text="2" />
-                                                    <TextBlock Grid.Column="1" Text="规整素材" />
-                                                    <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep2StatusText, Mode=OneWay}" />
-                                                </Grid>
-                                                <Grid ColumnSpacing="8">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="Auto" />
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="Auto" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock FontSize="16" Text="3" />
                                                     <TextBlock Grid.Column="1" Text="同步素材" />
-                                                    <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep3StatusText, Mode=OneWay}" />
+                                                    <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep2StatusText, Mode=OneWay}" />
                                                 </Grid>
                                                 <Grid ColumnSpacing="8">
                                                     <Grid.ColumnDefinitions>

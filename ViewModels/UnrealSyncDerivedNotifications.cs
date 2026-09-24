@@ -31,7 +31,7 @@ internal static class UnrealSyncDerivedNotifications
     [
         nameof(UnrealProjectSyncViewModel.WorkflowStep1StatusText),
         nameof(UnrealProjectSyncViewModel.WorkflowStep2StatusText),
-        nameof(UnrealProjectSyncViewModel.WorkflowStep3StatusText),
+        nameof(UnrealProjectSyncViewModel.WorkflowStep2StatusText),
         nameof(UnrealProjectSyncViewModel.WorkflowStep4StatusText),
         nameof(UnrealProjectSyncViewModel.WorkflowStep5StatusText),
         nameof(UnrealProjectSyncViewModel.WorkflowStep6StatusText),

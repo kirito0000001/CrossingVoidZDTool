@@ -42,6 +42,8 @@ namespace CrossingVoidZDTool.Services;
 [JsonSerializable(typeof(Step1FoundationCacheDocument))]
 // 第二步「规整素材」自己的小缓存（用户做过的规整决策）。
 [JsonSerializable(typeof(Step2NormalizationCacheDocument))]
+// 第二步「同步素材」（合并后）自己的另一半缓存：素材差异 + 勾选。
+[JsonSerializable(typeof(Step2MaterialSyncCacheDocument))]
 // 第四步「基础配置」自己的小缓存（检测项 + 勾选）。
 [JsonSerializable(typeof(Step4LightConfigurationCacheDocument))]
 // 第五步「序列同步」自己的小缓存（序列差异 + 勾选）。

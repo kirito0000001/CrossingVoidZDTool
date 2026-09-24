@@ -147,7 +147,7 @@ internal sealed partial class UnrealProjectSyncViewModel
     }
 
     /// <summary>第三步/第五步"没有任何差异可同步"时，界面要给出"下一步"而不是"同步"。</summary>
-    public bool HasNoPublishChanges => !IsEngineToToolbox && WorkflowStep is 3 or 5 &&
+    public bool HasNoPublishChanges => !IsEngineToToolbox && WorkflowStep is 2 or 5 &&
         HasImportDetection &&
         _lastPublishChanges.All(change => change.Kind == UnrealBridgeChangeKind.Unchanged);
 
@@ -160,10 +160,10 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     // ── 可见性 ────────────────────────────────────────────────────────────
 
-    public Visibility WorkflowConfirmationVisibility => WorkflowStep is 3 or 5 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility WorkflowConfirmationVisibility => WorkflowStep is 2 or 5 ? Visibility.Visible : Visibility.Collapsed;
 
     public Visibility SelectionContentVisibility =>
-        !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
+        !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
         !IsBlueprintSetupWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
             ? Visibility.Visible
             : Visibility.Collapsed;
@@ -212,7 +212,7 @@ internal sealed partial class UnrealProjectSyncViewModel
         // 默认按当前步骤认领这棵树。检测流程会在建完树、切到目标步骤之前
         // 用 SetLoadedPublishStep 覆盖成真正的目标步骤；这里只是保证
         // 视图模型单独使用时也是自洽的，不会出现「有树但没人认领」。
-        if (WorkflowStep is 3 or 5)
+        if (WorkflowStep is 2 or 5)
         {
             _loadedPublishStep = WorkflowStep;
         }
@@ -271,13 +271,13 @@ internal sealed partial class UnrealProjectSyncViewModel
         // 序列那一路：第五/七步，**或者**阶段明确停在"序列动画轨道"（会话缓存恢复时步骤可能还没落定，只有阶段可信）。
         // 但**第三步除外**：那一步要的是素材，残留的序列阶段不能在这里生效。
         if (WorkflowStep is 5 or 7 ||
-            (WorkflowStep != 3 &&
+            (WorkflowStep != 2 &&
              SelectedPublishStage?.Stage == UnrealBridgePublishStage.ZdAnimationTracks))
         {
             return changes.Where(change => change.Module == UnrealBridgeModule.SequenceFrames).ToArray();
         }
 
-        if (WorkflowStep == 3 || SelectedPublishStage?.Stage == UnrealBridgePublishStage.CharacterMaterials)
+        if (WorkflowStep == 2 || SelectedPublishStage?.Stage == UnrealBridgePublishStage.CharacterMaterials)
         {
             return changes
                 .Where(change => change.Module is UnrealBridgeModule.BaseMaterials or UnrealBridgeModule.Voices)
@@ -314,5 +314,89 @@ internal sealed partial class UnrealProjectSyncViewModel
     {
         SaveSessionCache();
         FlushSessionCache();
+    }
+
+    // ── 自己的缓存文件（`step2-material-sync.json`）────────────────────────
+    //
+    // 和第五步那三个方法一一对应（那边落 `step5-sequence-sync.json`）。
+    // 本步的**规整决策**另有一份 `step2-normalization.json`（那是用户数据，不随算法换代失效）；
+    // 这里装的是**检测结果 + 勾选**，所以带差异算法版本、对不上就当没缓存。
+
+    /// <summary>把当前的素材差异 + 勾选写进第 2 步自己的缓存文件。</summary>
+    internal bool SaveMaterialSyncCache(CharacterCard? character) =>
+        character is not null &&
+        Step2MaterialSyncCache.Save(
+            character,
+            _lastPublishChanges,
+            GetSelectedStableIds(),
+            GetSelectedGroupAndLeafStableIds(),
+            CurrentDetectionAlgorithmVersion);
+
+    /// <summary>
+    /// 从一份"正要落盘的会话缓存快照"里，把第 2 步那一份抄进它自己的小文件。
+    /// 用同一份快照是有意的：两个地方的内容因此不会各说各话。
+    /// </summary>
+    internal static bool SaveMaterialSyncCacheFromSnapshot(CharacterCard? character, UnrealSyncSessionCache cache) =>
+        character is not null &&
+        cache.WorkflowStep == 2 &&
+        cache.IsPublishDetection &&
+        cache.PublishChanges.Count > 0 &&
+        Step2MaterialSyncCache.Save(
+            character,
+            cache.PublishChanges,
+            cache.SelectedStableIds,
+            cache.SelectedGroupStableIds,
+            cache.DetectionAlgorithmVersion);
+
+    /// <summary>
+    /// 把第 2 步自己的小缓存回填成差异树（内存里已经有一棵树时不覆盖）。
+    /// 返回 true 表示确实用文件里的结果建好了树。
+    /// </summary>
+    internal bool TryApplyMaterialSyncCache(CharacterCard? character)
+    {
+        if (character is null || HasImportDetection)
+        {
+            return false;
+        }
+
+        var document = Step2MaterialSyncCache.TryLoad(
+            character,
+            character.Code,
+            CurrentDetectionAlgorithmVersion);
+        if (document is null || document.Changes.Length == 0)
+        {
+            return false;
+        }
+
+        // 过滤口径要和检测时一致，否则会拿别步的变更去建第 2 步的树。
+        var changes = FilterPublishChanges(document.Changes).ToArray();
+        if (changes.Length == 0)
+        {
+            return false;
+        }
+
+        // 恢复期间必须屏蔽写盘：`SetLoadedPublishStep(2)` 会顺手把这一步的小缓存存一次，
+        // 而那一刻 `_lastPublishChanges` 还是上一次的（树还没建），存下去就是把好缓存覆盖成旧的。
+        var wasRestoring = _isRestoringSession;
+        _isRestoringSession = true;
+        try
+        {
+            SetLoadedPublishStep(2);
+            var roots = UnrealSyncSelectionTreeBuilder.FromChanges(
+                changes,
+                UnrealBridgePublishSupportPolicy.CanExecute,
+                selectPendingByDefault: SelectsPendingChangesByDefault(2));
+            var restoreIds = document.SelectedStableIds
+                .Union(document.SelectedGroupStableIds, StringComparer.OrdinalIgnoreCase)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            ApplySelection(roots, restoreIds);
+            SetPublishSelectionTree(roots, changes);
+        }
+        finally
+        {
+            _isRestoringSession = wasRestoring;
+        }
+
+        return true;
     }
 }

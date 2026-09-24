@@ -26,7 +26,7 @@ internal sealed partial class UnrealProjectSyncViewModel
     /// <summary>可勾选的条目数。差异树只算叶子里真正能执行的那些。</summary>
     public int SelectableStepItemCount => WorkflowStep switch
     {
-        3 or 5 => SelectionTreeRoots
+        2 or 5 => SelectionTreeRoots
             .SelectMany(root => root.Children)
             .Count(item => item.IsSelectable && item.Change is not null && CanExecutePublishChange(item.Change)),
         4 => LightConfigurationItems.Count(item => item.IsSelectable),
@@ -36,7 +36,7 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     public int SelectedStepItemCount => WorkflowStep switch
     {
-        3 or 5 => SelectionTreeRoots
+        2 or 5 => SelectionTreeRoots
             .SelectMany(root => root.Children)
             .Count(item => item.IsChecked == true && item.Change is not null && CanExecutePublishChange(item.Change)),
         4 => LightConfigurationItems.Count(item => item.IsSelected),
@@ -103,7 +103,7 @@ internal sealed partial class UnrealProjectSyncViewModel
     {
         switch (WorkflowStep)
         {
-            case 3:
+            case 2:
             case 5:
             {
                 using var scope = BeginBulkSelectionUpdate();
@@ -169,11 +169,15 @@ internal sealed partial class UnrealProjectSyncViewModel
                     $"- [{(item.IsCompliant ? "通过" : "不符")}] {item.DisplayName}：{item.DetailText}"));
                 break;
             case 2:
+                // 合并后的「同步素材」：**规整和素材差异都属于第 2 步**，所以两样一起写出来。
                 lines.Add(NormalizationSummaryText);
                 lines.AddRange(NormalizationItems.Select(item =>
                     $"- [{(item.IsResolved ? "已处理" : "待处理")}] {item.UnrealAssetName}  {item.UnrealObjectPath}"));
+                lines.Add(DetectionResultSummaryText);
+                lines.AddRange(SelectionTreeRoots.SelectMany(root => root.Children)
+                    .Where(item => item.Change is not null)
+                    .Select(item => $"- [{item.Change!.Kind}] {item.DisplayName}"));
                 break;
-            case 3:
             case 5:
                 lines.Add(DetectionResultSummaryText);
                 lines.AddRange(SelectionTreeRoots.SelectMany(root => root.Children)
@@ -203,7 +207,7 @@ internal sealed partial class UnrealProjectSyncViewModel
     {
         var selected = WorkflowStep switch
         {
-            3 or 5 => SelectionTreeRoots.SelectMany(root => root.Children)
+            2 or 5 => SelectionTreeRoots.SelectMany(root => root.Children)
                 .Where(item => item.IsChecked == true && item.Change is not null)
                 .Select(item => item.Change!.UnrealItem?.SourceObjectPath ??
                     item.Change!.ToolboxItem?.SourceObjectPath ?? string.Empty),

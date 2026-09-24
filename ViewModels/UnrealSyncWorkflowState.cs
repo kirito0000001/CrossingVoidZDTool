@@ -131,10 +131,11 @@ internal static class UnrealSyncWorkflowState
 
         var itemCount = inputs.CurrentStep switch
         {
-            // 第一、二步的列表本身就是内容；三和五共用同一棵差异树。
+            // 第一、二步的列表本身就是内容；五和**第 2 步**共用同一棵差异树。
+            // 第 2 步是合并后的「同步素材」，规整项和差异项都算它的内容，所以相加。
             1 => inputs.Step1ItemCount,
-            2 => inputs.Step2ItemCount,
-            3 or 5 => inputs.Step35ItemCount,
+            2 => inputs.Step2ItemCount + inputs.Step35ItemCount,
+            5 => inputs.Step35ItemCount,
             4 => inputs.Step4ItemCount,
             6 => inputs.Step6ItemCount,
             _ => 0,

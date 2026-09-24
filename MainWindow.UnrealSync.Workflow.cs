@@ -47,13 +47,19 @@ namespace CrossingVoidZDTool
                     ShowFloatingTip(InfoBarSeverity.Success, "底层检测已重新加载", sync.FoundationSummaryText);
                     break;
                 case 2:
-                    await ReloadUnrealNormalizationStepAsync(sync);
-                    break;
-                case 3:
                 case 5:
-                    // 第三步和第五步走同一条差异检测，只是导出范围和默认勾选不同。
+                    // 第 2 步（合并后的「同步素材」：规整 + 素材同步）和第 5 步走同一条差异检测，
+                    // 只是导出范围和默认勾选不同。
+                    // ⚠️ 第 3 步的号**放空**（旧的「同步素材」并进了第 2 步），4~7 的号不动。
                     _workflowStepAfterPublishDetection = step;
                     await DetectUnrealPublishChangesAsync();
+                    if (step == 2)
+                    {
+                        // 规整段和素材差异树吃的是**同一次导出的同一份候选** ——
+                        // 合并的意义就在这儿：不再为规整单独跑一次导出。
+                        await sync.RebuildNormalizationItemsAsync();
+                    }
+
                     break;
                 case 4:
                     await ReloadUnrealLightConfigurationStepAsync(sync);

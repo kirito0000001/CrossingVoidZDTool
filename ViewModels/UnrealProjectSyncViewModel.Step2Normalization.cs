@@ -44,20 +44,17 @@ internal sealed partial class UnrealProjectSyncViewModel
         }
     }
 
-    private bool _isNormalizationWorkspace;
+    /// <summary>
+    /// 规整段显不显示：**有需要规整的项才显示**。
+    ///
+    /// 以前这里是个"第 2 步的工作区标志"（`IsNormalizationWorkspace`），要靠代码切。
+    /// 合并后第 2 步**既是规整又是素材同步**，所以改成按内容显示 ——
+    /// 没有要规整的项时，面板就是一个干净的差异树，不空占一块。
+    /// </summary>
+    public bool HasVisibleNormalizationItems => VisibleNormalizationItems.Count > 0;
 
-    public bool IsNormalizationWorkspace
-    {
-        get => _isNormalizationWorkspace;
-        private set
-        {
-            if (SetProperty(ref _isNormalizationWorkspace, value))
-            {
-                OnPropertyChanged(nameof(IsDetectionWorkspace));
-                OnPropertyChanged(nameof(SelectionContentVisibility));
-            }
-        }
-    }
+    public Visibility NormalizationDetailsVisibility =>
+        HasVisibleNormalizationItems ? Visibility.Visible : Visibility.Collapsed;
 
     public string NormalizationSummaryText
     {
@@ -70,10 +67,7 @@ internal sealed partial class UnrealProjectSyncViewModel
         }
     }
 
-    // ── 工作区可见性 ──────────────────────────────────────────────────────
-
-    public Visibility NormalizationDetailsVisibility =>
-        WorkflowStep == 2 ? Visibility.Visible : Visibility.Collapsed;
+    // ── 交互动作 ──────────────────────────────────────────────────────────
 
     /// <summary>
     /// 取这一步的规整决策：**先读自己的缓存文件**，没有才回退到整体会话缓存。
@@ -167,9 +161,7 @@ internal sealed partial class UnrealProjectSyncViewModel
         return rebuiltItems;
     }
 
-    private void ApplyNormalizationItems(
-        IReadOnlyList<UnrealAssetNormalizationItem> rebuiltItems,
-        bool activateWorkspace)
+    private void ApplyNormalizationItems(IReadOnlyList<UnrealAssetNormalizationItem> rebuiltItems)
     {
         NormalizationItems.Clear();
         foreach (var item in rebuiltItems)
@@ -179,13 +171,6 @@ internal sealed partial class UnrealProjectSyncViewModel
 
         RefreshVisibleNormalizationItems();
         SetNormalizationStepLoaded(true);
-
-        if (activateWorkspace)
-        {
-            IsNormalizationWorkspace = true;
-            WorkflowStep = 2;
-        }
-
         OnPropertyChanged(nameof(NormalizationSummaryText));
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
     }
@@ -223,14 +208,8 @@ internal sealed partial class UnrealProjectSyncViewModel
                 (!HideResolvedNormalizationItems || !item.IsResolved))
             .ToArray();
         OnPropertyChanged(nameof(NormalizationSummaryText));
-    }
-
-    public void CloseNormalizationWorkspace()
-    {
-        IsNormalizationWorkspace = false;
-        if (WorkflowStep == 2)
-        {
-            WorkflowStep = 1;
-        }
+        // 规整段的显隐是**按内容**算的，所以列表一变就要通知它。
+        OnPropertyChanged(nameof(HasVisibleNormalizationItems));
+        OnPropertyChanged(nameof(NormalizationDetailsVisibility));
     }
 }

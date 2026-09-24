@@ -216,7 +216,7 @@ namespace CrossingVoidZDTool
                 // 把发布阶段拨到这一步该在的地方。
                 // 不拨的话，会话里残留的"序列动画轨道"会让 FilterPublishChanges 把素材变更整批丢掉 ——
                 // 界面就变成"共检查 0 项、无差异 0 项"（2026-09-24 实测）。
-                if (_workflowStepAfterPublishDetection is 3 or 5)
+                if (_workflowStepAfterPublishDetection is 2 or 5)
                 {
                     var stageForStep = UnrealProjectSyncViewModel.PublishStageFor(_workflowStepAfterPublishDetection);
                     _applicationViewModel.UnrealProjectSync.SelectedPublishStage =
@@ -261,20 +261,17 @@ namespace CrossingVoidZDTool
                 // 记下这棵差异树属于哪一步：第三步和第五步共用同一棵树、范围不同，
                 // 不区分的话回到另一步会误以为已经检测过而直接复用。
                 //
-                // **不属于 3/5/7 的检测必须把归属清成 0，绝不能默认写成 3** ——
+                // **不属于 2/5/7 的检测必须把归属清成 0，绝不能默认写成 2** ——
                 // 以前这里写的是"不是 3/5 就记成 3"，于是第四步的预检跑完，第三步会误以为
                 // "我有缓存"，直接复用一个跟它无关（常常是空）的树，界面显示成
                 // "共检查 0 项、无差异 0 项"，把真正该报的新增（幻形立绘 #2 / 失败语音 #1）吞掉。
                 _applicationViewModel.UnrealProjectSync.SetLoadedPublishStep(
-                    targetWorkflowStep is 3 or 5 or 7 ? targetWorkflowStep : 0);
+                    targetWorkflowStep is 2 or 5 or 7 ? targetWorkflowStep : 0);
+                // 第 2 步 = 合并后的「同步素材」（规整 + 素材同步）。
+                // 旧的第 3 步并进它了、号放空，所以这里不再有第 3 支。
                 if (targetWorkflowStep == 2)
                 {
-                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(1);
-                    _applicationViewModel.UnrealProjectSync.AdvanceWorkflowStep();
-                }
-                else if (targetWorkflowStep == 3)
-                {
-                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(3);
+                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(2);
                 }
                 else if (targetWorkflowStep == 5)
                 {

@@ -65,6 +65,19 @@ internal sealed class UnrealSyncWorkflowController(
     private string? SelectedCharacterCode => _sync.SelectedSource?.DraftCharacter?.Code;
 
     /// <summary>
+    /// **放空的那一步**：旧的「同步素材」并进了第 2 步，第 3 步的号空着（4~7 没动）。
+    /// 前进和后退都要跨过它，否则人会停在一个没有内容的步上。
+    /// 等以后收口（4~7 → 3~6、`MaxStep` → 6）时，这个常量就能删掉。
+    /// </summary>
+    private const int VoidStep = 3;
+
+    /// <summary>把放空的号跳过去。</summary>
+    private static int SkipVoidStep(int step) => step == VoidStep ? step + 1 : step;
+
+    /// <summary>往回走时把放空的号跳过去。</summary>
+    private static int SkipVoidStepBackwards(int step) => step == VoidStep ? step - 1 : step;
+
+    /// <summary>
     /// 回退只导航，绝不触发检测。
     ///
     /// 往回走是「我要看看上一步」，不是「重新查一遍上一步」。那一步没缓存时
@@ -72,7 +85,8 @@ internal sealed class UnrealSyncWorkflowController(
     /// </summary>
     public void GoToPreviousStep()
     {
-        _sync.ReturnToWorkflowStep(Math.Max(UnrealSyncWorkflow.MinStep, _sync.WorkflowStep - 1));
+        _sync.ReturnToWorkflowStep(
+            SkipVoidStepBackwards(Math.Max(UnrealSyncWorkflow.MinStep, _sync.WorkflowStep - 1)));
     }
 
     public async Task GoToNextStepAsync()
@@ -96,43 +110,32 @@ internal sealed class UnrealSyncWorkflowController(
             return;
         }
 
-        // 第三步确认没有待同步内容后，要把「同步结果」面板收好再走，
-        // 否则第四步会带着第三步的操作提示。这里不能再触发一次素材同步事件，
-        // 那会重复执行同步前检测和同步操作。
-        if (step == 3)
-        {
-            _sync.CompletePublishOperation(0, 0);
-        }
-
-        await EnterStepAsync(step + 1);
+        // **往前走不再顺手"收尾"**：原第 3 步时代这里会调 `CompletePublishOperation(0, 0)`，
+        // 把同步结果面板收好再走。但那个方法会 `SetSelectionTree([])` + 清掉差异 + 跳到第 4 步 ——
+        // 于是"从第 2 步往前走一趟再回来"就等于把这一步的检测结果扔了
+        // （2026-09-24 实测：从基础配置往回切，第 2 步变成"尚未检测"）。
+        // 每步的状态现在归自己（各步自己的小缓存），导航不该清它。
+        await EnterStepAsync(SkipVoidStep(step + 1));
     }
 
     /// <summary>
-    /// 进入某一步：先落步，再按需检测。
+    /// 进入某一步：**只落步 + 读这一步自己的缓存**，绝不跑虚幻。
     ///
-    /// 两件事必须分开。先落步是按钮的本职——检测失败、被别的操作占用、
-    /// 或者干脆不检测，都不该把人卡在上一步。按需是指这一步已经有数据
-    /// （内存里的，或刚从该步缓存恢复的）时就不再跑虚幻：六步来回切，
-    /// 每次都重检测纯粹是干等，离线一次就是十几秒。
+    /// 晓桀 2026-09-24 定：「去除自动检测，只由我进行检测操作」。
+    /// 以前这里会"该步没数据就顺手检测一次"，于是往上一步、往下走、切角色
+    /// 都可能背地里起一次虚幻（离线一次十几秒）。现在检测只剩两个**手动**入口：
+    /// <see cref="ReloadCurrentStepAsync"/>（「重新加载」）与
+    /// <see cref="DetectAllStepsAsync"/>（「依次检测后续步骤」）。
+    ///
+    /// 这也是"把检查做成一个独立阶段"的前提：进入步骤只负责**把界面切过去**。
     /// </summary>
-    public async Task EnterStepAsync(int step, bool forceReload = false)
+    public Task EnterStepAsync(int step)
     {
         _sync.ReturnToWorkflowStep(step);
-        if (!forceReload && _sync.IsWorkflowStepLoaded(step))
-        {
-            _host.Log($"[Workflow] step={step} 复用本步缓存，未重新检测 Unreal。");
-            return;
-        }
-
-        if (!RequireSelectedCharacter())
-        {
-            return;
-        }
-
-        await _host.RunStepDetectionAsync(step);
+        return Task.CompletedTask;
     }
 
-    /// <summary>「重新加载」是用户明确要求重查，无论本步有没有缓存都要真跑一次。</summary>
+    /// <summary>「重新加载」：用户明确要求重查 —— 这是**手动检测入口**，真跑一次。</summary>
     public async Task ReloadCurrentStepAsync()
     {
         if (!RequireSelectedCharacter())
@@ -140,7 +143,9 @@ internal sealed class UnrealSyncWorkflowController(
             return;
         }
 
-        await EnterStepAsync(_sync.WorkflowStep, forceReload: true);
+        var step = _sync.WorkflowStep;
+        _sync.ReturnToWorkflowStep(step);
+        await _host.RunStepDetectionAsync(step);
     }
 
     /// <summary>
@@ -161,6 +166,8 @@ internal sealed class UnrealSyncWorkflowController(
         for (var step = startStep; step <= UnrealSyncWorkflow.MaxStep; step++)
         {
             await EnterStepAsync(step);
+            // 进步骤本身不再检测了，所以"依次检测"要自己显式跑这一步的检测。
+            await _host.RunStepDetectionAsync(step);
             if (_sync.WorkspaceState == UnrealSyncWorkspaceState.Failed)
             {
                 _host.Notify(new UnrealSyncNotice(
@@ -195,33 +202,22 @@ internal sealed class UnrealSyncWorkflowController(
     }
 
     /// <summary>
-    /// 当前步骤是否满足离开条件；不满足时给出这一步自己的提示。
-    /// 只做判断，不改任何状态——依次检测要靠它试探能不能往下走。
+    /// 当前步骤是否满足离开条件。
+    ///
+    /// **③ 已定：每一步都不阻断同步 → 这里恒放行。**
+    /// 以前这一支是六道门（第一步要全绿、第二步要规整全处理完、第三步要没有待同步…），
+    /// 现在全部摘掉。晓桀的原话是"以后每一步都不会阻断同步，我最后会专门设计**检查阶段**"——
+    /// 也就是说"检查"将来会是一件独立的事，不该长在每步的出口上。
+    ///
+    /// **这个方法是留给那个阶段的唯一接管点**：现在的判断散在
+    /// <c>AdvanceWorkflowStep</c> / <c>CanAdvanceWorkflow</c> / 各处 <c>Validate…</c> 里，
+    /// 以后收时候一并收进这里（或它旁边的纯函数），别再散回去。
+    /// 本轮**只卸不加**，不预设那个阶段长什么样。
     /// </summary>
     public UnrealSyncStepGate CanLeaveStep(int step)
     {
-        switch (step)
-        {
-            case 1 when !_sync.CanAdvanceWorkflow:
-                return UnrealSyncStepGate.Block("第一步尚未完成", "请先选择角色，并完成底层检测。");
-            case 2 when !_sync.IsNormalizationStepLoaded:
-                return UnrealSyncStepGate.Block(
-                    "规整素材尚未加载完成", "请等待当前加载完成，或点击“重新加载规整素材”。");
-            case 2 when _sync.NormalizationItems.Any(item => !item.IsResolved):
-                return UnrealSyncStepGate.Block(
-                    "第二步尚未完成",
-                    $"还有 {_sync.NormalizationItems.Count(item => !item.IsResolved)} 项 Unreal 素材没有选择处理方式。");
-            case 3 when !_sync.HasNoPublishChanges:
-                return UnrealSyncStepGate.Block(
-                    "第三步尚未完成", "请先同步已勾选素材；确认没有待同步内容后，才能进入基础配置。");
-            case 4 when !_sync.CanAdvanceWorkflow:
-                return UnrealSyncStepGate.Block("第四步尚未完成", "请先完成基础配置。");
-            case 5 when !_sync.CanAdvanceWorkflow:
-                return UnrealSyncStepGate.Block(
-                    "第五步尚未完成", "请先同步已勾选的序列；确认没有待同步内容后，才能进入蓝图置入。");
-            default:
-                return UnrealSyncStepGate.Pass;
-        }
+        _ = step;
+        return UnrealSyncStepGate.Pass;
     }
 
     private bool RequireSelectedCharacter()

@@ -33,7 +33,6 @@ internal sealed partial class UnrealProjectSyncViewModel
         nameof(LightConfigurationWorkspaceVisibility),
         nameof(BlueprintSetupWorkspaceVisibility),
         nameof(SelectionContentVisibility),
-        nameof(IsNormalizationWorkspace),
         nameof(WorkspacePlaceholderGlyph),
         nameof(WorkspacePlaceholderTitle),
         nameof(WorkspacePlaceholderDescription),
@@ -114,8 +113,18 @@ internal sealed partial class UnrealProjectSyncViewModel
         IsOperationRunning: IsWorkflowOperationRunning,
         Step1Loaded: FoundationChecks.Count > 0,
         Step1ItemCount: FoundationChecks.Count,
-        Step2Loaded: IsNormalizationStepLoaded,
-        Step2ItemCount: NormalizationItems.Count,
+        // 「这一步加载过没有」一律问**步加载表**（和第三/五步同一个口径）。
+        // ⚠️ 第 2 步以前挂的是旧的规整标志 `IsNormalizationStepLoaded`，而它会被
+        // `RestoreWorkflowStepCache` 拿**会话缓存**重设 —— 缓存里没有那几项时就变 false，
+        // 于是"退回第 2 步"显示成「尚未检测同步素材」（2026-09-24 实测踩到）。
+        Step2Loaded: _stepLoads.IsLoaded(2),
+        // 喂给状态机的是**还有待处理的**规整项数量，不是列表总数。
+        // ⚠️ 用总数会出事：规整项都处理完了（`IsAlreadyNormalized`）时列表仍非空，
+        // 状态会被判成「有内容」→ 去渲染差异树 → 而树里一条都没有 → **中栏一片空白**。
+        // （2026-09-24 实测踩到：素材无差异时中栏什么都不显示。）
+        // 用 `!IsAlreadyNormalized` 而不是 `VisibleNormalizationItems`：后者受"隐藏已处理"
+        // 开关影响，一勾就会把状态翻成"无差异"，那是界面开关不该有的副作用。
+        Step2ItemCount: NormalizationItems.Count(item => !item.IsAlreadyNormalized),
         Step3Loaded: _stepLoads.IsLoaded(3),
         Step5Loaded: _stepLoads.IsLoaded(5),
         Step35ItemCount: SelectionTreeRoots.Count,
@@ -139,11 +148,12 @@ internal sealed partial class UnrealProjectSyncViewModel
     public string WorkflowStepNameFor(int step) => step switch
     {
         1 => "底层检测",
-        2 => "规整素材",
-        3 => "同步素材",
+        // 第 2 步 = 合并后的「同步素材」（规整 + 素材同步）。第 3 步的号**放空**，所以没有 3。
+        2 => "同步素材",
         4 => "基础配置",
         5 => "序列同步",
         6 => "蓝图置入",
+        7 => "特效同步",
         _ => "同步结果",
     };
 
@@ -155,7 +165,7 @@ internal sealed partial class UnrealProjectSyncViewModel
     {
         1 => FoundationSummaryText,
         2 => NormalizationSummaryText,
-        3 or 5 => DetectionResultSummaryText,
+        2 or 5 => DetectionResultSummaryText,
         4 => LightConfigurationSummaryText,
         6 => BlueprintSetupSummaryText,
         _ => string.Empty,
@@ -197,8 +207,13 @@ internal sealed partial class UnrealProjectSyncViewModel
             return WorkflowStep switch
             {
                 1 => FoundationSummaryText,
-                2 => NormalizationSummaryText,
-                3 or 5 => DetectionResultSummaryText,
+                // 第 2 步是合并后的「同步素材」：**规整摘要和差异摘要两样都属于它**。
+                // 有要规整的项时两样都报，没有就只报差异（否则会多出一句
+                // "没有需要规整的 Unreal 素材"，看着像故障）。
+                2 => HasVisibleNormalizationItems
+                    ? $"{NormalizationSummaryText}　{DetectionResultSummaryText}"
+                    : DetectionResultSummaryText,
+                5 => DetectionResultSummaryText,
                 4 => LightConfigurationSummaryText,
                 6 => BlueprintSetupSummaryText,
                 _ => string.Empty,
@@ -244,7 +259,6 @@ internal sealed partial class UnrealProjectSyncViewModel
         OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
         OnPropertyChanged(nameof(BlueprintSetupWorkspaceVisibility));
         OnPropertyChanged(nameof(SelectionContentVisibility));
-        OnPropertyChanged(nameof(IsNormalizationWorkspace));
         OnPropertyChanged(nameof(WorkspacePlaceholderGlyph));
         OnPropertyChanged(nameof(WorkspacePlaceholderTitle));
         OnPropertyChanged(nameof(WorkspacePlaceholderDescription));
