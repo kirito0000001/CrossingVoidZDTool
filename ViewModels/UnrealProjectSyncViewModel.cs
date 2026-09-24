@@ -44,7 +44,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     private string _sourceSearchText = string.Empty;
     private UnrealSyncSourceItem? _selectedSource;
     private UnrealSyncPublishStageItem? _selectedPublishStage;
-    private bool _isNormalizationWorkspace;
     /// <summary>
     /// 第二步有没有可用数据。
     ///
@@ -276,41 +275,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     public string PendingRedirectText => $"待重定向：{PendingRedirectCount}";
     public string PublishConflictText => $"冲突：{PublishConflictCount}";
 
-    public ObservableCollection<UnrealAssetNormalizationItem> NormalizationItems { get; } = [];
-    private IReadOnlyList<UnrealAssetNormalizationItem> _visibleNormalizationItems = [];
-    public IReadOnlyList<UnrealAssetNormalizationItem> VisibleNormalizationItems
-    {
-        get => _visibleNormalizationItems;
-        private set => SetProperty(ref _visibleNormalizationItems, value);
-    }
-    private bool _hideResolvedNormalizationItems;
-
-    public bool HideResolvedNormalizationItems
-    {
-        get => _hideResolvedNormalizationItems;
-        set
-        {
-            if (SetProperty(ref _hideResolvedNormalizationItems, value))
-            {
-                RefreshVisibleNormalizationItems();
-                SaveSessionCache();
-            }
-        }
-    }
-
-    public bool IsNormalizationWorkspace
-    {
-        get => _isNormalizationWorkspace;
-        private set
-        {
-            if (SetProperty(ref _isNormalizationWorkspace, value))
-            {
-                OnPropertyChanged(nameof(IsDetectionWorkspace));
-                OnPropertyChanged(nameof(SelectionContentVisibility));
-            }
-        }
-    }
-
+    // ── 第二步「规整素材」的状态搬到了 UnrealProjectSyncViewModel.Step2Normalization.cs ──
     public bool IsDetectionWorkspace => !IsNormalizationWorkspace;
     public bool IsLightConfigurationWorkspace => !IsEngineToToolbox && WorkflowStep == 4;
     /// <summary>
@@ -372,17 +337,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         LightConfigurationSelectedCount > 0 &&
         !_isApplyingLightConfiguration &&
         IsWorkflowOperationIdle;
-
-    public string NormalizationSummaryText
-    {
-        get
-        {
-            var actionableItems = NormalizationItems.Where(item => !item.IsAlreadyNormalized).ToArray();
-            return actionableItems.Length == 0
-                ? "没有需要规整的 Unreal 素材"
-                : $"共 {actionableItems.Length} 项：已处理 {actionableItems.Count(item => item.IsResolved)}，待处理 {actionableItems.Count(item => !item.IsResolved)}";
-        }
-    }
 
     public bool CanAdvanceWorkflow => WorkflowStep switch
     {
@@ -601,7 +555,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     };
 
     public Visibility WorkflowConfirmationVisibility => WorkflowStep is 3 or 5 ? Visibility.Visible : Visibility.Collapsed;
-    public Visibility NormalizationDetailsVisibility => WorkflowStep == 2 ? Visibility.Visible : Visibility.Collapsed;
     public Visibility WorkflowNextButtonVisibility => Visibility.Visible;
     public bool WorkflowNextButtonEnabled => WorkflowStep switch
     {
@@ -1241,13 +1194,15 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
         var inMemoryCache = _loadedSessionCache;
         var stepCache = _sessionCacheService.LoadStep(character, ProjectPath, character.Code, 2).Cache;
-        var cachedDecisions = stepCache?.NormalizationDecisions ??
+        // 先读第 2 步自己的缓存文件，没有再回退到整体缓存（兼容搬之前留下的旧决策）。
+        var cachedDecisions = LoadNormalizationDecisions(character, () =>
+            stepCache?.NormalizationDecisions ??
             (inMemoryCache is not null && string.Equals(
                 inMemoryCache.SelectedCharacterCode,
                 character.Code,
                 StringComparison.OrdinalIgnoreCase)
                 ? inMemoryCache.NormalizationDecisions
-                : _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache?.NormalizationDecisions ?? []);
+                : _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache?.NormalizationDecisions ?? []));
         var rebuiltItems = BuildNormalizationItems(character, candidate, cachedDecisions);
         ApplyNormalizationItems(rebuiltItems, activateWorkspace);
         return true;
@@ -1265,134 +1220,23 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         }
 
         var inMemoryCache = _loadedSessionCache;
-        var cachedDecisions = inMemoryCache is not null && string.Equals(
+        // 同上：先读自己的文件。
+        var cachedDecisions = LoadNormalizationDecisions(character, () =>
+            inMemoryCache is not null && string.Equals(
                 inMemoryCache.SelectedCharacterCode,
                 character.Code,
                 StringComparison.OrdinalIgnoreCase)
-            ? inMemoryCache.NormalizationDecisions
-            : _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache?.NormalizationDecisions ?? [];
+                ? inMemoryCache.NormalizationDecisions
+                : _sessionCacheService.LoadLatest(character, ProjectPath, character.Code).Cache?.NormalizationDecisions ?? []);
         var rebuiltItems = await Task.Run(() => BuildNormalizationItems(character, candidate, cachedDecisions));
         ApplyNormalizationItems(rebuiltItems, activateWorkspace);
         return true;
     }
 
-    private static IReadOnlyList<UnrealAssetNormalizationItem> BuildNormalizationItems(
-        CharacterCard character,
-        UnrealProjectSyncCharacterCandidate candidate,
-        IReadOnlyDictionary<string, string> cachedDecisions)
-    {
-        var rebuiltItems = new UnrealAssetNormalizationService().Build(character, candidate).ToArray();
-        foreach (var item in rebuiltItems)
-        {
-            var decisionFound = cachedDecisions.TryGetValue(item.StableId, out var decision);
-            if (!decisionFound)
-            {
-                var assetName = item.UnrealObjectPath.Split('/').LastOrDefault()?.Split('.', 2)[0];
-                if (!string.IsNullOrWhiteSpace(assetName))
-                {
-                    var legacyDecision = cachedDecisions.FirstOrDefault(pair =>
-                        pair.Key.EndsWith($"/{assetName}.{assetName}", StringComparison.OrdinalIgnoreCase));
-                    decisionFound = !string.IsNullOrWhiteSpace(legacyDecision.Key);
-                    decision = legacyDecision.Value;
-                }
-            }
-
-            if (decisionFound && !string.IsNullOrWhiteSpace(decision))
-            {
-                if (string.Equals(decision, "__not_required__", StringComparison.Ordinal))
-                {
-                    item.MarkNotRequired();
-                }
-                else
-                {
-                    var selected = item.Candidates.FirstOrDefault(candidateItem => string.Equals(candidateItem.StableId, decision, StringComparison.OrdinalIgnoreCase));
-                    var identityId = decision.StartsWith("material:", StringComparison.OrdinalIgnoreCase)
-                        ? decision["material:".Length..]
-                        : decision.StartsWith("voice:", StringComparison.OrdinalIgnoreCase)
-                            ? decision["voice:".Length..]
-                            : decision;
-                    if (selected is null &&
-                        new UnrealBridgeToolboxIdentityService().TryResolveAssignedPath(
-                            character,
-                            item.Module,
-                            identityId,
-                            out var assignedPath))
-                    {
-                        selected = item.Candidates.FirstOrDefault(candidateItem =>
-                            string.Equals(Path.GetFullPath(candidateItem.AssetPath), Path.GetFullPath(assignedPath), StringComparison.OrdinalIgnoreCase));
-                    }
-
-                    if (selected is not null) item.SelectRedirect(selected);
-                }
-            }
-
-        }
-
-        return rebuiltItems;
-    }
-
-    private void ApplyNormalizationItems(
-        IReadOnlyList<UnrealAssetNormalizationItem> rebuiltItems,
-        bool activateWorkspace)
-    {
-        NormalizationItems.Clear();
-        foreach (var item in rebuiltItems)
-        {
-            NormalizationItems.Add(item);
-        }
-
-        RefreshVisibleNormalizationItems();
-        SetNormalizationStepLoaded(true);
-
-        if (activateWorkspace)
-        {
-            IsNormalizationWorkspace = true;
-            WorkflowStep = 2;
-        }
-        OnPropertyChanged(nameof(NormalizationSummaryText));
-        OnPropertyChanged(nameof(CanAdvanceWorkflow));
-    }
-
-    public void SelectNormalizationRedirect(UnrealAssetNormalizationItem item, UnrealAssetNormalizationCandidate candidate)
-    {
-        item.SelectRedirect(candidate);
-        NormalizationResolutionChanged();
-    }
-
-    public void MarkNormalizationNotRequired(UnrealAssetNormalizationItem item)
-    {
-        item.MarkNotRequired();
-        NormalizationResolutionChanged();
-    }
-
-    public void ClearNormalizationRedirect(UnrealAssetNormalizationItem item)
-    {
-        item.ClearRedirect();
-        NormalizationResolutionChanged();
-    }
-
-    public void BeginNormalizationStepLoad() => SetNormalizationStepLoaded(false);
-
-    private void SetNormalizationStepLoaded(bool value)
-        => IsNormalizationStepLoaded = value;
-
-    private void RefreshVisibleNormalizationItems()
-    {
-        VisibleNormalizationItems = NormalizationItems.Where(item =>
-                !item.IsAlreadyNormalized &&
-                (!HideResolvedNormalizationItems || !item.IsResolved))
-            .ToArray();
-        OnPropertyChanged(nameof(NormalizationSummaryText));
-    }
-
-    public void CloseNormalizationWorkspace()
-    {
-        IsNormalizationWorkspace = false;
-        if (WorkflowStep == 2)
-        {
-            WorkflowStep = 1;
-        }
-    }
+    // ── 第二步「规整素材」的构建 / 应用 / 交互逻辑也搬到了 Step2Normalization.cs ──
+    // （BuildNormalizationItems、ApplyNormalizationItems、SelectRedirect / MarkNotRequired /
+    //   ClearRedirect、BeginNormalizationStepLoad、SetNormalizationStepLoaded、
+    //   RefreshVisibleNormalizationItems、CloseNormalizationWorkspace）
 
     public void ReturnToWorkflowStep(int step)
     {
@@ -2670,6 +2514,14 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             {
                 if (version != Volatile.Read(ref _sessionSaveVersion)) return;
                 await Task.Run(() => _sessionCacheService.Write(character, projectPath, cache)).ConfigureAwait(false);
+                // 第 2 步「规整素材」另外写一份**自己的**缓存文件（一步一个文件）：
+                // 决策是这一步的私有数据，不该挤在所有步骤共用的大缓存里。
+                // 整体缓存照旧写（兼容旧版本），但它对第 2 步只是备份，读的时候优先读下面这份。
+                if (cache.NormalizationDecisions.Count > 0)
+                {
+                    await Task.Run(() => Step2NormalizationCache.Save(character, cache.NormalizationDecisions))
+                        .ConfigureAwait(false);
+                }
                 if (version == Volatile.Read(ref _sessionSaveVersion)) _pendingSessionCache = null;
             }
             finally
