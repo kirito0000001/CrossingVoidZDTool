@@ -21,6 +21,7 @@
             <SolidColorBrush x:Key="LogErrorForegroundBrush" Color="#FFA61B1B" />
             <SolidColorBrush x:Key="LogErrorBackgroundBrush" Color="#FFFDE2E2" />
             <SolidColorBrush x:Key="LogErrorBorderBrush" Color="#FFB42318" />
+            <SolidColorBrush x:Key="TipsForegroundBrush" Color="#FF176B3A" />
         </ResourceDictionary>
         <ResourceDictionary x:Key="Dark">
             <SolidColorBrush x:Key="GlobalProgressHostBackgroundBrush" Color="#F0000000" />
@@ -39,6 +40,7 @@
             <SolidColorBrush x:Key="LogErrorForegroundBrush" Color="#FFFF4500" />
             <SolidColorBrush x:Key="LogErrorBackgroundBrush" Color="#34821818" />
             <SolidColorBrush x:Key="LogErrorBorderBrush" Color="#96E65046" />
+            <SolidColorBrush x:Key="TipsForegroundBrush" Color="#FF6CCB5F" />
         </ResourceDictionary>
     </ResourceDictionary.ThemeDictionaries>
 
@@ -66,6 +68,16 @@
     <Style x:Key="SubtleTextStyle" TargetType="TextBlock">
         <Setter Property="Foreground" Value="{ThemeResource TextFillColorSecondaryBrush}" />
         <Setter Property="TextWrapping" Value="Wrap" />
+    </Style>
+
+    <!--
+        「tips」：条目下面那行补充说明（资产类型 / 目录已经存在…）。
+        底色不再是主题灰，而是**绿**（Light/Dark 各一支），这样同步台每一步的
+        说明性文字读起来是同一个样子，也一眼能和错误态的措辞分开。
+    -->
+    <Style x:Key="TipsTextStyle" TargetType="TextBlock" BasedOn="{StaticResource SubtleTextStyle}">
+        <Setter Property="FontSize" Value="12" />
+        <Setter Property="Foreground" Value="{ThemeResource TipsForegroundBrush}" />
     </Style>
 
     <Style x:Key="CodeBlockBorderStyle" TargetType="Border">

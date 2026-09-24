@@ -214,8 +214,13 @@ internal sealed class UnrealProjectSyncService
         var soundObjectPath = $"{actorObjectPath}/Sound";
         var itemObjectPath = $"{TargetCharacterItemContentPath}/Item_{characterCode}.Item_{characterCode}";
         // 同样要走合并解析：分步导出不写 characters.json，只读它会拿不到资产类型。
+        // 这里要的是**按条目**跨清单找（`...ForTypeLookup`），不是按整表补：
+        // 分范围导出会写出"非空但很窄"的 assets，按整表补会把老的全量清单整张挡住，
+        // UIWidget / Sound 那几项就会显示成「未读取类型」（2026-09-24 实测 4 项）。
+        // ⚠️ 差异检测那条路**仍然**用 ResolveExportManifest —— 它的语义是"Unreal 现在有什么"，
+        // 把旧条目并进去会让真删掉的资产显示不出来。
         var manifest = requireAssetTypes
-            ? UnrealExportManifestReader.ResolveExportManifest(GetExportDirectoryPath(projectPath)).Manifest
+            ? UnrealExportManifestReader.ResolveExportManifestForTypeLookup(GetExportDirectoryPath(projectPath))
             : null;
         var checks = new List<UnrealPublishFoundationCheckItem>
         {
@@ -251,10 +256,18 @@ internal sealed class UnrealProjectSyncService
             var exportedItem = manifest?.CharacterItems.FirstOrDefault(item =>
                 string.Equals(item.ObjectPath, itemObjectPath, StringComparison.OrdinalIgnoreCase));
             var parentClass = exportedItem?.ParentClass ?? string.Empty;
-            var itemStructureMatches = exportedItem?.HasItemData == true &&
-                exportedItem?.ItemData.HasCharData == true &&
-                parentClass.Contains("InventoryBaseItem", StringComparison.OrdinalIgnoreCase);
-            if (itemIndex >= 0 && checks[itemIndex].IsCompliant && !itemStructureMatches)
+            // ⚠️ 父类这一条**只在真读到父类时才判**。
+            // 2026-09-24 逐份核过：四份导出清单（characters / -materials / -normalization /
+            // -sequences）里 `parentClass` **一直是空的**（`hasItemData` / `itemData.hasCharData`
+            // 都填了，父类没填）。拿"没读到"当成"父类不对"，会把角色 Item 永久判成
+            // 不合规「父类错误」—— 那是**假红**：它会让第 1 步的底层检测无端变红，
+            // 也会让第 3/4 步那条会抛错的严格校验凭一个读不到的理由拦住流程。
+            var hasParentClass = !string.IsNullOrWhiteSpace(parentClass);
+            var itemStructureIsAcceptable = !hasParentClass ||
+                (exportedItem?.HasItemData == true &&
+                 exportedItem?.ItemData.HasCharData == true &&
+                 parentClass.Contains("InventoryBaseItem", StringComparison.OrdinalIgnoreCase));
+            if (itemIndex >= 0 && checks[itemIndex].IsCompliant && !itemStructureIsAcceptable)
             {
                 checks[itemIndex] = checks[itemIndex] with
                 {

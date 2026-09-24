@@ -909,34 +909,25 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             .ToArray();
     }
 
+    /// <summary>
+    /// 校验发布用的角色目录（第 3/4 步的进入前检查）。
+    ///
+    /// **这里有两件不同的事，别混**：
+    /// ① 往上刷的那份检查项（界面显示）**一律带资产类型** —— 它和第 1 步共用同一个集合，
+    ///    不带就会让第 1 步显示成那句占位串「等待 Unreal 类型复检」；
+    /// ② "校验强度"（要不要因为读不到类型就抛错、拦住流程）仍按调用方给的
+    ///    <paramref name="requireAssetTypes"/> —— 各步维持原样，不因为第 1 步要查类型
+    ///    就把第 4 步也变得更容易抛错。
+    /// </summary>
     public void ValidatePublishCharacterFolders(string characterCode, bool requireAssetTypes = false)
     {
-        RefreshFoundationChecks(characterCode, requireAssetTypes);
+        RefreshFoundationChecks(characterCode);
         _syncService.ValidatePublishCharacterFolders(ProjectPath, characterCode, requireAssetTypes);
     }
 
     // ── ValidateSequenceCharacterFolders 搬到了 Step5SequenceSync.cs ──
-
-    public void SetFoundationConfigurationError(UnrealLightConfigurationResultItem error)
-    {
-        ArgumentNullException.ThrowIfNull(error);
-        var previous = FoundationChecks.FirstOrDefault(item => item.DisplayName == error.DisplayName);
-        if (previous is not null)
-        {
-            FoundationChecks.Remove(previous);
-        }
-        FoundationChecks.Add(new UnrealPublishFoundationCheckItem(
-            error.DisplayName,
-            string.IsNullOrWhiteSpace(error.TargetPath) ? "基础配置依赖" : error.TargetPath,
-            string.Empty,
-            false,
-            "配置错误",
-            ActualType: error.ErrorMessage));
-        RefreshVisibleFoundationChecks();
-        OnPropertyChanged(nameof(FoundationSummaryText));
-        OnPropertyChanged(nameof(CanAdvanceWorkflow));
-        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
-    }
+    // ── SetFoundationConfigurationError 搬到了 Step1Foundation.cs ──
+    //    （它增删的是**第 1 步的检查项**，按"一步一个文件"该住那边；第 4 步那边照旧调用它。）
 
     public UnrealSyncSessionCacheLoadResult RefreshDraftSources(IEnumerable<CharacterCard> characters, string? preferredCharacterCode = null)
     {

@@ -2555,7 +2555,7 @@
                                                                 <StackPanel Spacing="3">
                                                                     <TextBlock FontWeight="SemiBold" Text="{Binding DisplayName}" />
                                                                     <TextBlock Style="{StaticResource SubtleTextStyle}" Text="{Binding ExpectedSummaryText}" TextWrapping="Wrap" />
-                                                                    <TextBlock FontSize="12" Style="{StaticResource SubtleTextStyle}" Text="{Binding DetailText}" TextWrapping="Wrap" />
+                                                                    <TextBlock Style="{StaticResource TipsTextStyle}" Text="{Binding DetailText}" TextWrapping="Wrap" />
                                                                 </StackPanel>
                                                                 <TextBlock Grid.Column="1" VerticalAlignment="Center" FontWeight="SemiBold" Text="{Binding StatusText}" />
                                                             </Grid>

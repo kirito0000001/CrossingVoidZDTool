@@ -74,6 +74,16 @@ internal sealed partial class UnrealProjectSyncViewModel
     public static bool UsesRecordedSequenceContent(int step) => UsesSequenceData(step);
 
     /// <summary>
+    /// 这一步要不要拿 Unreal 导出清单**校验资产类型**（蓝图 / WidgetBlueprint / MetaSoundSource…）。
+    ///
+    /// 素材那几档都要（第 1 步的「底层检测」也在这档里 —— 它查的就是蓝图类型），
+    /// 第五/七步不校验：它们看的是序列内容，不看资产类型。
+    /// 以前这个开关散在几处默认参数里，第 1 步因此漏成了"不查"，
+    /// 界面上只能显示占位串「等待 Unreal 类型复检」——现在按口径统一问这里。
+    /// </summary>
+    public static bool RequiresAssetTypesFor(int step) => !UsesSequenceData(step);
+
+    /// <summary>
     /// 第五步算出来的差异默认**不勾**（一条条序列要人确认过再同步），
     /// 第三步默认勾上（素材那批通常整批同步）。
     /// </summary>

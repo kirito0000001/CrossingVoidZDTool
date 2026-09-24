@@ -32,17 +32,19 @@ namespace CrossingVoidZDTool
             switch (step)
             {
                 case 1:
+                    // 第 1 步查的就是蓝图类型（角色蓝图 / AnimBP / Item / MetaSound…）：
+                    // 类型从磁盘上那份导出清单读，不跑 Unreal。口径收在
+                    // `RequiresAssetTypesFor` 里，壳侧不再传开关。
                     sync.RefreshFoundationChecks(characterCode);
                     // 第一步自己的缓存：一步一个文件，只装这十几条检查项（跟着角色目录走）。
                     // 整体那份会话缓存不再喂第一步 —— 它是所有步骤共用的一大坨，步骤互相串台的根就在那儿。
                     if (sync.SelectedSource?.DraftCharacter is { } foundationCharacter)
                     {
-                        Step1FoundationCache.Save(
-                            foundationCharacter,
-                            sync.FoundationChecks,
-                            requireAssetTypes: false);
+                        sync.SaveFoundationCache(foundationCharacter);
                     }
-                    ShowFloatingTip(InfoBarSeverity.Informational, "底层检测已重新加载", sync.FoundationSummaryText);
+                    // 这条提示是"这一步跑完了"的信息（绿），过没过在下面那 16 条里逐条看 ——
+                    // 以前用的蓝色 Informational 是全页唯一一个"成功类"提示，和别处不一致。
+                    ShowFloatingTip(InfoBarSeverity.Success, "底层检测已重新加载", sync.FoundationSummaryText);
                     break;
                 case 2:
                     await ReloadUnrealNormalizationStepAsync(sync);

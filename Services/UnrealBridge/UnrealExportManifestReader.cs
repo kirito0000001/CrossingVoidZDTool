@@ -54,6 +54,27 @@ internal static class UnrealExportManifestReader
     ];
 
     /// <summary>
+    /// 按修改时间从新到旧，把导出目录里能读出来的清单都读出来。缺哪份都无所谓。
+    /// </summary>
+    private static (string Path, UnrealProjectExportManifest Manifest)[] LoadManifestsNewestFirst(
+        string exportDirectoryPath)
+    {
+        if (string.IsNullOrWhiteSpace(exportDirectoryPath) || !Directory.Exists(exportDirectoryPath))
+        {
+            return [];
+        }
+
+        return ExportManifestFileNames
+            .Select(fileName => Path.Combine(exportDirectoryPath, fileName))
+            .Where(File.Exists)
+            .Select(path => (Path: path, Manifest: LoadExportManifest(path), WrittenAt: File.GetLastWriteTimeUtc(path)))
+            .Where(entry => entry.Manifest is not null)
+            .OrderByDescending(entry => entry.WrittenAt)
+            .Select(entry => (entry.Path, entry.Manifest!))
+            .ToArray();
+    }
+
+    /// <summary>
     /// 解析导出目录里可用的清单。第三到第五步只写各自范围的清单，
     /// 从来不会生成 characters.json；如果只读 characters.json，
     /// Unreal 侧就会整体为空，差异里只剩工具箱侧的新增，删除永远是 0。
@@ -68,23 +89,17 @@ internal static class UnrealExportManifestReader
                 : Path.Combine(exportDirectoryPath, UnrealProjectSyncService.ExportManifestFileName), null);
         }
 
-        var loaded = ExportManifestFileNames
-            .Select(fileName => Path.Combine(exportDirectoryPath, fileName))
-            .Where(File.Exists)
-            .Select(path => (Path: path, Manifest: LoadExportManifest(path), WrittenAt: File.GetLastWriteTimeUtc(path)))
-            .Where(entry => entry.Manifest is not null)
-            .OrderByDescending(entry => entry.WrittenAt)
-            .ToArray();
+        var loaded = LoadManifestsNewestFirst(exportDirectoryPath);
         if (loaded.Length == 0)
         {
             return (Path.Combine(exportDirectoryPath, UnrealProjectSyncService.ExportManifestFileName), null);
         }
 
         var primary = loaded[0];
-        var manifest = primary.Manifest!;
+        var manifest = primary.Manifest;
         foreach (var entry in loaded.Skip(1))
         {
-            var other = entry.Manifest!;
+            var other = entry.Manifest;
             if (manifest.Assets.Count == 0) manifest.Assets = other.Assets;
             if (manifest.CharacterItems.Count == 0) manifest.CharacterItems = other.CharacterItems;
             if (manifest.CharacterSummaries.Count == 0) manifest.CharacterSummaries = other.CharacterSummaries;
@@ -94,6 +109,55 @@ internal static class UnrealExportManifestReader
         }
 
         return (primary.Path, manifest);
+    }
+
+    /// <summary>
+    /// 给「读资产类型 / 资产结构」用的清单：**按条目**跨清单合并（新的优先，同路径取新的那份）。
+    ///
+    /// 和 <see cref="ResolveExportManifest"/> 只差在合并粒度，但那个差别是致命的：
+    /// 上面那份是**按整表**补空的，而分范围导出会写出一份**非空但很窄**的表 ——
+    /// 最新那份（`characters-sequences.json`）的 `assets` 有 194 条，却**不含**
+    /// UIWidget / Sound 那些资产，于是 9 月 5 日那份全量 `characters.json` 里明明有的条目
+    /// 被整表挡住，第 1 步只能把这四项显示成「未读取类型」（2026-09-24 实测 4 项：
+    /// `UI_TeamSelect` / `Misaka_OnDM` / `Misaka_Con_Talk` / `Misaka_Con_Ondm`）。
+    ///
+    /// ⚠️ **只给类型/结构查询用。差异检测必须继续走 <see cref="ResolveExportManifest"/>**：
+    /// 那份的语义是"Unreal 现在有什么"，把旧清单的条目并进去，会让**真删掉的资产**
+    /// 重新出现在 Unreal 侧、再也显示不出"待删除"。
+    /// 所以这里只并查询用得上的两张表（`assets` / `characterItems`），别的照旧留给主清单。
+    /// </summary>
+    internal static UnrealProjectExportManifest? ResolveExportManifestForTypeLookup(string exportDirectoryPath)
+    {
+        var loaded = LoadManifestsNewestFirst(exportDirectoryPath);
+        if (loaded.Length == 0)
+        {
+            return null;
+        }
+
+        var manifest = loaded[0].Manifest;
+        foreach (var entry in loaded.Skip(1))
+        {
+            var other = entry.Manifest;
+            foreach (var asset in other.Assets)
+            {
+                if (!manifest.Assets.Any(existing =>
+                        string.Equals(existing.ObjectPath, asset.ObjectPath, StringComparison.OrdinalIgnoreCase)))
+                {
+                    manifest.Assets.Add(asset);
+                }
+            }
+
+            foreach (var item in other.CharacterItems)
+            {
+                if (!manifest.CharacterItems.Any(existing =>
+                        string.Equals(existing.ObjectPath, item.ObjectPath, StringComparison.OrdinalIgnoreCase)))
+                {
+                    manifest.CharacterItems.Add(item);
+                }
+            }
+        }
+
+        return manifest;
     }
 
     internal static UnrealProjectExportManifest? LoadExportManifest(string path)
