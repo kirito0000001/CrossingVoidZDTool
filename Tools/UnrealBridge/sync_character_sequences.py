@@ -79,7 +79,13 @@ def _load(path):
     value['actions'] = actions
     return value
 
-def _write_progress(path, completed, total, stable_id, message):
+def _write_progress(path, completed, total, stable_id, message, detail=''):
+    """写一条进度快照。
+
+    `detail` 是**更细的一行**（工具箱把它显示在进度条第二行）。加它的理由：
+    以前只有"第 N/M 个动作"，一个动作内部几十秒（图集贴图 → 建精灵 → Flipbook → 写序列）
+    完全静默，用户看到的就是数字卡着不动，分不清是在干活还是死了。
+    """
     if not path:
         return
     try:
@@ -89,6 +95,7 @@ def _write_progress(path, completed, total, stable_id, message):
             'totalCount': total,
             'stableId': stable_id,
             'message': message,
+            'detail': detail,
             'updatedAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),
         })
     except Exception:
@@ -717,7 +724,17 @@ def _cleanup_old_assets(paths, new_paths, action):
                % (code, len(deleted), len(skipped)))
     return skipped, deleted
 
-def _sync_action(action):
+def _report(report, text):
+    """往进度里补一行动作**内部**的阶段说明（report 为空时什么都不做）。
+
+    动作循环原来只在动作开始/结束各写一次，一个动作内部几十秒（图集 → 精灵 →
+    Flipbook → 序列 → 清理）全静默 —— 进度条上的数字卡着不动，分不清是在干活还是死了。
+    """
+    if report is not None:
+        report(text)
+
+
+def _sync_action(action, report=None):
     if _is_effect_layer(action):
         return _sync_effect_layer(action)
     code = action['actionCode']
@@ -732,6 +749,7 @@ def _sync_action(action):
     material_folder = action['targetMaterialFolder']
     # 规范命名与历史命名只差大小写时，先把已有资产迁移到规范拼写，
     # 否则在 Windows 上新建资产会直接覆盖同名包文件。
+    _report(report, '正在准备动作目录与命名')
     _align_material_folder_case(material_folder, code)
     _align_asset_name_case(sequence_folder, sequence_name, code)
     old_sequence = unreal.load_asset(sequence_folder + '/' + sequence_name)
@@ -746,6 +764,8 @@ def _sync_action(action):
 
     # 每一格素材自带「用哪张图集」：自己的图落本动作的图集，借来的图落来源动作的图集
     # （那些图已经在那边了，不再重复打包一份）。同一张图集只导一次。
+    # 这一段最费时间：每张图集要导入一次贴图，每格素材还要切一只精灵。
+    _report(report, '正在导入图集贴图并切精灵（%d 格素材）' % len(source_images))
     atlas_texture_by_name = {}
     atlas_size_by_name = {}
     sprite_by_index = {}
@@ -812,6 +832,7 @@ def _sync_action(action):
     frame_runs = [max(1, int(frame.get('durationFrames', 1) or 1)) for frame in frames]
     flipbook_name = action.get('flipbookAssetName') or code
     _align_asset_name_case(material_folder, flipbook_name, code)
+    _report(report, '正在建 Flipbook（%d 帧）' % len(frames))
     flipbook, _ = _bridge_call(
         'create_paper_flipbook_from_sprites',
         [sprite_assets, frame_runs, float(action.get('fps', 12)), material_folder, flipbook_name],
@@ -832,6 +853,7 @@ def _sync_action(action):
         sequence.set_editor_property('anim_data', [data_source])
         _assert_notification_state_unchanged(sequence, notification_state, code)
     anim_maps_change = None
+    _report(report, '正在把这条序列写进 AnimMaps')
     if action.get('animMapsEntryName'):
         # The bridge performs the same Supported Animations '+' operation and
         # handles the concrete array element type in C++ reflection.
@@ -854,6 +876,7 @@ def _sync_action(action):
     new_paths = sorted({texture.get_path_name() for texture in atlas_texture_by_name.values()}) + sorted(
         {sprite.get_path_name() for sprite in sprite_by_index.values()}
     ) + [flipbook.get_path_name(), sequence.get_path_name()]
+    _report(report, '正在清理这个动作目录里的旧资产')
     skipped, deleted = _cleanup_old_assets(old_assets, new_paths, action)
     return {'actionCode': code, 'sequencePath': sequence.get_path_name(), 'flipbookPath': flipbook.get_path_name(), 'frameCount': len(frames), 'animMapsChange': anim_maps_change, 'deletedAssets': deleted, 'legacyAssetsNotDeleted': skipped}
 
@@ -1218,9 +1241,14 @@ def main():
             action['animMapsPath'] = plan['AnimMapsPath']
             action['characterCode'] = plan.get('CharacterCode', '')
             code = action.get('actionCode', '')
-            _write_progress(progress_path, index, total, code, action.get('displayName', '') or code)
+            _write_progress(progress_path, index, total, code, action.get('displayName', '') or code,
+                            detail='第 %d/%d 个动作 · %s' % (index + 1, total, code))
             try:
-                action_result = _sync_action(action)
+                action_result = _sync_action(
+                    action,
+                    report=lambda text: _write_progress(
+                        progress_path, index, total, code,
+                        action.get('displayName', '') or code, detail=text))
             except Exception as error:
                 # 一个动作炸了，不该让排在它后面的动作一起陪葬；更要紧的是**必须点名**。
                 # 实测 `module 'unreal' has no attribute 'ObjectRedirector'` 那次，异常直接冒到
@@ -1238,7 +1266,8 @@ def main():
                     'originIdentity': '',
                     'outputFilePath': '',
                 })
-                _write_progress(progress_path, index + 1, total, code, '失败：%s' % detail)
+                _write_progress(progress_path, index + 1, total, code, '失败：%s' % detail,
+                                detail='第 %d/%d 个动作失败，已跳过它继续' % (index + 1, total))
                 continue
             # 结果协议与素材同步保持一致：C# 侧只解析 items，写成 actions 会被静默丢弃。
             results.append({
@@ -1250,7 +1279,8 @@ def main():
                 'originIdentity': '',
                 'outputFilePath': '',
             })
-            _write_progress(progress_path, index + 1, total, code, action.get('displayName', '') or code)
+            _write_progress(progress_path, index + 1, total, code, action.get('displayName', '') or code,
+                            detail='已完成第 %d/%d 个动作' % (index + 1, total))
         succeeded, failure_message = _summarize_items(results)
         _write(result_path, {
             'protocolVersion': PROTOCOL_VERSION,
@@ -1284,6 +1314,10 @@ def main():
 try:
     main()
     # 结果已经落盘，再做复扫导出；它失败只是让工具箱退回独立导出，不影响同步本身。
+    # 复扫要重读一遍工程（十几秒），以前这一段是纯静默的 —— 报一条，
+    # 否则进度条停在 100% 不动，看起来像卡死。
+    _write_progress(progress_path, total, total, '', '正在复扫导出',
+                    detail='重读工程确认写入结果（这一步十几秒，属正常）')
     _run_post_sync_export()
 except Exception:
     unreal.log_error('Sequence sync failed:\n' + traceback.format_exc())

@@ -164,12 +164,11 @@ namespace CrossingVoidZDTool
                     _applicationViewModel.UnrealProjectSync.ProjectPath,
                     character.Code);
                 ShowGlobalProgress("检测同步差异", character.Code);
-                // 第六步和第四步共用同一个导出范围（都要序列帧那一套数据），只是计划不同。
-                var detectionExportScope = UnrealProjectSyncViewModel.UsesSequenceData(
-                    _applicationViewModel.UnrealProjectSync.WorkflowStep)
-                    || UnrealProjectSyncViewModel.UsesSequenceData(_workflowStepAfterPublishDetection)
-                        ? UnrealProjectSyncExportScope.CharacterSequences
-                        : UnrealProjectSyncExportScope.CharacterMaterials;
+                // 导出范围的口径归第 4 步自己那个文件（`ResolveDetectionExportScope`），
+                // 别在这儿再就地写一遍三元 —— 同一条口径两处写法迟早漂开。
+                var detectionExportScope = UnrealProjectSyncViewModel.ResolveDetectionExportScope(
+                    _applicationViewModel.UnrealProjectSync.WorkflowStep,
+                    _workflowStepAfterPublishDetection);
                 var detectionExportRun = await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
                     [character.Code],
                     new Progress<ProgressUpdate>(update =>
@@ -177,7 +176,11 @@ namespace CrossingVoidZDTool
                     GetGlobalProgressCancellationToken(),
                     detectionExportScope);
                 LogExportWarning(detectionExportRun);
-                _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code, requireAssetTypes: false);
+                // 这里以前还调 `ValidatePublishCharacterFolders` —— 它内部会
+                // **重刷第 1 步那一整张检查表**（`RefreshFoundationChecks`），顺带校验素材目录，
+                // 而这两件事都不是"检测当前这一步"该干的（晓桀：「只管自己阶段的」）。
+                // 目录口径上面已经按**本步**问过 `ValidateFoldersForStep`；
+                // Item 资产真缺，下面那句 `candidate is null` 会明确报出来。
                 var candidate = _applicationViewModel.UnrealProjectSync.CharacterCandidates.FirstOrDefault(item =>
                     string.Equals(item.Code, character.Code, StringComparison.OrdinalIgnoreCase));
                 if (candidate is null)

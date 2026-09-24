@@ -860,12 +860,20 @@ def _build_entries(request):
             if not _same_paths(current, [talk_concurrency_path]):
                 incorrect.append(path)
         talk_labels = [_voice_display_value(path) for path in talk_paths]
+        # **只报比例是不够的**：`正确 108/109 项` 看不出是哪一条不对，
+        # 用户只能靠"我下午是不是刚导入了语音"自己猜（2026-09-24 实测就是这么发生的）。
+        # 把不对的那几条直接写进摘要 —— 界面会把 `/Game/...` 路径收成资产名，读起来是短的。
+        summary = "正确 {}/{} 项".format(len(talk_paths) - len(incorrect), len(talk_paths))
+        if incorrect:
+            shown = "、".join(_voice_display_value(path) for path in incorrect[:3])
+            if len(incorrect) > 3:
+                shown += " 等 {} 条".format(len(incorrect))
+            summary += "；不对的是：{}".format(shown)
         entries.append(_entry(
             "voice.talk-concurrency", "SoundWave 并发", "普通角色语音并发",
             "/Game/GameActor2D/{}/Sound".format(_get(request, "CharacterCode", "characterCode", default="")),
             "非 Hurt SoundWave.ConcurrencySet", "非 Hurt 语音统一使用当前角色 Con_Talk",
-            "正确 {}/{} 项".format(len(talk_paths) - len(incorrect), len(talk_paths)),
-            talk_labels, len(incorrect) == 0))
+            summary, talk_labels, len(incorrect) == 0))
         context["talk_assets"] = talk_assets
         context["talk_concurrency"] = talk_concurrency
     except Exception as error:

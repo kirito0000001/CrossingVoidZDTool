@@ -50,8 +50,11 @@ internal sealed class SequenceAtlasPackService
 
         // 动作代号解析成动作卡，是为了拿素材目录 —— 目录名用的是动作卡上的代号，
         // 不是规范代号，形态变体尤其不能想当然。
-        var sectionByAction = new SequenceFrameService()
-            .LoadSections(character, new CharacterSkillsService().Load(character))
+        // 这一份清单在这一段里要问两次（查来源动作、查帧数），原来调了两遍 `LoadSections`，
+        // 每遍都把整角色的序列帧从磁盘读一次。读一次、传下去（局部去重，不动对外签名）。
+        var sections = new SequenceFrameService()
+            .LoadSections(character, new CharacterSkillsService().Load(character));
+        var sectionByAction = sections
             .Select(section => (section, Resolved: Resolve(section.Action.Code)))
             .Where(pair => pair.Resolved is not null)
             .GroupBy(pair => (pair.Resolved!.Value.Definition.Code, pair.Resolved!.Value.FormIndex))

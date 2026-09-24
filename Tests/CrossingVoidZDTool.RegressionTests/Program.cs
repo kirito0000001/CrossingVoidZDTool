@@ -9677,7 +9677,9 @@ static void LightConfigurationOnlyTouchesItsOwnStep()
     //
     // 只能靠读壳源码盯着：这些都在按钮处理器里，要跑起 WinUI 才动得了，没有行为断言的缝。
     var shell = ReadUnrealSyncWindowSource();
-    AssertEqual(1, CountOccurrences(shell, "ValidatePublishCharacterFolders("));
+    // 壳侧**一次都不该调它**：它内部会重刷第 1 步那一整张检查表。
+    // 目录口径按本步问 `ValidateFoldersForStep` 就够（第 3、4 步的检测链各删过一处）。
+    AssertEqual(0, CountOccurrences(shell, "ValidatePublishCharacterFolders("));
     AssertEqual(1, CountOccurrences(shell, "还有未完成的素材规整项"));
     AssertEqual(0, CountOccurrences(shell, "第二步仍有未完成的素材规整项目"));
 }

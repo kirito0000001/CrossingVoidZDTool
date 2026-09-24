@@ -101,6 +101,16 @@ internal sealed partial class UnrealProjectSyncViewModel
             ? UnrealProjectSyncExportScope.CharacterSequences
             : UnrealProjectSyncExportScope.CharacterMaterials;
 
+    /// <summary>
+    /// **差异检测**那一次导出该用哪个范围：当前步和这次检测的目标步，
+    /// 只要有一个要"序列帧那一套"，就按序列导。
+    ///
+    /// 为什么当前步也要算进来：导出结果同时喂着当前步的预览与候选，只看目标步会把它喂漏。
+    /// 口径收在这一处 —— 壳侧原来就地写了一遍同样的三元（两处写法，迟早漂开）。
+    /// </summary>
+    public static UnrealProjectSyncExportScope ResolveDetectionExportScope(int currentStep, int targetStep) =>
+        ExportScopeFor(UsesSequenceData(currentStep) ? currentStep : targetStep);
+
     // ── 自己的缓存文件 ────────────────────────────────────────────────────
 
     /// <summary>把当前这棵序列差异树 + 勾选写进第 4 步自己的缓存文件。</summary>

@@ -403,6 +403,14 @@ internal sealed class UnrealBridgeExecutionProgress
 
     public string Message { get; set; } = string.Empty;
 
+    /// <summary>
+    /// **更细的一行**（"第 3/12 个动作 · Sk2"、"正在复扫导出"…），显示在进度条第二行。
+    ///
+    /// 桥接脚本原来只报"第 N/M 个动作"，一个动作内部几十秒（图集 → 精灵 → Flipbook → 序列）
+    /// 完全静默，看着像卡死（2026-09-24 第 4 步体检）。为空的旧脚本照旧走"动作进度：N/M"。
+    /// </summary>
+    public string Detail { get; set; } = string.Empty;
+
     public DateTimeOffset UpdatedAt { get; set; }
 }
 

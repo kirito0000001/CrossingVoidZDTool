@@ -1773,10 +1773,10 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 cache.WorkflowStep <= UnrealSyncWorkflow.MaxStep
                     ? cache.WorkflowStep
                     : UnrealSyncWorkflow.MinStep;
-            if (WorkflowStep == 4 && !cache.IsPublishDetection)
-            {
-                WorkflowStep = 3;
-            }
+            // 以前这里有一条"缓存说第 4 步、但没有差异检测结果 → 悄悄把人挪去第 3 步"。
+            // 删了（2026-09-24 第 4 步体检）：缺前置条件该**显示成"尚未检测"**，
+            // 而不是替用户换一步 —— 停在第 4 步看到"未检测"占位是**正确**的呈现
+            // （`WorkspaceNeverShowsBlankPanel` 那条用例管着"任何状态都有东西显示"）。
             OnPropertyChanged(nameof(ContentDetectionStatusText));
 
             RestoreNormalizationItems(cache.NormalizationItems);

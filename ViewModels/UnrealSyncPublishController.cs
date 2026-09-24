@@ -273,7 +273,10 @@ internal sealed class UnrealSyncPublishController(
             {
                 _host.AppendLog(LogKind.Warning,
                     $"[Sync Aborted] reason=changes-drifted character={character.Code} latest={latestChanges.Length}");
-                var driftedStep = isSequenceSynchronization ? 5 : 3;
+                // ⚠️ 这里必须是 4/2（2026-09-24 收口只改了收尾那处，这两处中止路径漏了）：
+            // 序列那一步被挪到 5 之后，随后的 `SetLoadedPublishStep(5)` 会因为
+            // `_loadedPublishStep` 只收 2/4 而 `ClearPublishTree()`，把刚重建的差异树归属清掉。
+            var driftedStep = isSequenceSynchronization ? 4 : 2;
                 _sync.ReturnToWorkflowStep(driftedStep);
                 // ReturnToWorkflowStep 会把**缓存里那份旧的差异树**读回来。
                 // 于是界面看着「一点没变」，而用户再点一次同步又会撞到同一个漂移 ——
@@ -340,7 +343,7 @@ internal sealed class UnrealSyncPublishController(
             {
                 _host.AppendLog(LogKind.Warning,
                     $"[Sync Aborted] reason=selection-lost character={character.Code} before={selectionBeforeRefresh.Count} restored={restoredSelection.Count}");
-                _sync.ReturnToWorkflowStep(isSequenceSynchronization ? 5 : 3);
+                _sync.ReturnToWorkflowStep(isSequenceSynchronization ? 4 : 2);
                 _host.CompleteGlobalProgress("同步已停止", "刷新后未能恢复原来的勾选，未修改 Unreal。请重新检测差异并确认选择。");
                 _host.ShowFloatingTip(InfoBarSeverity.Warning, "未恢复同步选择", "刷新后的勾选集合与同步前不一致，已停止执行，未修改 Unreal。");
                 await _host.HideGlobalProgressAfterDelayAsync();
@@ -487,7 +490,9 @@ internal sealed class UnrealSyncPublishController(
                             $"阶段 3/4 · 执行序列动作：{value.Message}",
                             progressPlan[WorkflowProgressPlan.BridgeExecute].At(
                                 value.CompletedCount * 100d / Math.Max(1, value.TotalCount)),
-                            $"动作进度：{value.CompletedCount}/{value.TotalCount} · {value.StableId}")),
+                            string.IsNullOrWhiteSpace(value.Detail)
+                            ? $"动作进度：{value.CompletedCount}/{value.TotalCount} · {value.StableId}"
+                            : $"{value.Detail}（{value.CompletedCount}/{value.TotalCount}）")),
                     _host.GetGlobalProgressCancellationToken());
                 _host.AppendLog(sequenceResult.Succeeded ? LogKind.Info : LogKind.Error, $"[Sequence Execution] character={character.Code} succeeded={sequenceResult.Succeeded} items={sequenceResult.Items.Count} error={_host.FormatSyncLogValue(sequenceResult.ErrorMessage)}");
                 if (!string.IsNullOrWhiteSpace(sequenceResult.ProcessExitWarning))

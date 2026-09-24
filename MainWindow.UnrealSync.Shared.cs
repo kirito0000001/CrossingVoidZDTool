@@ -36,24 +36,8 @@ namespace CrossingVoidZDTool
             return compact.Length <= maxLength ? compact : compact[..maxLength] + "...";
         }
 
-        private void LogSequenceChanges(string prefix, IEnumerable<UnrealBridgeChange> changes)
-        {
-            var count = 0;
-            foreach (var change in changes.Where(item => item.Module == UnrealBridgeModule.SequenceFrames))
-            {
-                var canExecute = UnrealBridgePublishSupportPolicy.CanExecute(change);
-                var toolboxValue = FormatSyncLogValue(change.ToolboxItem?.PayloadJson);
-                var unrealValue = FormatSyncLogValue(change.UnrealItem?.PayloadJson);
-                AppendDiagnosticLog(LogKind.Info,
-                    $"{prefix} stableId={change.StableId} kind={change.Kind} selected={change.IsSelected} canExecute={canExecute} group={FormatSyncLogValue(change.SequenceGroupKey)} display={FormatSyncLogValue(change.DisplayName)} toolbox={toolboxValue} unreal={unrealValue}");
-                count++;
-            }
-
-            if (count > 0)
-            {
-                AppendLog(LogKind.Info, $"{prefix} 共 {count} 条明细，已写入 runtime.log。");
-            }
-        }
+        // LogSequenceChanges 搬到了 MainWindow.UnrealSync.SequenceSync.cs ——
+        // 名字和判据都是**序列帧**这一套，就该住那一步自己的壳文件里（一步一个文件）。
 
         /// <summary>
         /// 在线执行失败时退回离线执行。
