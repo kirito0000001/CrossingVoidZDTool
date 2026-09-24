@@ -7,20 +7,20 @@ using System.Text.Json.Serialization;
 namespace CrossingVoidZDTool.Services;
 
 /// <summary>
-/// 第四步「基础配置」自己的缓存：一步一个文件，只装这一步的东西 ——
+/// 第三步「基础配置」自己的缓存：一步一个文件，只装这一步的东西 ——
 /// **这次检测出来的配置项（无差异 / 待设置 / 错误）+ 用户勾了哪几条**。
 ///
-/// 落点：`&lt;角色&gt;/&lt;工具目录&gt;/UnrealSync/step4-light-configuration.json`。
+/// 落点：`&lt;角色&gt;/&lt;工具目录&gt;/UnrealSync/step3-light-configuration.json`。
 ///
 /// 以前这一坨存在整体会话缓存（`UnrealSyncSessionCache.LightConfigurationItems`）里，
 /// 和其它步骤共用一大坨；前两步已经搬出去了，这里跟着搬。
 /// </summary>
-internal static class Step4LightConfigurationCache
+internal static class Step3LightConfigurationCache
 {
     /// <summary>文件格式版本：加字段就抬一版，读到不认识的版本一律当没缓存。</summary>
     public const int CurrentVersion = 1;
 
-    public const string FileName = "step4-light-configuration.json";
+    public const string FileName = "step3-light-configuration.json";
 
     public static string GetFilePath(CharacterCard? character)
     {
@@ -41,14 +41,14 @@ internal static class Step4LightConfigurationCache
             return false;
         }
 
-        var document = new Step4LightConfigurationCacheDocument
+        var document = new Step3LightConfigurationCacheDocument
         {
             Version = CurrentVersion,
             CharacterCode = character.Code,
             SavedAtUtc = DateTimeOffset.UtcNow,
             ResultMessage = resultMessage ?? string.Empty,
             SelectedStableIds = selectedStableIds.ToArray(),
-            Items = items.Select(Step4LightConfigurationCacheItem.From).ToArray()
+            Items = items.Select(Step3LightConfigurationCacheItem.From).ToArray()
         };
 
         try
@@ -57,7 +57,7 @@ internal static class Step4LightConfigurationCache
                 path,
                 System.Text.Json.JsonSerializer.Serialize(
                     document,
-                    AppJsonSerializerContext.Default.Step4LightConfigurationCacheDocument));
+                    AppJsonSerializerContext.Default.Step3LightConfigurationCacheDocument));
             return true;
         }
         catch (Exception)
@@ -68,7 +68,7 @@ internal static class Step4LightConfigurationCache
     }
 
     /// <summary>读缓存；没有 / 版本不认识 / 角色代号对不上 / 坏了，都返回 null（当作"没查过"）。</summary>
-    public static Step4LightConfigurationCacheDocument? TryLoad(CharacterCard? character, string characterCode)
+    public static Step3LightConfigurationCacheDocument? TryLoad(CharacterCard? character, string characterCode)
     {
         var path = GetFilePath(character);
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
@@ -80,7 +80,7 @@ internal static class Step4LightConfigurationCache
         {
             var document = System.Text.Json.JsonSerializer.Deserialize(
                 File.ReadAllText(path),
-                AppJsonSerializerContext.Default.Step4LightConfigurationCacheDocument);
+                AppJsonSerializerContext.Default.Step3LightConfigurationCacheDocument);
             if (document is null || document.Version != CurrentVersion)
             {
                 return null;
@@ -98,8 +98,8 @@ internal static class Step4LightConfigurationCache
     }
 }
 
-/// <summary>第四步缓存的落盘形状。</summary>
-internal sealed record Step4LightConfigurationCacheDocument
+/// <summary>第三步缓存的落盘形状。</summary>
+internal sealed record Step3LightConfigurationCacheDocument
 {
     [JsonPropertyName("version")]
     public int Version { get; init; }
@@ -117,11 +117,11 @@ internal sealed record Step4LightConfigurationCacheDocument
     public string[] SelectedStableIds { get; init; } = [];
 
     [JsonPropertyName("items")]
-    public Step4LightConfigurationCacheItem[] Items { get; init; } = [];
+    public Step3LightConfigurationCacheItem[] Items { get; init; } = [];
 }
 
 /// <summary>一条基础配置项（字段和 UnrealLightConfigurationResultItem 一一对应）。</summary>
-internal sealed record Step4LightConfigurationCacheItem
+internal sealed record Step3LightConfigurationCacheItem
 {
     [JsonPropertyName("stableId")]
     public string StableId { get; init; } = string.Empty;
@@ -159,7 +159,7 @@ internal sealed record Step4LightConfigurationCacheItem
     [JsonPropertyName("errorMessage")]
     public string ErrorMessage { get; init; } = string.Empty;
 
-    public static Step4LightConfigurationCacheItem From(UnrealLightConfigurationResultItem item) => new()
+    public static Step3LightConfigurationCacheItem From(UnrealLightConfigurationResultItem item) => new()
     {
         StableId = item.StableId,
         GroupName = item.GroupName,

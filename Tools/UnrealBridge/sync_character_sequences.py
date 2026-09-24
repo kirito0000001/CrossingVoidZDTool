@@ -845,7 +845,7 @@ def _sync_action(action):
         _save(source_asset.get_path_name())
     sequence.modify()
     _save(sequence.get_path_name())
-    # 第五步不再往角色蓝图里写序列槽位——把序列绑到蓝图属于下一步的职责。
+    # 第四步不再往角色蓝图里写序列槽位——把序列绑到蓝图属于下一步的职责。
     # 计划里仍然带着 blueprintProperty / blueprintFormSlotIndex，留给那一步用。
     # 图集贴图 + 去重后的精灵 + Flipbook + 序列，就是这一轮的全部产物。
     # 其余留在这个动作目录里的（上一版逐帧导入的贴图和精灵）都是旧资产，交给清理。
@@ -1144,7 +1144,7 @@ def _detach_orphan_sequences(paths):
 def _run_post_sync_export():
     """同步完成后，在同一个编辑器会话里顺手把复扫导出做掉。
 
-    一次第五步同步原本要开三次编辑器：同步前导出、桥接同步、同步后复扫导出。
+    一次第四步同步原本要开三次编辑器：同步前导出、桥接同步、同步后复扫导出。
     实测每次会话 13-15 秒，其中约 9 秒是纯启动开销——复扫要读的就是这个
     已经加载好、而且刚被自己改过的编辑器，再开一次纯属浪费。
 
@@ -1195,7 +1195,7 @@ def main():
     total = len(actions)
     results = []
     try:
-        # 只校验 AnimMaps：第五步同步的是序列、帧素材、AnimMaps 映射和语音轨道，
+        # 只校验 AnimMaps：第四步同步的是序列、帧素材、AnimMaps 映射和语音轨道，
         # 角色蓝图的绑定交给下一步，这里不该因为蓝图状态而失败。
         _require(plan['AnimMapsPath'], 'AnimMaps')
         detach_paths = plan.get('DetachSequenceObjectPaths') or []

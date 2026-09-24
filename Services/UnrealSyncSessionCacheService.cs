@@ -32,7 +32,7 @@ internal sealed class UnrealSyncSessionCacheService
 
     /// <summary>
     /// 读某一步的缓存。只读目标步骤的文件，不回退到别的步骤——
-    /// 否则请求第三步缓存时可能误读第四步或第五步的内容。
+    /// 否则请求第二步缓存时可能误读第三步或第四步的内容。
     /// </summary>
     public UnrealSyncSessionCacheLoadResult LoadStep(
         CharacterCard? character,

@@ -47,10 +47,10 @@ namespace CrossingVoidZDTool
                     ShowFloatingTip(InfoBarSeverity.Success, "底层检测已重新加载", sync.FoundationSummaryText);
                     break;
                 case 2:
-                case 5:
-                    // 第 2 步（合并后的「同步素材」：规整 + 素材同步）和第 5 步走同一条差异检测，
+                case 4:
+                    // 第 2 步（合并后的「同步素材」：规整 + 素材同步）和第 4 步走同一条差异检测，
                     // 只是导出范围和默认勾选不同。
-                    // ⚠️ 第 3 步的号**放空**（旧的「同步素材」并进了第 2 步），4~7 的号不动。
+                    // ⚠️ 旧第 3 步（「同步素材」）已并进第 2 步，收口时 4~7 整体前移成 3~6。
                     _workflowStepAfterPublishDetection = step;
                     await DetectUnrealPublishChangesAsync();
                     if (step == 2)
@@ -61,16 +61,16 @@ namespace CrossingVoidZDTool
                     }
 
                     break;
-                case 4:
+                case 3:
                     await ReloadUnrealLightConfigurationStepAsync(sync);
                     break;
-                case 6:
+                case 5:
                     await ReloadUnrealBlueprintSetupStepAsync(sync);
                     break;
-                case 7:
-                    // 第七步「特效同步」：**只做工具箱侧的事** —— 打网格 sheet + 建特效计划。
+                case 6:
+                    // 第六步「特效同步」：**只做工具箱侧的事** —— 打网格 sheet + 建特效计划。
                     // 它不需要 Unreal 的全量导出：特效该有几张、网格几×几都来自工作区的特效帧目录，
-                    // 所以这一步**不会**像第五步那样把整条序列的帧全打开一遍（用户明确要求省掉那一步）。
+                    // 所以这一步**不会**像第四步那样把整条序列的帧全打开一遍（用户明确要求省掉那一步）。
                     await ReloadUnrealEffectSyncStepAsync(sync);
                     break;
             }

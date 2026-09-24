@@ -372,7 +372,7 @@ def _package_file_path(package_path_or_name):
 def _png_is_up_to_date(output_path, package_name):
     """已有 PNG 比源 .uasset 新，就不必再导一次。
 
-    一次第五步同步要跑三趟 Unreal 导出，每趟都把同一批贴图重新写一遍 PNG
+    一次第四步同步要跑三趟 Unreal 导出，每趟都把同一批贴图重新写一遍 PNG
     （AssetExportTask.replace_identical 还是 True，内容相同也照写）。
     绝大多数贴图两趟之间根本没动过，这一步纯属浪费。
     """

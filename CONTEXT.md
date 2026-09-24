@@ -26,13 +26,13 @@
 
 **离线执行**：目标 Unreal Editor 未打开时，通过 `UnrealEditor-Cmd` 执行同一份 Python 任务和同步计划。
 
-**分步同步缓存**：同步进度按 `step1`、`step2`、`step3`、`step4` 分文件保存；进入某一步优先读取自己的快照，缺失或损坏时回退到其他步骤快照，最后兼容旧版项目单文件缓存。成功同步后第四步快照不保留已执行的第三步差异。
+**分步同步缓存**：同步进度按步分文件保存（`step1-foundation` / `step2-material-sync` / `step2-normalization` / `step3-light-configuration` / `step4-sequence-sync`）；进入某一步优先读取自己的快照，缺失或损坏时回退到整体会话缓存，最后兼容旧版项目单文件缓存。成功同步后第 4 步（序列）快照不保留已执行的第 2 步（素材）差异。
 
 **检测结果摘要**：中栏只显示需要处理的差异；当列表为空时显示本次检查总数、无差异数量和各类改动数量。摘要计数随步骤缓存恢复，但切换方向、阶段或完成同步时清空。
 
-**第四步基础配置**：第三步角色素材全部同步或确认无差异后进入。第四步独立扫描、缓存、勾选、应用和复扫角色入队语音、Item 白名单字段、受击 MetaSound 默认值和普通 SoundWave 并发；单项失败不得清空其他成功项。
+**第三步基础配置**：第二步「同步素材」全部同步或确认无差异后进入。第三步独立扫描、缓存、勾选、应用和复扫角色入队语音、Item 白名单字段、受击 MetaSound 默认值和普通 SoundWave 并发；单项失败不得清空其他成功项。
 
-第四步当前实现使用独立 `LightConfiguration` 请求/结果协议和步骤缓存，不复用第三步素材差异树。在线 Unreal 使用 Python Remote Execution，离线 Unreal 使用同一脚本的命令进程；应用前可按整体设置创建项目备份。
+第三步当前实现使用独立 `LightConfiguration` 请求/结果协议和步骤缓存，不复用第二步素材差异树。在线 Unreal 使用 Python Remote Execution，离线 Unreal 使用同一脚本的命令进程；应用前可按整体设置创建项目备份。
 
 **基础配置白名单**：Item 只管理名称、介绍、关键词、道具图标、物品类型、数量、三组形态图片引用、基础战斗数值和被动介绍；不读取或修改 `CharShapeNow`、`CharShapeHas`、`SkillData`、`SkillNow`、`SkillHave`、`SkillLevel`、`Synchronize`、`Anti` 及蓝图图表。Hurt SoundWave 本身不设置并发，受击并发只写在角色 OnDM MetaSound；非 Hurt 角色语音只保留当前角色 `Con_Talk`。
 

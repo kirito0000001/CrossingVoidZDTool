@@ -20,7 +20,7 @@ namespace CrossingVoidZDTool.Services;
 /// 只靠断言源码文本来守。现在可以直接喂一个清单对象和一个临时目录跑。
 ///
 /// 这里有两处踩过坑、必须原样保留的行为：
-/// 一是清单合并（<see cref="ResolveExportManifest"/>）——第三到第五步只写各自范围的
+/// 一是清单合并（<see cref="ResolveExportManifest"/>）——第三到第四步只写各自范围的
 /// 分段清单，只读 characters.json 会让 Unreal 侧整体为空，差异里删除永远是 0；
 /// 二是清单读坏时那行 <c>ToolboxLog.Error</c>（<see cref="LoadExportManifest"/>）——
 /// 「读坏了」和「这段本来就没写」返回的都是 null，不记一笔就完全分不出来。
@@ -75,7 +75,7 @@ internal static class UnrealExportManifestReader
     }
 
     /// <summary>
-    /// 解析导出目录里可用的清单。第三到第五步只写各自范围的清单，
+    /// 解析导出目录里可用的清单。第三到第四步只写各自范围的清单，
     /// 从来不会生成 characters.json；如果只读 characters.json，
     /// Unreal 侧就会整体为空，差异里只剩工具箱侧的新增，删除永远是 0。
     /// 这里按修改时间从新到旧合并各分段，缺哪段补哪段。
@@ -518,7 +518,7 @@ internal static class UnrealExportManifestReader
                 var personalEffectRoot = $"{UnrealProjectSyncService.TargetZdContentPath}/{code}/ExAsset/Effect";
                 // 基础素材目录之外，角色根下只有两处贴图算「基础素材」：
                 // 个人 BUFF 图标，和 ExAsset/Effect 下的特效素材。以前只列了前者，
-                // 特效素材会被整条筛掉——它落在 Unreal 里、第三步却完全看不见。
+                // 特效素材会被整条筛掉——它落在 Unreal 里、第二步却完全看不见。
                 var materialAssets = baseAssets
                     .Concat(zdAssets.Where(asset =>
                         IsTextureAsset(asset) &&

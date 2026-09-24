@@ -20,7 +20,7 @@ internal sealed record UnrealSyncSessionCacheLoadResult(
 /// 虚幻同步台的流程步数。加新步骤时只改这一处。
 ///
 /// 步号在好几个地方会被夹到合法区间，之前这个上限散落着写死成 5：
-/// 第六步「蓝图置入」刚接上时，点「下一步」会被静默夹回第五步，
+/// 「蓝图置入」刚接上时，点「下一步」会被静默夹回上一步，
 /// 界面停在原地却已经开始跑虚幻检测，看着就像按钮直接执行了操作。
 /// </summary>
 internal static class UnrealSyncWorkflow
@@ -28,14 +28,15 @@ internal static class UnrealSyncWorkflow
     public const int MinStep = 1;
 
     /// <summary>
-    /// 1 底层检测、**2 同步素材**（= 旧的「规整素材」+「同步素材」合并，2026-09-24；
-    /// **第 3 步的号放空**，4~7 不动）、4 基础配置、5 序列同步、6 蓝图置入、**7 特效同步**。
+    /// 1 底层检测、**2 同步素材**（= 旧的「规整素材」+「同步素材」合并，2026-09-24）、
+    /// 3 基础配置、4 序列同步、5 蓝图置入、**6 特效同步**。
+    /// （合并后 4~7 整体前移成 3~6，2026-09-24 收口。）
     ///
-    /// 第七步是**独立的一步**，不是第五步的一部分：第五步只管角色序列（图集/精灵/Flipbook/序列/AnimMaps），
-    /// 特效那套（网格 sheet + SubUV 材质实例 + 共享 Niagara 面片系统）走第七步自己的检测与同步。
-    /// 用户明确要求过："我最早说的是在第七步同步，不要给第五步压得太重"。
+    /// 第六步是**独立的一步**，不是第四步的一部分：第四步只管角色序列（图集/精灵/Flipbook/序列/AnimMaps），
+    /// 特效那套（网格 sheet + SubUV 材质实例 + 共享 Niagara 面片系统）走第六步自己的检测与同步。
+    /// 用户当时的话（步号按当时的编号）："我最早说的是在第七步同步，不要给第五步压得太重"。
     /// </summary>
-    public const int MaxStep = 7;
+    public const int MaxStep = 6;
 }
 
 internal sealed class UnrealSyncSessionCache
@@ -93,7 +94,7 @@ internal sealed class UnrealSyncSessionCache
 
     public string LightConfigurationResultMessage { get; set; } = string.Empty;
 
-    // 第六步「蓝图置入」。存下来是为了重进这一步时不必再跑一次虚幻检测——
+    // 第五步「蓝图置入」。存下来是为了重进这一步时不必再跑一次虚幻检测——
     // 离线检测一次十几秒，来回切步骤全是白等。
     public bool IsBlueprintSetupLoaded { get; set; }
     public List<UnrealBlueprintSetupResultItem> BlueprintSetupItems { get; set; } = [];

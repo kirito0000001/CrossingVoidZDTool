@@ -2807,8 +2807,18 @@
                                                         <ColumnDefinition Width="*" />
                                                         <ColumnDefinition Width="Auto" />
                                                     </Grid.ColumnDefinitions>
-                                                    <TextBlock FontSize="16" Text="4" />
+                                                    <TextBlock FontSize="16" Text="3" />
                                                     <TextBlock Grid.Column="1" Text="基础配置" />
+                                                    <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep3StatusText, Mode=OneWay}" />
+                                                </Grid>
+                                                <Grid ColumnSpacing="8">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock FontSize="16" Text="4" />
+                                                    <TextBlock Grid.Column="1" Text="序列同步" />
                                                     <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep4StatusText, Mode=OneWay}" />
                                                 </Grid>
                                                 <Grid ColumnSpacing="8">
@@ -2818,24 +2828,14 @@
                                                         <ColumnDefinition Width="Auto" />
                                                     </Grid.ColumnDefinitions>
                                                     <TextBlock FontSize="16" Text="5" />
-                                                    <TextBlock Grid.Column="1" Text="序列同步" />
+                                                    <TextBlock Grid.Column="1" Text="蓝图置入" />
                                                     <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep5StatusText, Mode=OneWay}" />
                                                 </Grid>
-                                                <Grid ColumnSpacing="8">
-                                                    <Grid.ColumnDefinitions>
-                                                        <ColumnDefinition Width="Auto" />
-                                                        <ColumnDefinition Width="*" />
-                                                        <ColumnDefinition Width="Auto" />
-                                                    </Grid.ColumnDefinitions>
-                                                    <TextBlock FontSize="16" Text="6" />
-                                                    <TextBlock Grid.Column="1" Text="蓝图置入" />
-                                                    <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep6StatusText, Mode=OneWay}" />
-                                                </Grid>
                                                 <!--
-                                                    第 7 步「特效同步」：和上面六步同构（序号 / 名称 / 状态）。
-                                                    特效有自己的检测与同步（网格 sheet + 材质实例），不再挂在第五步上 ——
-                                                    用户原话："我最早说的是在第七步同步，不要给第五步压得太重"。
-                                                    Step7 的页面与处理器另开一轮接（XAML 有静默崩溃的先例，这里先只补流程列表这一行）。
+                                                    第 6 步「特效同步」：和上面五步同构（序号 / 名称 / 状态）。
+                                                    特效有自己的检测与同步（网格 sheet + 材质实例），不再挂在第四步上 ——
+                                                    用户当时的话（步号按当时的编号）："我最早说的是在第七步同步，不要给第五步压得太重"。
+                                                    （那时特效是第 7 步；收口后 4~7 前移成 3~6，它就是现在的第 6 步。）
                                                 -->
                                                 <Grid ColumnSpacing="8">
                                                     <Grid.ColumnDefinitions>
@@ -2843,9 +2843,9 @@
                                                         <ColumnDefinition Width="*" />
                                                         <ColumnDefinition Width="Auto" />
                                                     </Grid.ColumnDefinitions>
-                                                    <TextBlock FontSize="16" Text="7" />
+                                                    <TextBlock FontSize="16" Text="6" />
                                                     <TextBlock Grid.Column="1" Text="特效同步" />
-                                                    <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep7StatusText, Mode=OneWay}" />
+                                                    <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep6StatusText, Mode=OneWay}" />
                                                 </Grid>
                                                 <Grid ColumnSpacing="10">
                                                     <Grid.ColumnDefinitions>

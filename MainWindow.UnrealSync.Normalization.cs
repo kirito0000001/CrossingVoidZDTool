@@ -15,7 +15,7 @@ using WinRT.Interop;
 
 namespace CrossingVoidZDTool
 {
-    /// <summary>第二步「规整素材」：确认 Unreal 旧素材与工具箱规范素材的对应关系。</summary>
+    /// <summary>第二步「同步素材」里规整那一半：确认 Unreal 旧素材与工具箱规范素材的对应关系。</summary>
     public sealed partial class MainWindow
     {
         // ── 「打开素材规整」和「重新加载规整素材」两个入口都删了 ──

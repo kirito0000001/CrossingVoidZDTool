@@ -322,7 +322,7 @@ def _scan():
     unreal.log('[ZD Bridge Scan] stage=plugin_sequence_ready sequences=%d excluded=%d' % (len(plugin_items), plugin_scan.get('excludedGeneratedSequenceCount', 0)))
     if plugin_scan.get("enabled"):
         # 插件扫描只负责正式 AnimSequence；不能把 Material 下旧 Sprite、Flipbook
-        # 一并从标准资产扫描结果删除，否则第五步永远看不到需要清理的旧资产。
+        # 一并从标准资产扫描结果删除，否则第四步永远看不到需要清理的旧资产。
         items = [item for item in items if not (
             item["module"] == MODULE_SEQUENCE_FRAMES and
             "/animsequences/" in item.get("objectPath", "").lower()

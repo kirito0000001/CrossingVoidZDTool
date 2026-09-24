@@ -231,7 +231,7 @@ internal static class SequenceFrameIdentity
 
     /// <summary>
     /// 动作节点的比较载荷。两侧必须逐字节一致，否则每个动作都会被永久判成冲突，
-    /// 第五步也就永远报不出「已无差异」。
+    /// 第四步也就永远报不出「已无差异」。
     ///
     /// 除了规范代号和帧率，还带上两样：
     /// <list type="bullet">

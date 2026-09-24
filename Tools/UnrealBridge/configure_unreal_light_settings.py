@@ -205,7 +205,7 @@ def _summary(value, maximum=160):
             return "、".join(_object_path(item) for item in value)
         return "{} 项：{} ... {}".format(len(value), _object_path(value[0]), _object_path(value[-1]))
     text = _text(value).replace("\r", " ").replace("\n", " ")
-    # 第四步界面会自行换行；保留完整字段，避免把角色介绍等内容截断。
+    # 第三步界面会自行换行；保留完整字段，避免把角色介绍等内容截断。
     return text
 
 
@@ -624,7 +624,7 @@ def _build_entries(request):
         message = str(error)
         entries.append(_error_entry(
             "foundation.assets", "依赖检查", "基础配置依赖", item_path,
-            "资产和默认对象", "第一步至第三步产物", message))
+            "资产和默认对象", "第一步至第二步产物", message))
         try:
             entries.extend(_build_meta_entries(request))
         except Exception as meta_error:
@@ -1026,7 +1026,7 @@ try:
     unreal.log("ZD light configuration completed: " + result_path)
 except Exception:
     # str(error) 只有一行，界面上拿到「'NoneType' object has no attribute ...」
-    # 根本看不出是哪一段配置塌的。完整回溯要进结果文件，第六步 _run() 就是这么写的。
+    # 根本看不出是哪一段配置塌的。完整回溯要进结果文件，第五步 _run() 就是这么写的。
     details = traceback.format_exc()
     unreal.log_error("ZD light configuration failed:\n" + details)
     # 结果路径为空、或者结果文件本身写不出去时，工具箱只剩进程输出可看，

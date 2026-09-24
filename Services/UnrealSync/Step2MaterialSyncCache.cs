@@ -80,7 +80,7 @@ internal static class Step2MaterialSyncCache
     /// 读缓存；没有 / 版本不认识 / 角色代号对不上 / 差异算法换代 / 坏了，
     /// 都返回 null（当作"没查过"）。
     ///
-    /// 比对 <paramref name="detectionAlgorithmVersion"/> 的理由同第五步：
+    /// 比对 <paramref name="detectionAlgorithmVersion"/> 的理由同第四步：
     /// 旧口径算出来的差异列表拿到新界面上会显示成"删除 N 项 + 新增 N 项"，宁可当没缓存重查一次。
     /// </summary>
     public static Step2MaterialSyncCacheDocument? TryLoad(

@@ -15,7 +15,7 @@ using WinRT.Interop;
 
 namespace CrossingVoidZDTool
 {
-    /// <summary>第四步「基础配置」：入队语音、Item、MetaSound 和语音并发。</summary>
+    /// <summary>第三步「基础配置」：入队语音、Item、MetaSound 和语音并发。</summary>
     public sealed partial class MainWindow
     {
         private async void ApplyUnrealLightConfigurationButton_Click(object sender, RoutedEventArgs e)
@@ -91,7 +91,7 @@ namespace CrossingVoidZDTool
                         // 以前这种假报也会把人踢回第 1 步，看着像"第 1 步的东西坏了"（2026-09-24 实测）。
                         AppendLog(
                             LogKind.Warning,
-                            "离线实例加载不到依赖资产，已留在第 4 步；建议重试，或关掉 Unreal 编辑器后重跑。");
+                            "离线实例加载不到依赖资产，已留在第 3 步；建议重试，或关掉 Unreal 编辑器后重跑。");
                     }
                     else
                     {
@@ -170,7 +170,7 @@ namespace CrossingVoidZDTool
                     sync.ReturnToWorkflowStep(1);
                     throw;
                 }
-                sync.ReturnToWorkflowStep(4);
+                sync.ReturnToWorkflowStep(3);
                 var result = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
                 sync.SetLightConfigurationResult(result);
                 var foundationError = result.Items.FirstOrDefault(item =>
@@ -183,7 +183,7 @@ namespace CrossingVoidZDTool
                     {
                         AppendLog(
                             LogKind.Warning,
-                            "离线实例加载不到依赖资产，已留在第 4 步；建议重试，或关掉 Unreal 编辑器后重跑。");
+                            "离线实例加载不到依赖资产，已留在第 3 步；建议重试，或关掉 Unreal 编辑器后重跑。");
                     }
                     else
                     {
@@ -271,7 +271,7 @@ namespace CrossingVoidZDTool
         }
 
         /// <summary>
-        /// 按整体设置备份 Unreal 项目。第三步和第五步共用同一份实现，
+        /// 按整体设置备份 Unreal 项目。第二步和第四步共用同一份实现，
         /// 整体设置对两步都是唯一开关：关掉就一律不备份。
         /// </summary>
     }

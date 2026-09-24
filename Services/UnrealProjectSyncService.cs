@@ -261,7 +261,7 @@ internal sealed class UnrealProjectSyncService
             // -sequences）里 `parentClass` **一直是空的**（`hasItemData` / `itemData.hasCharData`
             // 都填了，父类没填）。拿"没读到"当成"父类不对"，会把角色 Item 永久判成
             // 不合规「父类错误」—— 那是**假红**：它会让第 1 步的底层检测无端变红，
-            // 也会让第 3/4 步那条会抛错的严格校验凭一个读不到的理由拦住流程。
+            // 也会让第 2/3 步那条会抛错的严格校验凭一个读不到的理由拦住流程。
             var hasParentClass = !string.IsNullOrWhiteSpace(parentClass);
             var itemStructureIsAcceptable = !hasParentClass ||
                 (exportedItem?.HasItemData == true &&

@@ -21,16 +21,15 @@ internal readonly record struct UnrealSyncWorkflowInputs(
     bool Step2Loaded,
     int Step2ItemCount,
     bool Step3Loaded,
-    bool Step5Loaded,
-    int Step35ItemCount,
     bool Step4Loaded,
-    int Step4ItemCount,
-    int Step4ErrorCount,
-    int Step4PendingCount,
-    bool Step6Loaded,
-    int Step6ItemCount,
-    int Step6ErrorCount,
-    int Step6PendingCount,
+    int SharedTreeItemCount,
+    int Step3ItemCount,
+    int Step3ErrorCount,
+    int Step3PendingCount,
+    bool Step5Loaded,
+    int Step5ItemCount,
+    int Step5ErrorCount,
+    int Step5PendingCount,
     bool HasDetectionRun);
 
 /// <summary>
@@ -50,10 +49,10 @@ internal static class UnrealSyncWorkflowState
     {
         1 => inputs.Step1Loaded,
         2 => inputs.Step2Loaded,
+        // 第 3 步是真的「基础配置」（收口后 4~7 前移成 3~6，空号那支已删）
         3 => inputs.Step3Loaded,
         4 => inputs.Step4Loaded,
         5 => inputs.Step5Loaded,
-        6 => inputs.Step6Loaded,
         _ => false,
     };
 
@@ -62,28 +61,30 @@ internal static class UnrealSyncWorkflowState
     {
         1 => SimpleStatus(inputs.CurrentStep, 1),
         2 => SimpleStatus(inputs.CurrentStep, 2),
-        3 => SimpleStatus(inputs.CurrentStep, 3),
-        4 => inputs.CurrentStep < 4
+        // 第 3 步「基础配置」（收口后旧空号没了，原来那支 `3 => SimpleStatus` 已删）
+        3 => inputs.CurrentStep < 3
             ? "待处理"
-            : !inputs.Step4Loaded
+            : !inputs.Step3Loaded
                 ? "进行中"
-                : inputs.Step4ErrorCount > 0
+                : inputs.Step3ErrorCount > 0
                     ? "有错误"
-                    : inputs.Step4PendingCount > 0
+                    : inputs.Step3PendingCount > 0
                         ? "待设置"
                         : "已完成",
-        5 => inputs.CurrentStep < 5
+        // 第 4 步「序列同步」
+        4 => inputs.CurrentStep < 4
             ? "待处理"
             : !inputs.HasDetectionRun
                 ? "待检测"
                 : "进行中",
-        6 => inputs.CurrentStep < 6
+        // 第 5 步「蓝图置入」
+        5 => inputs.CurrentStep < 5
             ? "待处理"
-            : !inputs.Step6Loaded
+            : !inputs.Step5Loaded
                 ? "进行中"
-                : inputs.Step6ErrorCount > 0
+                : inputs.Step5ErrorCount > 0
                     ? "存在错误"
-                    : inputs.Step6PendingCount > 0
+                    : inputs.Step5PendingCount > 0
                         ? "进行中"
                         : "已完成",
         _ => "待处理",
@@ -103,7 +104,7 @@ internal static class UnrealSyncWorkflowState
                         ? UnrealSyncWorkspaceState.Busy
                         : !inputs.HasDetectionRun
                             ? UnrealSyncWorkspaceState.NotDetected
-                            : inputs.Step35ItemCount == 0
+                            : inputs.SharedTreeItemCount == 0
                                 ? UnrealSyncWorkspaceState.NoChanges
                                 : UnrealSyncWorkspaceState.HasContent;
         }
@@ -131,13 +132,13 @@ internal static class UnrealSyncWorkflowState
 
         var itemCount = inputs.CurrentStep switch
         {
-            // 第一、二步的列表本身就是内容；五和**第 2 步**共用同一棵差异树。
+            // 第一、二步的列表本身就是内容；第四步和**第 2 步**共用同一棵差异树。
             // 第 2 步是合并后的「同步素材」，规整项和差异项都算它的内容，所以相加。
             1 => inputs.Step1ItemCount,
-            2 => inputs.Step2ItemCount + inputs.Step35ItemCount,
-            5 => inputs.Step35ItemCount,
-            4 => inputs.Step4ItemCount,
-            6 => inputs.Step6ItemCount,
+            2 => inputs.Step2ItemCount + inputs.SharedTreeItemCount,
+            4 => inputs.SharedTreeItemCount,
+            3 => inputs.Step3ItemCount,
+            5 => inputs.Step5ItemCount,
             _ => 0,
         };
 

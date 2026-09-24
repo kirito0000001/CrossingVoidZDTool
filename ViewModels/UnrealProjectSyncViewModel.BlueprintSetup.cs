@@ -7,11 +7,11 @@ using Microsoft.UI.Xaml;
 namespace CrossingVoidZDTool.ViewModels;
 
 /// <summary>
-/// 第六步「蓝图置入」的界面状态。
+/// 第五步「蓝图置入」的界面状态。
 ///
-/// 结构照搬第四步：一份扫描结果 + 每条字段的勾选，勾完再把选中的下发回去写。
+/// 结构照搬第三步：一份扫描结果 + 每条字段的勾选，勾完再把选中的下发回去写。
 /// 差别只在中栏按「对局设置 / 动作序列 / 一技能…」分组显示，
-/// 因为第六步的字段比第四步多得多，铺成一长条会读不下去。
+/// 因为第五步的字段比第三步多得多，铺成一长条会读不下去。
 /// </summary>
 internal sealed partial class UnrealProjectSyncViewModel
 {
@@ -19,10 +19,10 @@ internal sealed partial class UnrealProjectSyncViewModel
     private IReadOnlyList<UnrealBlueprintSetupGroup> _blueprintSetupGroups = [];
     public bool IsBlueprintSetupLoaded
     {
-        get => _stepLoads.IsLoaded(6);
+        get => _stepLoads.IsLoaded(5);
         private set
         {
-            if (_stepLoads.SetLoaded(6, value))
+            if (_stepLoads.SetLoaded(5, value))
             {
                 OnPropertyChanged(nameof(IsBlueprintSetupLoaded));
                 NotifyDerived(UnrealSyncDerivedNotifications.BlueprintSetupLoaded);
@@ -38,7 +38,7 @@ internal sealed partial class UnrealProjectSyncViewModel
     /// <summary>中栏按组渲染，组内才是逐字段的卡片。</summary>
     public IReadOnlyList<UnrealBlueprintSetupGroup> BlueprintSetupGroups => _blueprintSetupGroups;
 
-    public bool IsBlueprintSetupWorkspace => !IsEngineToToolbox && WorkflowStep == 6;
+    public bool IsBlueprintSetupWorkspace => !IsEngineToToolbox && WorkflowStep == 5;
 
     public Visibility BlueprintSetupWorkspaceVisibility =>
         IsBlueprintSetupWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
@@ -71,7 +71,7 @@ internal sealed partial class UnrealProjectSyncViewModel
         !_isApplyingBlueprintSetup &&
         IsWorkflowOperationIdle;
 
-    public string WorkflowStep6StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 6);
+    public string WorkflowStep5StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 5);
 
     public void SetBlueprintSetupResult(
         UnrealBlueprintSetupResult result,
@@ -101,7 +101,7 @@ internal sealed partial class UnrealProjectSyncViewModel
             ]
             : result.Items.ToList();
 
-        // 无差异的字段不进中栏：第六步一个角色就有六十多条，
+        // 无差异的字段不进中栏：第五步一个角色就有六十多条，
         // 全铺出来会把真正待处理的几条埋掉。统计数字仍然按全部算。
         foreach (var source in _lastBlueprintSetupItems.Where(item => item.Status != UnrealBlueprintSetupStatus.Unchanged))
         {
@@ -215,6 +215,6 @@ internal sealed partial class UnrealProjectSyncViewModel
         OnPropertyChanged(nameof(BlueprintSetupSelectedCount));
         OnPropertyChanged(nameof(CanApplyBlueprintSetup));
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
-        OnPropertyChanged(nameof(WorkflowStep6StatusText));
+        OnPropertyChanged(nameof(WorkflowStep5StatusText));
     }
 }

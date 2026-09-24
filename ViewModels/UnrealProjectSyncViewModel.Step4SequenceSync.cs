@@ -7,35 +7,35 @@ using Microsoft.UI.Xaml;
 namespace CrossingVoidZDTool.ViewModels;
 
 /// <summary>
-/// 第五步「序列同步」自己的那一块（一步一个文件；前四步见各自 partial）。
+/// 第四步「序列同步」自己的那一块（一步一个文件；前三步见各自 partial）。
 ///
-/// 第五步和前四步不一样：它**没有**一大坨私有集合。它的差异列表就住在
-/// <see cref="SelectionTreeRoots"/> —— 它和第三步共用同一个槽位（范围不同），
+/// 第四步和前几步不一样：它**没有**一大坨私有集合。它的差异列表就住在
+/// <see cref="SelectionTreeRoots"/> —— 它和第二步共用同一个槽位（范围不同），
 /// 靠 <c>_loadedPublishStep</c> 区分这棵树归谁。所以这个文件装三样东西：
 ///
 /// 1. 这一步的工作区开关与进入前的目录校验；
-/// 2. **「第五步要什么」的唯一口径**（导出范围 / 只看哪些模块 / 要不要比素材内容 /
-///    默认勾不勾 / 走哪个发布阶段）——以前这些判断以 `== 5`、`is 5 or 7` 的字面量
+/// 2. **「第四步要什么」的唯一口径**（导出范围 / 只看哪些模块 / 要不要比素材内容 /
+///    默认勾不勾 / 走哪个发布阶段）——以前这些判断以 `== 4`、`is 4 or 6` 的字面量
 ///    散在壳侧的检测与发布两条长方法里，改一处口径要翻两个文件；
-/// 3. 它自己的小缓存 `step5-sequence-sync.json`（序列差异 + 勾选）。
+/// 3. 它自己的小缓存 `step4-sequence-sync.json`（序列差异 + 勾选）。
 ///
-/// **第五步和第七步的关系**：第七步「特效同步」复用第五步这块界面，也要
+/// **第四步和第六步的关系**：第六步「特效同步」复用第四步这块界面，也要
 /// "序列帧那一套"导出（只是计划换成 `BuildEffectSyncPlan`）。所以下面凡是
-/// "要序列数据"的判断都写成 <c>5 or 7</c>，而"这就是第五步"写成 <c>== 5</c>，
+/// "要序列数据"的判断都写成 <c>4 or 6</c>，而"这就是第四步"写成 <c>== 4</c>，
 /// 两者不要混。
 /// </summary>
 internal sealed partial class UnrealProjectSyncViewModel
 {
-    // ── 工作区（第五步和第七步共用同一块界面）──────────────────────────────
+    // ── 工作区（第四步和第六步共用同一块界面）──────────────────────────────
 
-    public bool IsSequenceSynchronizationWorkspace => !IsEngineToToolbox && WorkflowStep is 5 or 7;
+    public bool IsSequenceSynchronizationWorkspace => !IsEngineToToolbox && WorkflowStep is 4 or 6;
 
     public Visibility SequenceSynchronizationDetailsVisibility => IsSequenceSynchronizationWorkspace
         ? Visibility.Visible
         : Visibility.Collapsed;
 
-    /// <summary>当前正好停在第五步（不含第七步）。壳侧要区分五/七时问这个。</summary>
-    public bool IsSequenceSyncStep => WorkflowStep == 5;
+    /// <summary>当前正好停在第四步（不含第六步）。壳侧要区分四/六时问这个。</summary>
+    public bool IsSequenceSyncStep => WorkflowStep == 4;
 
     /// <summary>
     /// 进这一步之前要校验的 Unreal 目录：序列那套和素材那套查的东西完全不同
@@ -57,8 +57,8 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     // ── 「这一步要什么」的唯一口径（按步号问，壳侧别再写字面量）─────────────
 
-    /// <summary>第五/七步都要"序列帧那一套"的导出范围。</summary>
-    public static bool UsesSequenceData(int step) => step is 5 or 7;
+    /// <summary>第四/六步都要"序列帧那一套"的导出范围。</summary>
+    public static bool UsesSequenceData(int step) => step is 4 or 6;
 
     /// <summary>这一步检测时只看哪些模块（别的模块各有自己的步骤）。</summary>
     public static UnrealBridgeModule[] DetectionModulesFor(int step) =>
@@ -77,15 +77,15 @@ internal sealed partial class UnrealProjectSyncViewModel
     /// 这一步要不要拿 Unreal 导出清单**校验资产类型**（蓝图 / WidgetBlueprint / MetaSoundSource…）。
     ///
     /// 素材那几档都要（第 1 步的「底层检测」也在这档里 —— 它查的就是蓝图类型），
-    /// 第五/七步不校验：它们看的是序列内容，不看资产类型。
+    /// 第四/六步不校验：它们看的是序列内容，不看资产类型。
     /// 以前这个开关散在几处默认参数里，第 1 步因此漏成了"不查"，
     /// 界面上只能显示占位串「等待 Unreal 类型复检」——现在按口径统一问这里。
     /// </summary>
     public static bool RequiresAssetTypesFor(int step) => !UsesSequenceData(step);
 
     /// <summary>
-    /// 第五步算出来的差异默认**不勾**（一条条序列要人确认过再同步），
-    /// 第三步默认勾上（素材那批通常整批同步）。
+    /// 第四步算出来的差异默认**不勾**（一条条序列要人确认过再同步），
+    /// 第二步默认勾上（素材那批通常整批同步）。
     /// </summary>
     public static bool SelectsPendingChangesByDefault(int step) => !UsesSequenceData(step);
 
@@ -103,10 +103,10 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     // ── 自己的缓存文件 ────────────────────────────────────────────────────
 
-    /// <summary>把当前这棵序列差异树 + 勾选写进第 5 步自己的缓存文件。</summary>
+    /// <summary>把当前这棵序列差异树 + 勾选写进第 4 步自己的缓存文件。</summary>
     internal bool SaveSequenceSyncCache(CharacterCard? character) =>
         character is not null &&
-        Step5SequenceSyncCache.Save(
+        Step4SequenceSyncCache.Save(
             character,
             _lastPublishChanges,
             GetSelectedStableIds(),
@@ -114,19 +114,19 @@ internal sealed partial class UnrealProjectSyncViewModel
             CurrentDetectionAlgorithmVersion);
 
     /// <summary>
-    /// 从一份"正要落盘的会话缓存快照"里，把第五步那一份抄进它自己的小文件。
+    /// 从一份"正要落盘的会话缓存快照"里，把第四步那一份抄进它自己的小文件。
     ///
-    /// 用同一份快照是有意的：两个文件里第五步的内容因此不会各说各话 ——
+    /// 用同一份快照是有意的：两个文件里第四步的内容因此不会各说各话 ——
     /// "界面上是新树、缓存里还是旧树"这类错就是两份来源各自演化来的。
-    /// 快照里的 <c>WorkflowStep</c> 不是 5（正在最后一步收尾）时什么都不写，
-    /// 那种时刻由 <c>SetLoadedPublishStep(5)</c> 那条路负责。
+    /// 快照里的 <c>WorkflowStep</c> 不是 4（正在最后一步收尾）时什么都不写，
+    /// 那种时刻由 <c>SetLoadedPublishStep(4)</c> 那条路负责。
     /// </summary>
     internal static bool SaveSequenceSyncCacheFromSnapshot(CharacterCard? character, UnrealSyncSessionCache cache) =>
         character is not null &&
-        cache.WorkflowStep == 5 &&
+        cache.WorkflowStep == 4 &&
         cache.IsPublishDetection &&
         cache.PublishChanges.Count > 0 &&
-        Step5SequenceSyncCache.Save(
+        Step4SequenceSyncCache.Save(
             character,
             cache.PublishChanges,
             cache.SelectedStableIds,
@@ -134,10 +134,10 @@ internal sealed partial class UnrealProjectSyncViewModel
             cache.DetectionAlgorithmVersion);
 
     /// <summary>
-    /// 把第 5 步自己的小缓存回填成差异树（内存里已经有一棵树时不覆盖）。
+    /// 把第 4 步自己的小缓存回填成差异树（内存里已经有一棵树时不覆盖）。
     /// 返回 true 表示确实用文件里的结果建好了树。
     ///
-    /// 建树的姿势和第三步/会话缓存那条路保持一致：先认领这棵树（`SetLoadedPublishStep(5)`），
+    /// 建树的姿势和第二步/会话缓存那条路保持一致：先认领这棵树（`SetLoadedPublishStep(4)`），
     /// 再按序列口径建树 + 恢复勾选，最后交给 <see cref="SetPublishSelectionTree"/>。
     /// </summary>
     internal bool TryApplySequenceSyncCache(CharacterCard? character)
@@ -147,7 +147,7 @@ internal sealed partial class UnrealProjectSyncViewModel
             return false;
         }
 
-        var document = Step5SequenceSyncCache.TryLoad(
+        var document = Step4SequenceSyncCache.TryLoad(
             character,
             character.Code,
             CurrentDetectionAlgorithmVersion);
@@ -157,21 +157,21 @@ internal sealed partial class UnrealProjectSyncViewModel
         }
 
         // 缓存里存的是整份序列差异（含 Unchanged）；过滤口径要和检测时一致，
-        // 否则会拿第三步的素材变更去建第五步的树。
+        // 否则会拿第二步的素材变更去建第四步的树。
         var changes = FilterPublishChanges(document.Changes).ToArray();
         if (changes.Length == 0)
         {
             return false;
         }
 
-        // 恢复期间必须屏蔽写盘：SetLoadedPublishStep(5) 会顺手把这一步的小缓存存一次，
+        // 恢复期间必须屏蔽写盘：SetLoadedPublishStep(4) 会顺手把这一步的小缓存存一次，
         // 而那一刻 _lastPublishChanges 还是上一次的（树还没建），存下去就是把好缓存
         // 覆盖成旧的。整段恢复跑完，下次真正检测时自然会重新写一份。
         var wasRestoring = _isRestoringSession;
         _isRestoringSession = true;
         try
         {
-            SetLoadedPublishStep(5);
+            SetLoadedPublishStep(4);
             var roots = UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
                 changes,
                 UnrealBridgePublishSupportPolicy.CanExecute,

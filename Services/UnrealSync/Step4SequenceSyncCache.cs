@@ -7,25 +7,25 @@ using System.Text.Json.Serialization;
 namespace CrossingVoidZDTool.Services;
 
 /// <summary>
-/// 第五步「序列同步」自己的缓存：一步一个文件，只装这一步的东西 ——
+/// 第四步「序列同步」自己的缓存：一步一个文件，只装这一步的东西 ——
 /// **这次算出来的序列差异列表 + 用户勾了哪些**。
 ///
-/// 落点：`&lt;角色&gt;/&lt;工具目录&gt;/UnrealSync/step5-sequence-sync.json`。
+/// 落点：`&lt;角色&gt;/&lt;工具目录&gt;/UnrealSync/step4-sequence-sync.json`。
 ///
-/// 和第三步那份（`step3` 的差异树）是两回事，虽然它们共用界面：
-/// 第三步看的是"素材"（图 / 声音），第五步看的是"序列帧"，
+/// 和第二步那份（`step3` 的差异树）是两回事，虽然它们共用界面：
+/// 第二步看的是"素材"（图 / 声音），第四步看的是"序列帧"，
 /// 同名的文件放一起下次就会有人拿错。
 ///
 /// `Changes` 直接存 <see cref="UnrealBridgeChange"/>：它已经是
 /// 整体会话缓存 `PublishChanges` 的元素类型，序列化是现成且无损的
 /// （ToolboxItem / UnrealItem 的哈希、路径都在里面），不需要再手搓一份镜像结构。
 /// </summary>
-internal static class Step5SequenceSyncCache
+internal static class Step4SequenceSyncCache
 {
     /// <summary>文件格式版本：加字段就抬一版，读到不认识的版本一律当没缓存。</summary>
     public const int CurrentVersion = 1;
 
-    public const string FileName = "step5-sequence-sync.json";
+    public const string FileName = "step4-sequence-sync.json";
 
     public static string GetFilePath(CharacterCard? character)
     {
@@ -47,7 +47,7 @@ internal static class Step5SequenceSyncCache
             return false;
         }
 
-        var document = new Step5SequenceSyncCacheDocument
+        var document = new Step4SequenceSyncCacheDocument
         {
             Version = CurrentVersion,
             CharacterCode = character.Code,
@@ -64,7 +64,7 @@ internal static class Step5SequenceSyncCache
                 path,
                 System.Text.Json.JsonSerializer.Serialize(
                     document,
-                    AppJsonSerializerContext.Default.Step5SequenceSyncCacheDocument));
+                    AppJsonSerializerContext.Default.Step4SequenceSyncCacheDocument));
             return true;
         }
         catch (Exception)
@@ -83,7 +83,7 @@ internal static class Step5SequenceSyncCache
     /// 旧版算出来的差异列表拿到新版界面上会显示成"删除 N 项 + 新增 N 项"，
     /// 宁可当没缓存重查一次。
     /// </summary>
-    public static Step5SequenceSyncCacheDocument? TryLoad(
+    public static Step4SequenceSyncCacheDocument? TryLoad(
         CharacterCard? character,
         string characterCode,
         int detectionAlgorithmVersion)
@@ -98,7 +98,7 @@ internal static class Step5SequenceSyncCache
         {
             var document = System.Text.Json.JsonSerializer.Deserialize(
                 File.ReadAllText(path),
-                AppJsonSerializerContext.Default.Step5SequenceSyncCacheDocument);
+                AppJsonSerializerContext.Default.Step4SequenceSyncCacheDocument);
             if (document is null ||
                 document.Version != CurrentVersion ||
                 document.DetectionAlgorithmVersion != detectionAlgorithmVersion)
@@ -117,8 +117,8 @@ internal static class Step5SequenceSyncCache
     }
 }
 
-/// <summary>第五步缓存的落盘形状。</summary>
-internal sealed record Step5SequenceSyncCacheDocument
+/// <summary>第四步缓存的落盘形状。</summary>
+internal sealed record Step4SequenceSyncCacheDocument
 {
     [JsonPropertyName("version")]
     public int Version { get; init; }

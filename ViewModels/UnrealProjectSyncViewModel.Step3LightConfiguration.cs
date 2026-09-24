@@ -8,7 +8,7 @@ using Microsoft.UI.Xaml;
 namespace CrossingVoidZDTool.ViewModels;
 
 /// <summary>
-/// 第四步「基础配置」自己的那一块（一步一个文件；前三步见各自 partial）。
+/// 第三步「基础配置」自己的那一块（一步一个文件；前三步见各自 partial）。
 ///
 /// 装的是这一步的**状态**：检测结果（待设置 / 无差异 / 错误）、选择情况、汇总文案、可见性。
 /// 跑检测、应用配置那些动作仍在 <c>MainWindow.UnrealSync.LightConfiguration.cs</c>（壳侧），
@@ -22,10 +22,10 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     public bool IsLightConfigurationLoaded
     {
-        get => _stepLoads.IsLoaded(4);
+        get => _stepLoads.IsLoaded(3);
         private set
         {
-            if (!_stepLoads.SetLoaded(4, value))
+            if (!_stepLoads.SetLoaded(3, value))
             {
                 return;
             }
@@ -43,7 +43,7 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     // ── 工作区可见性 ──────────────────────────────────────────────────────
 
-    public bool IsLightConfigurationWorkspace => !IsEngineToToolbox && WorkflowStep == 4;
+    public bool IsLightConfigurationWorkspace => !IsEngineToToolbox && WorkflowStep == 3;
 
     public Visibility LightConfigurationWorkspaceVisibility =>
         IsLightConfigurationWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
@@ -109,7 +109,7 @@ internal sealed partial class UnrealProjectSyncViewModel
                     GroupName = "基础配置",
                     DisplayName = "无法读取基础配置",
                     TargetField = "Unreal Python 执行结果",
-                    SourceSummary = "第四步配置协议",
+                    SourceSummary = "第三步配置协议",
                     Status = UnrealLightConfigurationStatus.Error,
                     ErrorMessage = result.ErrorMessage
                 }
@@ -140,17 +140,17 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     // ── 自己的缓存文件 ────────────────────────────────────────────────────
 
-    /// <summary>把当前检测结果写进第 4 步自己的缓存文件。</summary>
+    /// <summary>把当前检测结果写进第 3 步自己的缓存文件。</summary>
     internal bool SaveLightConfigurationCache(CharacterCard? character) =>
         character is not null &&
-        Step4LightConfigurationCache.Save(
+        Step3LightConfigurationCache.Save(
             character,
             _lastLightConfigurationItems,
             GetSelectedLightConfigurationIds(),
             _lightConfigurationResultMessage);
 
     /// <summary>
-    /// 把第 4 步自己的小缓存回填到界面（内存里已经有结果时不覆盖）。
+    /// 把第 3 步自己的小缓存回填到界面（内存里已经有结果时不覆盖）。
     ///
     /// 和整体缓存（`UnrealSyncSessionCache`）的区别：那份是所有步骤共用的一大坨，
     /// 步骤之间会互相影响；这份只装这一步的检测项与勾选，坏掉也只坏这一步。
@@ -162,7 +162,7 @@ internal sealed partial class UnrealProjectSyncViewModel
             return false;
         }
 
-        var document = Step4LightConfigurationCache.TryLoad(character, character.Code);
+        var document = Step3LightConfigurationCache.TryLoad(character, character.Code);
         if (document is null || document.Items.Length == 0)
         {
             return false;
@@ -251,7 +251,7 @@ internal sealed partial class UnrealProjectSyncViewModel
         OnPropertyChanged(nameof(LightConfigurationSelectedCount));
         OnPropertyChanged(nameof(CanApplyLightConfiguration));
         OnPropertyChanged(nameof(CanAdvanceWorkflow));
-        OnPropertyChanged(nameof(WorkflowStep4StatusText));
+        OnPropertyChanged(nameof(WorkflowStep3StatusText));
         NotifyWorkspaceStateChanged();
     }
 }

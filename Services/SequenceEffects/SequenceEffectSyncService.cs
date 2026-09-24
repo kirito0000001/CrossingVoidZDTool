@@ -108,7 +108,7 @@ internal static class SequenceEffectSyncService
     ///
     /// 差异树里没有特效层的行（它随动作同步），所以 Unreal 侧"这个动作目录下多出来的资产"
     /// 要按**命名**认出它们是特效、不是需要清理的历史资产 —— 否则同步完特效，
-    /// 第五步会立刻把它们列成"待删除"，一勾就删掉。
+    /// 第四步会立刻把它们列成"待删除"，一勾就删掉。
     /// </summary>
     public static bool IsEffectLayerAssetName(string? assetName)
     {
@@ -125,7 +125,7 @@ internal static class SequenceEffectSyncService
                name.EndsWith($"_{LayerSuffix}", StringComparison.OrdinalIgnoreCase) ||
                // Niagara 那一路（2026-09-23）：网格 sheet、SubUV 材质、以及系统复制出来的 emitter。
                // 少认一个，刚生成的资产下一轮就会被列成"待删除" —— 冒烟实测抓到过一次
-               // （`Click_Effect_Emitter` 出现在第五步的 DeleteCandidate 里）。
+               // （`Click_Effect_Emitter` 出现在第四步的 DeleteCandidate 里）。
                name.EndsWith($"_{LayerSuffix}_Sheet", StringComparison.OrdinalIgnoreCase) ||
                name.EndsWith($"_{LayerSuffix}_Material", StringComparison.OrdinalIgnoreCase) ||
                name.EndsWith($"_{LayerSuffix}_Emitter", StringComparison.OrdinalIgnoreCase);

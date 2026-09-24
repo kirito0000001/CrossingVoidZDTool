@@ -144,7 +144,7 @@ internal sealed class UnrealBridgeExecutorService
     /// 结果文件必须是这一轮写出来的，只判 <c>File.Exists</c> 会踩坑：
     /// 结果路径是固定的，而开跑前的清场删除会被 IO 异常吞掉；删不掉时留在那儿的
     /// 一定是上一次运行的结果，于是这一轮什么都没写出来，却拿着上一轮的条目清单
-    /// 当成功往下走——第六步展示的是上一轮的清单，第五步更糟：
+    /// 当成功往下走——第五步展示的是上一轮的清单，第四步更糟：
     /// succeededActionCodes 取自陈旧结果，等于把错的基线写进去。
     /// </summary>
     private static string? DescribeUnusableResult(

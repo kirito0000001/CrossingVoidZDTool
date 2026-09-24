@@ -1,4 +1,4 @@
-"""第六步《蓝图置入》的比较与纠偏逻辑自检。
+"""第五步《蓝图置入》的比较与纠偏逻辑自检。
 
     python Tools/UnrealBridge/tests/check_blueprint_setup.py
 
@@ -94,7 +94,7 @@ r.add("bp.skill.SkillSlot3.Icon", "SkillSlot3", "技能图标", "/bp", "SkillSlo
 check("缺资产 = 错误态", STATUS_ERROR, r.items[0]["status"])
 check("错误里点名缺的资产", True,
       "Misaka-SkillIcon-4" in r.items[0]["errorMessage"])
-check("错误里指出该跑第三步", True, "第三步" in r.items[0]["errorMessage"])
+check("错误里指出该跑第二步", True, "第二步" in r.items[0]["errorMessage"])
 
 print("4) 资产在，就正常判待写入")
 r = Report()

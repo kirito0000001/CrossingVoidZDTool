@@ -22,7 +22,7 @@ internal readonly record struct RuntimeLogScope(string RunId, int Step)
 ///
 /// 以前这三样都散在 <c>MainWindow.Logging.cs</c> 里现拼字符串：面板行拼一次、
 /// 文件行再拼一次（还各自嵌了一遍 <c>[HH:mm:ss]</c>），而「这是哪一步、哪一次」
-/// 干脆没有——第三步和第五步共用 <c>[Sync Execution]</c> 这种 tag，
+/// 干脆没有——第二步和第四步共用 <c>[Sync Execution]</c> 这种 tag，
 /// 事后翻日志分不出谁是谁。
 /// </summary>
 internal static class RuntimeLogFormat

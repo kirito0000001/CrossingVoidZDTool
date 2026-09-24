@@ -6,12 +6,12 @@ using Microsoft.UI.Xaml.Controls;
 namespace CrossingVoidZDTool
 {
     /// <summary>
-    /// 第七步「特效同步」的壳侧接线。
+    /// 第六步「特效同步」的壳侧接线。
     ///
-    /// 这一步和第五步最大的不同：**它不需要 Unreal 的全量导出**。
+    /// 这一步和第四步最大的不同：**它不需要 Unreal 的全量导出**。
     /// 特效该有几张、网格几×几、哪几格是空的，全部来自工作区的特效帧目录；
     /// 所以这一步只做两件本地的事 —— 打网格 sheet、建特效计划 ——
-    /// 不会像第五步那样把整条序列的帧从 Unreal 打开一遍（用户明确要求省掉那一步）。
+    /// 不会像第四步那样把整条序列的帧从 Unreal 打开一遍（用户明确要求省掉那一步）。
     ///
     /// 真正写进 Unreal 的动作仍然走同一条发布链路（见 <c>UnrealSyncPublishController</c>）。
     /// </summary>

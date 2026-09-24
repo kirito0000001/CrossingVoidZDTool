@@ -102,7 +102,7 @@ internal interface ISequenceFramesCommandHost
     /// <summary>「导出底板」：按动作帧率的倍数逐帧导出 PNG（给特效绘制对照用）。</summary>
     Task ExportBasePlatesAsync();
 
-    // 特效层（和动作走同一条链路：导入 → 两层预览 → 并进第五步同步）。
+    // 特效层（和动作走同一条链路：导入 → 两层预览 → 并进第四步同步）。
     /// <summary>「导入特效帧 → 从底板 PSD 读回」：读导出底板那份多图层 PSD，按图层顺序当帧。</summary>
     Task ImportEffectFramesFromPsdAsync();
 

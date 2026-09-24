@@ -126,34 +126,33 @@ internal sealed partial class UnrealProjectSyncViewModel
         // 开关影响，一勾就会把状态翻成"无差异"，那是界面开关不该有的副作用。
         Step2ItemCount: NormalizationItems.Count(item => !item.IsAlreadyNormalized),
         Step3Loaded: _stepLoads.IsLoaded(3),
-        Step5Loaded: _stepLoads.IsLoaded(5),
-        Step35ItemCount: SelectionTreeRoots.Count,
-        Step4Loaded: IsLightConfigurationLoaded,
-        Step4ItemCount: LightConfigurationItems.Count,
-        Step4ErrorCount: LightConfigurationErrorCount,
-        Step4PendingCount: LightConfigurationPendingCount,
-        Step6Loaded: IsBlueprintSetupLoaded,
-        Step6ItemCount: BlueprintSetupItems.Count,
-        Step6ErrorCount: BlueprintSetupErrorCount,
-        Step6PendingCount: BlueprintSetupPendingCount,
+        Step4Loaded: _stepLoads.IsLoaded(4),
+        SharedTreeItemCount: SelectionTreeRoots.Count,
+        Step3ItemCount: LightConfigurationItems.Count,
+        Step3ErrorCount: LightConfigurationErrorCount,
+        Step3PendingCount: LightConfigurationPendingCount,
+        Step5Loaded: IsBlueprintSetupLoaded,
+        Step5ItemCount: BlueprintSetupItems.Count,
+        Step5ErrorCount: BlueprintSetupErrorCount,
+        Step5PendingCount: BlueprintSetupPendingCount,
         HasDetectionRun: HasImportDetection);
 
     /// <summary>这一步在界面上的名字，占位文案里用。</summary>
     public string WorkflowStepName => IsEngineToToolbox ? "导入差异" : WorkflowStepNameFor(WorkflowStep);
 
     /// <summary>
-    /// 任意一步的名字。日志的步骤标题行要按步号取（写「离开第三步」时，
-    /// 当前步已经是第四步了），所以不能只看 <see cref="WorkflowStepName"/>。
+    /// 任意一步的名字。日志的步骤标题行要按步号取（写「离开第二步」时，
+    /// 当前步已经是第三步了），所以不能只看 <see cref="WorkflowStepName"/>。
     /// </summary>
     public string WorkflowStepNameFor(int step) => step switch
     {
         1 => "底层检测",
-        // 第 2 步 = 合并后的「同步素材」（规整 + 素材同步）。第 3 步的号**放空**，所以没有 3。
+        // 第 2 步 = 合并后的「同步素材」（规整 + 素材同步）。
         2 => "同步素材",
-        4 => "基础配置",
-        5 => "序列同步",
-        6 => "蓝图置入",
-        7 => "特效同步",
+        3 => "基础配置",
+        4 => "序列同步",
+        5 => "蓝图置入",
+        6 => "特效同步",
         _ => "同步结果",
     };
 
@@ -165,9 +164,9 @@ internal sealed partial class UnrealProjectSyncViewModel
     {
         1 => FoundationSummaryText,
         2 => NormalizationSummaryText,
-        2 or 5 => DetectionResultSummaryText,
-        4 => LightConfigurationSummaryText,
-        6 => BlueprintSetupSummaryText,
+        2 or 4 => DetectionResultSummaryText,
+        3 => LightConfigurationSummaryText,
+        5 => BlueprintSetupSummaryText,
         _ => string.Empty,
     };
 
@@ -213,9 +212,9 @@ internal sealed partial class UnrealProjectSyncViewModel
                 2 => HasVisibleNormalizationItems
                     ? $"{NormalizationSummaryText}　{DetectionResultSummaryText}"
                     : DetectionResultSummaryText,
-                5 => DetectionResultSummaryText,
-                4 => LightConfigurationSummaryText,
-                6 => BlueprintSetupSummaryText,
+                4 => DetectionResultSummaryText,
+                3 => LightConfigurationSummaryText,
+                5 => BlueprintSetupSummaryText,
                 _ => string.Empty,
             };
         }

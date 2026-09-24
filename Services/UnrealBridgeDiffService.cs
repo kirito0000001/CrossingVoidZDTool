@@ -784,7 +784,7 @@ internal sealed class UnrealBridgeDiffService
                         : sourceChanged
                             ? UnrealBridgeChangeKind.Updated
                             // 有基线条目、两侧哈希也都没变，但资产还停在历史命名上：
-                            // 仍然要判成改名，否则该改名的帧永远不会出现在第五步列表里。
+                            // 仍然要判成改名，否则该改名的帧永远不会出现在第四步列表里。
                             : sequenceNeedsCanonicalRename
                                 ? UnrealBridgeChangeKind.Renamed
                                 : UnrealBridgeChangeKind.Unchanged;
@@ -796,7 +796,7 @@ internal sealed class UnrealBridgeDiffService
         // 这里以前还要求「整个基线文件为空」，只覆盖得了「第一次同步」。
         // 于是把 Unreal 工程换个盘符之后，旧基线按项目路径散列存在另一个文件里，
         // 新路径的基线只有序列帧那几十条；素材项因为查不到记录又不满足这个条件，
-        // 全部被判成冲突——而冲突不能自动执行，第三步就此卡死，列表再也归不了零。
+        // 全部被判成冲突——而冲突不能自动执行，第二步就此卡死，列表再也归不了零。
         else if (isMigrationSafePair)
         {
             kind = UnrealBridgeChangeKind.Unchanged;

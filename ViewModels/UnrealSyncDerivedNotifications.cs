@@ -31,7 +31,7 @@ internal static class UnrealSyncDerivedNotifications
     [
         nameof(UnrealProjectSyncViewModel.WorkflowStep1StatusText),
         nameof(UnrealProjectSyncViewModel.WorkflowStep2StatusText),
-        nameof(UnrealProjectSyncViewModel.WorkflowStep2StatusText),
+        nameof(UnrealProjectSyncViewModel.WorkflowStep3StatusText),
         nameof(UnrealProjectSyncViewModel.WorkflowStep4StatusText),
         nameof(UnrealProjectSyncViewModel.WorkflowStep5StatusText),
         nameof(UnrealProjectSyncViewModel.WorkflowStep6StatusText),
@@ -70,12 +70,12 @@ internal static class UnrealSyncDerivedNotifications
         nameof(UnrealProjectSyncViewModel.WorkflowNextButtonEnabled),
     ];
 
-    /// <summary>差异树有没有跑过（第三、五步共用）。</summary>
+    /// <summary>差异树有没有跑过（第二、四步共用）。</summary>
     public static readonly string[] ImportDetection =
     [
         nameof(UnrealProjectSyncViewModel.HasContentDetection),
+        nameof(UnrealProjectSyncViewModel.WorkflowStep4StatusText),
         nameof(UnrealProjectSyncViewModel.WorkflowStep5StatusText),
-        nameof(UnrealProjectSyncViewModel.WorkflowStep6StatusText),
         nameof(UnrealProjectSyncViewModel.CanAdvanceWorkflow),
         nameof(UnrealProjectSyncViewModel.HasNoPublishChanges),
         nameof(UnrealProjectSyncViewModel.CanStartPublish),
@@ -93,22 +93,22 @@ internal static class UnrealSyncDerivedNotifications
         nameof(UnrealProjectSyncViewModel.CanApplyBlueprintSetup),
     ];
 
-    /// <summary>第四步「基础配置」加载完成。</summary>
+    /// <summary>第三步「基础配置」加载完成。</summary>
     public static readonly string[] LightConfigurationLoaded =
     [
         nameof(UnrealProjectSyncViewModel.LightConfigurationSummaryText),
-        nameof(UnrealProjectSyncViewModel.WorkflowStep4StatusText),
+        nameof(UnrealProjectSyncViewModel.WorkflowStep3StatusText),
         nameof(UnrealProjectSyncViewModel.CanAdvanceWorkflow),
         nameof(UnrealProjectSyncViewModel.WorkflowNextButtonEnabled),
         nameof(UnrealProjectSyncViewModel.CanApplyLightConfiguration),
     ];
 
-    /// <summary>第六步「蓝图置入」加载完成。</summary>
+    /// <summary>第五步「蓝图置入」加载完成。</summary>
     public static readonly string[] BlueprintSetupLoaded =
     [
         nameof(UnrealProjectSyncViewModel.BlueprintSetupSummaryText),
         nameof(UnrealProjectSyncViewModel.CanApplyBlueprintSetup),
-        nameof(UnrealProjectSyncViewModel.WorkflowStep6StatusText),
+        nameof(UnrealProjectSyncViewModel.WorkflowStep5StatusText),
     ];
 
     /// <summary>上面所有清单的并集。守卫用例拿它比对反射出来的派生属性。</summary>

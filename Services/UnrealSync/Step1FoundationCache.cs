@@ -14,7 +14,7 @@ namespace CrossingVoidZDTool.Services;
 ///
 /// 为什么不用那份整体缓存（`UnrealSyncSessionCache` / `&lt;项目键&gt;.json`）：
 /// 那份是所有步骤共用的一大坨（实测每份 7 MB，装的是整棵差异树），步骤之间会互相影响 ——
-/// `_loadedPublishStep` 默认写成 3、发布阶段被持久化后劫持第三步的过滤，都是这么来的。
+/// `_loadedPublishStep` 默认写成 3、发布阶段被持久化后劫持第二步的过滤，都是这么来的。
 /// 第 1 步真正需要的其实只有"这十几条检查项 + 什么时候查的"，几十 KB 就够。
 /// </summary>
 internal static class Step1FoundationCache
@@ -121,7 +121,7 @@ internal sealed record Step1FoundationCacheDocument
     [JsonPropertyName("checkedAtUtc")]
     public DateTimeOffset CheckedAtUtc { get; init; }
 
-    /// <summary>这次检查是不是带"资产类型复检"（第三步会用到更严格的那一档）。</summary>
+    /// <summary>这次检查是不是带"资产类型复检"（第二步会用到更严格的那一档）。</summary>
     [JsonPropertyName("requireAssetTypes")]
     public bool RequireAssetTypes { get; init; }
 

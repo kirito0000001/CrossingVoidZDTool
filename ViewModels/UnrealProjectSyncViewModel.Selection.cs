@@ -10,7 +10,7 @@ namespace CrossingVoidZDTool.ViewModels;
 /// 右栏的选择操作：全选、全不选、反选。
 ///
 /// 六步的勾选目标不一样——第三、五步是差异树，第四、六步是字段列表，
-/// 第一、二步压根没有勾选。以前每步各写一套（其实是只有第六步写了），
+/// 第一、二步压根没有勾选。以前每步各写一套（其实是只有第五步写了），
 /// 这里统一成一组按钮，按当前步骤分派。
 /// </summary>
 internal sealed partial class UnrealProjectSyncViewModel
@@ -26,21 +26,21 @@ internal sealed partial class UnrealProjectSyncViewModel
     /// <summary>可勾选的条目数。差异树只算叶子里真正能执行的那些。</summary>
     public int SelectableStepItemCount => WorkflowStep switch
     {
-        2 or 5 => SelectionTreeRoots
+        2 or 4 => SelectionTreeRoots
             .SelectMany(root => root.Children)
             .Count(item => item.IsSelectable && item.Change is not null && CanExecutePublishChange(item.Change)),
-        4 => LightConfigurationItems.Count(item => item.IsSelectable),
-        6 => BlueprintSetupItems.Count(item => item.IsSelectable),
+        3 => LightConfigurationItems.Count(item => item.IsSelectable),
+        5 => BlueprintSetupItems.Count(item => item.IsSelectable),
         _ => 0,
     };
 
     public int SelectedStepItemCount => WorkflowStep switch
     {
-        2 or 5 => SelectionTreeRoots
+        2 or 4 => SelectionTreeRoots
             .SelectMany(root => root.Children)
             .Count(item => item.IsChecked == true && item.Change is not null && CanExecutePublishChange(item.Change)),
-        4 => LightConfigurationItems.Count(item => item.IsSelected),
-        6 => BlueprintSetupItems.Count(item => item.IsSelected),
+        3 => LightConfigurationItems.Count(item => item.IsSelected),
+        5 => BlueprintSetupItems.Count(item => item.IsSelected),
         _ => 0,
     };
 
@@ -104,7 +104,7 @@ internal sealed partial class UnrealProjectSyncViewModel
         switch (WorkflowStep)
         {
             case 2:
-            case 5:
+            case 4:
             {
                 using var scope = BeginBulkSelectionUpdate();
                 foreach (var item in SelectionTreeRoots.SelectMany(root => root.Children)
@@ -117,7 +117,7 @@ internal sealed partial class UnrealProjectSyncViewModel
 
                 break;
             }
-            case 4:
+            case 3:
             {
                 foreach (var item in LightConfigurationItems.Where(item => item.IsSelectable))
                 {
@@ -126,7 +126,7 @@ internal sealed partial class UnrealProjectSyncViewModel
 
                 break;
             }
-            case 6:
+            case 5:
             {
                 _isBulkBlueprintSetupSelection = true;
                 try
@@ -178,18 +178,18 @@ internal sealed partial class UnrealProjectSyncViewModel
                     .Where(item => item.Change is not null)
                     .Select(item => $"- [{item.Change!.Kind}] {item.DisplayName}"));
                 break;
-            case 5:
+            case 4:
                 lines.Add(DetectionResultSummaryText);
                 lines.AddRange(SelectionTreeRoots.SelectMany(root => root.Children)
                     .Where(item => item.Change is not null)
                     .Select(item => $"- [{item.Change!.Kind}] {item.DisplayName}"));
                 break;
-            case 4:
+            case 3:
                 lines.Add(LightConfigurationSummaryText);
                 lines.AddRange(LightConfigurationItems.Select(item =>
                     $"- [{item.StatusText}] {item.GroupName} · {item.DisplayName}\n    现在：{item.Source.CurrentSummary}\n    目标：{item.Source.TargetSummary}"));
                 break;
-            case 6:
+            case 5:
                 lines.Add(BlueprintSetupSummaryText);
                 lines.AddRange(BlueprintSetupItems.Select(item =>
                     $"- [{item.StatusText}] {item.GroupName} · {item.DisplayName}\n    现在：{item.Source.CurrentSummary}\n    目标：{item.Source.TargetSummary}"));
@@ -207,14 +207,14 @@ internal sealed partial class UnrealProjectSyncViewModel
     {
         var selected = WorkflowStep switch
         {
-            2 or 5 => SelectionTreeRoots.SelectMany(root => root.Children)
+            2 or 4 => SelectionTreeRoots.SelectMany(root => root.Children)
                 .Where(item => item.IsChecked == true && item.Change is not null)
                 .Select(item => item.Change!.UnrealItem?.SourceObjectPath ??
                     item.Change!.ToolboxItem?.SourceObjectPath ?? string.Empty),
-            4 => LightConfigurationItems
+            3 => LightConfigurationItems
                 .Where(item => item.IsSelected)
                 .Select(item => item.Source.TargetPath),
-            6 => BlueprintSetupItems
+            5 => BlueprintSetupItems
                 .Where(item => item.IsSelected)
                 .Select(item => item.Source.TargetPath),
             _ => [],
@@ -232,8 +232,8 @@ internal sealed partial class UnrealProjectSyncViewModel
 
         var all = WorkflowStep switch
         {
-            4 => LightConfigurationItems.Select(item => item.Source.TargetPath),
-            6 => BlueprintSetupItems.Select(item => item.Source.TargetPath),
+            3 => LightConfigurationItems.Select(item => item.Source.TargetPath),
+            5 => BlueprintSetupItems.Select(item => item.Source.TargetPath),
             _ => Enumerable.Empty<string>(),
         };
         return all

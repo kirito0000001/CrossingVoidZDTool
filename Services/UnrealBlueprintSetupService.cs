@@ -12,7 +12,7 @@ using System.Threading.Tasks;
 namespace CrossingVoidZDTool.Services;
 
 /// <summary>
-/// 第六步「蓝图置入」：把工具箱这边的角色数据整理成 Unreal 侧的目标值，
+/// 第五步「蓝图置入」：把工具箱这边的角色数据整理成 Unreal 侧的目标值，
 /// 交给桥接脚本扫描比对，再按勾选写回。
 ///
 /// 目标值全部由工具箱推导，Unreal 只负责比对和写入——这样「差异」永远是
@@ -64,7 +64,7 @@ internal sealed class UnrealBlueprintSetupService
         };
 
         // 数值解析不了就在这里停住，绝不能带着「解析失败 = 0」往下走：
-        // 第六步是把这些值真正写进角色蓝图和数据表的最后一步，一旦归 0，
+        // 第五步是把这些值真正写进角色蓝图和数据表的最后一步，一旦归 0，
         // Unreal 侧比对看到的就是「工具箱说这里本来就该是 0」，于是不算差异、
         // 界面一路显示成功，而技能倍率和守备数值其实已经被清空。
         // 这个异常由 ExecuteUnrealBlueprintSetupAsync 外层的 catch 接住，
@@ -114,7 +114,7 @@ internal sealed class UnrealBlueprintSetupService
     /// <summary>
     /// 工具箱里的图片同步到 Unreal 后固定落在
     /// <c>/Game/AssetMaterial/ImageS/CharaterS/&lt;角色&gt;/&lt;文件名&gt;</c>，
-    /// 与第三步发布使用的是同一条规则。
+    /// 与第二步发布使用的是同一条规则。
     /// </summary>
     public static string BuildImageObjectPath(string characterCode, string filePath)
     {
@@ -143,7 +143,7 @@ internal sealed class UnrealBlueprintSetupService
 
     /// <summary>
     /// 角色蓝图上的序列数组。代号表里 <c>BlueprintSequenceArrayProperty</c> 非空的动作
-    /// 才由蓝图引用，其余靠 AnimMaps 绑定，不归第六步管。
+    /// 才由蓝图引用，其余靠 AnimMaps 绑定，不归第五步管。
     /// </summary>
     public static List<UnrealBlueprintSequenceBinding> BuildSequenceBindings(string characterCode, int formCount)
     {
@@ -438,7 +438,7 @@ internal sealed class UnrealBlueprintSetupService
 
     /// <summary>
     /// 结果只认结果文件，不看退出码：编辑器只要在任何地方记过一条 error
-    /// （比如项目里某个无关蓝图坏了）退出码就非零，第五步已经被这件事坑过。
+    /// （比如项目里某个无关蓝图坏了）退出码就非零，第四步已经被这件事坑过。
     /// </summary>
     public async Task<UnrealBlueprintSetupResult> ExecuteAsync(
         ProcessStartInfo startInfo,

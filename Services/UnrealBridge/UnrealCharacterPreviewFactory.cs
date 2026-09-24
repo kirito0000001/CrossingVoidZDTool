@@ -20,7 +20,7 @@ namespace CrossingVoidZDTool.Services;
 /// 只有磁盘知道，清单本身答不上来。
 ///
 /// 区域敏感的格式化（<see cref="FormatDouble"/> 及其邻居）尤其属于这里：它写出的文本会存进角色
-/// JSON，再由第六步按不变区域解析回来，两头区域不一致就静默归零。放在这个类里，回归可以切到
+/// JSON，再由第五步按不变区域解析回来，两头区域不一致就静默归零。放在这个类里，回归可以切到
 /// 逗号小数点的区域直接调它验往返，不必再去数源码里有没有写 InvariantCulture。
 /// </summary>
 internal static class UnrealCharacterPreviewFactory
@@ -359,7 +359,7 @@ internal static class UnrealCharacterPreviewFactory
             GetTextAt(slot.Names, index),
             GetTextAt(slot.SkillNames, index),
             GetTextAt(slot.Descriptions, index),
-            // 这三个整数和 FormatDouble 走的是同一条往返路径（回填文本框 -> 第六步按
+            // 这三个整数和 FormatDouble 走的是同一条往返路径（回填文本框 -> 第五步按
             // 不变区域解析回来），所以格式化侧同样要钉死区域，不能跟着系统区域走。
             GetAt(slot.PointCosts, index).ToString(CultureInfo.InvariantCulture),
             GetAt(slot.AttackCapacities, index).ToString(CultureInfo.InvariantCulture),
@@ -718,13 +718,13 @@ internal static class UnrealCharacterPreviewFactory
     }
 
     /// <summary>
-    /// 这些文本会回填进技能编辑器，第六步再按不变区域解析回 double，所以格式化侧
-    /// 必须是同一个区域。以前跟着当前区域走：de/fr/ru 写出来的是「1,5」，第六步解析不回来，
+    /// 这些文本会回填进技能编辑器，第五步再按不变区域解析回 double，所以格式化侧
+    /// 必须是同一个区域。以前跟着当前区域走：de/fr/ru 写出来的是「1,5」，第五步解析不回来，
     /// 而它当时是静默归 0 的——技能倍率、守备数值被无声清零，界面却一路显示成功。
     /// </summary>
     /// <summary>
     /// 数值回填文本框时的格式化。必须用不变区域：这个字符串会存进角色 JSON，
-    /// 再由第六步按不变区域解析回来。以前这里用当前区域，于是在小数点是逗号的
+    /// 再由第五步按不变区域解析回来。以前这里用当前区域，于是在小数点是逗号的
     /// 区域（de/fr/ru）写出 "1,5"，解析读不了，旧代码把它静默当成 0。
     ///
     /// 开成 internal 只为了能测这条往返——回归里那条「逗号小数点区域仍能往返」

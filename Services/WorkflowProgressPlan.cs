@@ -65,7 +65,7 @@ internal sealed class WorkflowProgressPlan
     public string Caption(string phase, string title) =>
         PhaseCount <= 1 ? title : $"阶段 {PhaseNumber(phase)}/{PhaseCount} · {title}";
 
-    /// <summary>第五步序列同步：同步前导出 → （备份）→ 桥接执行 → 复扫导出。</summary>
+    /// <summary>第四步序列同步：同步前导出 → （备份）→ 桥接执行 → 复扫导出。</summary>
     public static WorkflowProgressPlan ForSequenceSync(bool includesBackup)
     {
         var phases = new List<(string, double)> { (PreflightExport, 15d) };
@@ -85,14 +85,14 @@ internal sealed class WorkflowProgressPlan
         new([(PreflightExport, 100d)]);
 
     /// <summary>
-    /// 第四步和第六步的扫描：一次 Unreal 往返，没有别的重活。
+    /// 第三步和第五步的扫描：一次 Unreal 往返，没有别的重活。
     /// 单阶段也走这套，是为了「阶段 N/M · 已用时」的显示对所有步骤一致。
     /// </summary>
     public static WorkflowProgressPlan ForStepScan() =>
         new([(Scan, 100d)]);
 
     /// <summary>
-    /// 第四步和第六步的写入：（备份）→ 写入 → 复查。
+    /// 第三步和第五步的写入：（备份）→ 写入 → 复查。
     /// 复查是脚本写完之后顺手重扫的那一遍，占比不大但确实要等。
     /// </summary>
     public static WorkflowProgressPlan ForStepApply(bool includesBackup)

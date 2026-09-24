@@ -53,7 +53,7 @@ internal sealed class UnrealBridgeSemanticSnapshotService
 
         // 挂在角色动画源上、却不属于任何规范动作的序列。
         // 工具箱侧永远不会产出这些条目，所以它们只会以「删除候选」的形式出现。
-        // 注意：第五步只把它们从动画源上解绑，不删资产——串错位置的序列往往仍是有用素材。
+        // 注意：第四步只把它们从动画源上解绑，不删资产——串错位置的序列往往仍是有用素材。
         var orphanSequences = candidate.SequenceFramesPreview.OrphanSequences;
         if (orphanSequences.Count > 0)
         {

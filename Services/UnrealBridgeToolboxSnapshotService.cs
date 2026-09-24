@@ -179,7 +179,7 @@ internal sealed class UnrealBridgeToolboxSnapshotService
         foreach (var section in sections)
         {
             // 动作与帧的稳定 ID 必须和 Unreal 语义快照用同一套规则生成，
-            // 否则两侧永远配不上对，第五步只能看到“全部新增 + 全部待删除”。
+            // 否则两侧永远配不上对，第四步只能看到“全部新增 + 全部待删除”。
             var actionId = SequenceFrameIdentity.BuildActionStableId(section.Action.Code);
             var fps = service.GetActionFps(character, section.Action);
             var orderedForPayload = section.Frames.OrderBy(frame => frame.Index).ToArray();

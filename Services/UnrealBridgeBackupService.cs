@@ -31,7 +31,7 @@ internal static class UnrealBridgeBackupPolicy
     /// 同步前备不备份。整体设置是唯一开关：关掉就一律不备份。
     ///
     /// 以前只要计划里含更新/改名/删除就会绕过设置强制备份一次，
-    /// 而第五步必然带删除项，等于这个开关对第五步完全无效——
+    /// 而第四步必然带删除项，等于这个开关对第四步完全无效——
     /// 关着开关点同步，照样先压一份几个 G 的工程出来。
     /// </summary>
     public static UnrealBridgeBackupDecision Decide(

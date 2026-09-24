@@ -18,7 +18,7 @@ using WinRT.Interop;
 namespace CrossingVoidZDTool
 {
     /// <summary>
-    /// 第三步「同步素材」和第五步「序列同步」。两步共用同一条差异检测与发布链路，
+    /// 第二步「同步素材」和第四步「序列同步」。两步共用同一条差异检测与发布链路，
     /// 只是导出范围、默认勾选和执行阶段不同。
     /// </summary>
     public sealed partial class MainWindow : IUnrealSyncPublishHost
@@ -158,13 +158,13 @@ namespace CrossingVoidZDTool
                 var selectionBeforeDetection = _applicationViewModel.UnrealProjectSync.GetSelectedGroupAndLeafStableIds();
                 AppendLog(LogKind.Info, $"[Refresh Selection] before={selectionBeforeDetection.Count} ids={string.Join(",", selectionBeforeDetection.Take(12))}");
                 // 校验哪套目录、导哪些数据、默认勾不勾，口径都在
-                // UnrealProjectSyncViewModel.Step5SequenceSync.cs 里，别在这儿再写一遍 == 5。
+                // UnrealProjectSyncViewModel.Step4SequenceSync.cs 里，别在这儿再写一遍 == 4。
                 _applicationViewModel.UnrealProjectSync.ValidateFoldersForStep(
                     _workflowStepAfterPublishDetection,
                     _applicationViewModel.UnrealProjectSync.ProjectPath,
                     character.Code);
                 ShowGlobalProgress("检测同步差异", character.Code);
-                // 第七步和第五步共用同一个导出范围（都要序列帧那一套数据），只是计划不同。
+                // 第六步和第四步共用同一个导出范围（都要序列帧那一套数据），只是计划不同。
                 var detectionExportScope = UnrealProjectSyncViewModel.UsesSequenceData(
                     _applicationViewModel.UnrealProjectSync.WorkflowStep)
                     || UnrealProjectSyncViewModel.UsesSequenceData(_workflowStepAfterPublishDetection)
@@ -216,7 +216,7 @@ namespace CrossingVoidZDTool
                 // 把发布阶段拨到这一步该在的地方。
                 // 不拨的话，会话里残留的"序列动画轨道"会让 FilterPublishChanges 把素材变更整批丢掉 ——
                 // 界面就变成"共检查 0 项、无差异 0 项"（2026-09-24 实测）。
-                if (_workflowStepAfterPublishDetection is 2 or 5)
+                if (_workflowStepAfterPublishDetection is 2 or 4)
                 {
                     var stageForStep = UnrealProjectSyncViewModel.PublishStageFor(_workflowStepAfterPublishDetection);
                     _applicationViewModel.UnrealProjectSync.SelectedPublishStage =
@@ -258,30 +258,30 @@ namespace CrossingVoidZDTool
                 CompleteGlobalProgress("差异检测完成", $"发现 {changedCount} 项变化；冲突和重定向项未默认勾选。");
                 var targetWorkflowStep = _workflowStepAfterPublishDetection;
                 _workflowStepAfterPublishDetection = 0;
-                // 记下这棵差异树属于哪一步：第三步和第五步共用同一棵树、范围不同，
+                // 记下这棵差异树属于哪一步：第二步和第四步共用同一棵树、范围不同，
                 // 不区分的话回到另一步会误以为已经检测过而直接复用。
                 //
-                // **不属于 2/5/7 的检测必须把归属清成 0，绝不能默认写成 2** ——
-                // 以前这里写的是"不是 3/5 就记成 3"，于是第四步的预检跑完，第三步会误以为
+                // **不属于 2/4/6 的检测必须把归属清成 0，绝不能默认写成 2** ——
+                // 以前这里写的是"不是 3/5 就记成 3"，于是第三步的预检跑完，第二步会误以为
                 // "我有缓存"，直接复用一个跟它无关（常常是空）的树，界面显示成
                 // "共检查 0 项、无差异 0 项"，把真正该报的新增（幻形立绘 #2 / 失败语音 #1）吞掉。
                 _applicationViewModel.UnrealProjectSync.SetLoadedPublishStep(
-                    targetWorkflowStep is 2 or 5 or 7 ? targetWorkflowStep : 0);
+                    targetWorkflowStep is 2 or 4 or 6 ? targetWorkflowStep : 0);
                 // 第 2 步 = 合并后的「同步素材」（规整 + 素材同步）。
-                // 旧的第 3 步并进它了、号放空，所以这里不再有第 3 支。
+                // 旧的第 3 步（「同步素材」）并进它了，所以这里不再有那一支。
                 if (targetWorkflowStep == 2)
                 {
                     _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(2);
                 }
-                else if (targetWorkflowStep == 5)
+                else if (targetWorkflowStep == 4)
                 {
-                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(5);
+                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(4);
                 }
-                else if (targetWorkflowStep == 7)
+                else if (targetWorkflowStep == 6)
                 {
-                    // 第七步「特效同步」：和第五步共用这套检测/发布链路，只是计划来自
+                    // 第六步「特效同步」：和第四步共用这套检测/发布链路，只是计划来自
                     // BuildEffectSyncPlan（只含特效项）。步骤上限见 UnrealSyncWorkflow.MaxStep。
-                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(7);
+                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(6);
                 }
                 else
                 {
@@ -304,7 +304,7 @@ namespace CrossingVoidZDTool
         }
 
         /// <summary>
-        /// 第三步收尾时顺手做的第四步预检。
+        /// 第二步收尾时顺手做的第三步预检。
         ///
         /// 扫描失败不该把已经做完的同步一起判失败，所以这里不抛；但也不能像以前那样
         /// 连 <see cref="UnrealLightConfigurationResult.Succeeded"/> 都不看就扔进视图层——

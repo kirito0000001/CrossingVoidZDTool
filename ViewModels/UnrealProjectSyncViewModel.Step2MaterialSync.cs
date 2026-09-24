@@ -10,14 +10,14 @@ using Microsoft.UI.Xaml;
 namespace CrossingVoidZDTool.ViewModels;
 
 /// <summary>
-/// 第三步「同步素材」自己的那一块：**发布阶段 + 差异树 + 勾选计数**。
+/// 第二步「同步素材」自己的那一块：**发布阶段 + 差异树 + 勾选计数**。
 ///
-/// 同前两步的规矩（一步一个文件）：这里的成员只服务第三步，不再替别的步骤保管状态。
+/// 同前两步的规矩（一步一个文件）：这里的成员只服务第二步，不再替别的步骤保管状态。
 /// 第五/七步只是**复用同一块工作区界面**，它们的计划由各自入口生成，不从这里取。
 /// </summary>
 internal sealed partial class UnrealProjectSyncViewModel
 {
-    // ── 发布阶段（第三步要挑"这次同步哪一类"）──────────────────────────────
+    // ── 发布阶段（第二步要挑"这次同步哪一类"）──────────────────────────────
 
     public ObservableCollection<UnrealSyncPublishStageItem> PublishStages { get; } =
     [
@@ -40,8 +40,8 @@ internal sealed partial class UnrealProjectSyncViewModel
                 HasImportDetection = false;
                 _loadedPublishStep = 0;
                 OnPropertyChanged(nameof(HasContentDetection));
+                OnPropertyChanged(nameof(WorkflowStep4StatusText));
                 OnPropertyChanged(nameof(WorkflowStep5StatusText));
-                OnPropertyChanged(nameof(WorkflowStep6StatusText));
                 SetSelectionTree([]);
                 ResetImportOperation();
                 OnPropertyChanged(nameof(PublishStageDescription));
@@ -146,21 +146,21 @@ internal sealed partial class UnrealProjectSyncViewModel
                 string.Equals(item.UnrealObjectPath, change.UnrealItem?.SourceObjectPath, StringComparison.OrdinalIgnoreCase));
     }
 
-    /// <summary>第三步/第五步"没有任何差异可同步"时，界面要给出"下一步"而不是"同步"。</summary>
-    public bool HasNoPublishChanges => !IsEngineToToolbox && WorkflowStep is 2 or 5 &&
+    /// <summary>第二步/第四步"没有任何差异可同步"时，界面要给出"下一步"而不是"同步"。</summary>
+    public bool HasNoPublishChanges => !IsEngineToToolbox && WorkflowStep is 2 or 4 &&
         HasImportDetection &&
         _lastPublishChanges.All(change => change.Kind == UnrealBridgeChangeKind.Unchanged);
 
     public string PublishActionText => WorkflowStep switch
     {
-        5 => "同步序列到虚幻",
-        7 => "同步特效到虚幻",
+        4 => "同步序列到虚幻",
+        6 => "同步特效到虚幻",
         _ => "同步到虚幻"
     };
 
     // ── 可见性 ────────────────────────────────────────────────────────────
 
-    public Visibility WorkflowConfirmationVisibility => WorkflowStep is 2 or 5 ? Visibility.Visible : Visibility.Collapsed;
+    public Visibility WorkflowConfirmationVisibility => WorkflowStep is 2 or 4 ? Visibility.Visible : Visibility.Collapsed;
 
     public Visibility SelectionContentVisibility =>
         !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
@@ -212,14 +212,14 @@ internal sealed partial class UnrealProjectSyncViewModel
         // 默认按当前步骤认领这棵树。检测流程会在建完树、切到目标步骤之前
         // 用 SetLoadedPublishStep 覆盖成真正的目标步骤；这里只是保证
         // 视图模型单独使用时也是自洽的，不会出现「有树但没人认领」。
-        if (WorkflowStep is 2 or 5)
+        if (WorkflowStep is 2 or 4)
         {
             _loadedPublishStep = WorkflowStep;
         }
         ClearWorkspaceFailure();
         OnPropertyChanged(nameof(HasContentDetection));
+        OnPropertyChanged(nameof(WorkflowStep4StatusText));
         OnPropertyChanged(nameof(WorkflowStep5StatusText));
-        OnPropertyChanged(nameof(WorkflowStep6StatusText));
         ImportOperationTitle = "差异检测完成";
         ImportOperationMessage = "展开中间分类并确认本次需要同步的内容。";
         ImportDetailVisibility = Visibility.Visible;
@@ -252,7 +252,7 @@ internal sealed partial class UnrealProjectSyncViewModel
         bool selectPendingByDefault = true)
     {
         var roots = await Task.Run(
-            () => WorkflowStep == 5 || SelectedPublishStage?.Stage == UnrealBridgePublishStage.ZdAnimationTracks
+            () => WorkflowStep == 4 || SelectedPublishStage?.Stage == UnrealBridgePublishStage.ZdAnimationTracks
                 ? UnrealSyncSelectionTreeBuilder.FromSequenceChanges(changes, canExecute, selectPendingByDefault)
                 : UnrealSyncSelectionTreeBuilder.FromChanges(changes, canExecute, selectPendingByDefault),
             cancellationToken);
@@ -264,13 +264,13 @@ internal sealed partial class UnrealProjectSyncViewModel
     {
         // **先按当前步骤判，再按（从会话缓存恢复的）发布阶段判。**
         //
-        // 顺序颠倒过一次，后果是：第五步跑过之后 SelectedPublishStage 停在 ZdAnimationTracks 并被持久化，
-        // 回到第三步时上面那个 `||` 立刻成立 —— 素材变更被当成序列变更过滤，整批丢掉，
+        // 顺序颠倒过一次，后果是：第四步跑过之后 SelectedPublishStage 停在 ZdAnimationTracks 并被持久化，
+        // 回到第二步时上面那个 `||` 立刻成立 —— 素材变更被当成序列变更过滤，整批丢掉，
         // 界面显示"共检查 0 项 · 无差异 0 项"，真该报的新增（幻形立绘 #2 / 失败语音 #1）全被吞掉。
         // （2026-09-24 实测，用户看到的正是这个。）
         // 序列那一路：第五/七步，**或者**阶段明确停在"序列动画轨道"（会话缓存恢复时步骤可能还没落定，只有阶段可信）。
-        // 但**第三步除外**：那一步要的是素材，残留的序列阶段不能在这里生效。
-        if (WorkflowStep is 5 or 7 ||
+        // 但**第二步除外**：那一步要的是素材，残留的序列阶段不能在这里生效。
+        if (WorkflowStep is 4 or 6 ||
             (WorkflowStep != 2 &&
              SelectedPublishStage?.Stage == UnrealBridgePublishStage.ZdAnimationTracks))
         {
@@ -318,7 +318,7 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     // ── 自己的缓存文件（`step2-material-sync.json`）────────────────────────
     //
-    // 和第五步那三个方法一一对应（那边落 `step5-sequence-sync.json`）。
+    // 和第四步那三个方法一一对应（那边落 `step4-sequence-sync.json`）。
     // 本步的**规整决策**另有一份 `step2-normalization.json`（那是用户数据，不随算法换代失效）；
     // 这里装的是**检测结果 + 勾选**，所以带差异算法版本、对不上就当没缓存。
 

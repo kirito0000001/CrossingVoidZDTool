@@ -255,7 +255,7 @@ internal sealed class UnrealBridgeSyncState
     /// 会自己 new 一个默认比较器的字典填完再赋值，字段初始化器里的 OrdinalIgnoreCase 保不住。
     /// 这张表是 UnrealBridgeDiffService 判「有没有变过」的唯一依据——
     /// 比较器一退化成大小写敏感，同一个素材换个大小写就查不到基线，
-    /// 已经同步过的东西会被重新判成新增或冲突，第三步的差异永远归不了零。
+    /// 已经同步过的东西会被重新判成新增或冲突，第二步的差异永远归不了零。
     /// </summary>
     [JsonObjectCreationHandling(JsonObjectCreationHandling.Populate)]
     public Dictionary<string, UnrealBridgeSyncStateEntry> Entries { get; set; } = new(StringComparer.OrdinalIgnoreCase);

@@ -64,18 +64,9 @@ internal sealed class UnrealSyncWorkflowController(
 
     private string? SelectedCharacterCode => _sync.SelectedSource?.DraftCharacter?.Code;
 
-    /// <summary>
-    /// **放空的那一步**：旧的「同步素材」并进了第 2 步，第 3 步的号空着（4~7 没动）。
-    /// 前进和后退都要跨过它，否则人会停在一个没有内容的步上。
-    /// 等以后收口（4~7 → 3~6、`MaxStep` → 6）时，这个常量就能删掉。
-    /// </summary>
-    private const int VoidStep = 3;
-
-    /// <summary>把放空的号跳过去。</summary>
-    private static int SkipVoidStep(int step) => step == VoidStep ? step + 1 : step;
-
-    /// <summary>往回走时把放空的号跳过去。</summary>
-    private static int SkipVoidStepBackwards(int step) => step == VoidStep ? step - 1 : step;
+    // 收口之后（4~7 → 3~6、MaxStep = 6）**没有空号了**：原来那套
+    // `VoidStep` / `SkipVoidStep` / `SkipVoidStepBackwards` 已经删掉 ——
+    // 第 3 步现在是真的「基础配置」，再跳过它就跳错了。
 
     /// <summary>
     /// 回退只导航，绝不触发检测。
@@ -85,8 +76,7 @@ internal sealed class UnrealSyncWorkflowController(
     /// </summary>
     public void GoToPreviousStep()
     {
-        _sync.ReturnToWorkflowStep(
-            SkipVoidStepBackwards(Math.Max(UnrealSyncWorkflow.MinStep, _sync.WorkflowStep - 1)));
+        _sync.ReturnToWorkflowStep(Math.Max(UnrealSyncWorkflow.MinStep, _sync.WorkflowStep - 1));
     }
 
     public async Task GoToNextStepAsync()
@@ -110,12 +100,12 @@ internal sealed class UnrealSyncWorkflowController(
             return;
         }
 
-        // **往前走不再顺手"收尾"**：原第 3 步时代这里会调 `CompletePublishOperation(0, 0)`，
-        // 把同步结果面板收好再走。但那个方法会 `SetSelectionTree([])` + 清掉差异 + 跳到第 4 步 ——
+        // **往前走不再顺手"收尾"**：旧第 3 步（现第 2 步）时代这里会调 `CompletePublishOperation(0, 0)`，
+        // 把同步结果面板收好再走。但那个方法会 `SetSelectionTree([])` + 清掉差异 + 跳到第 3 步 ——
         // 于是"从第 2 步往前走一趟再回来"就等于把这一步的检测结果扔了
         // （2026-09-24 实测：从基础配置往回切，第 2 步变成"尚未检测"）。
         // 每步的状态现在归自己（各步自己的小缓存），导航不该清它。
-        await EnterStepAsync(SkipVoidStep(step + 1));
+        await EnterStepAsync(step + 1);
     }
 
     /// <summary>
@@ -205,7 +195,7 @@ internal sealed class UnrealSyncWorkflowController(
     /// 当前步骤是否满足离开条件。
     ///
     /// **③ 已定：每一步都不阻断同步 → 这里恒放行。**
-    /// 以前这一支是六道门（第一步要全绿、第二步要规整全处理完、第三步要没有待同步…），
+    /// 以前这一支是六道门（底层检测要全绿、素材要规整全处理完、要没有待同步…），
     /// 现在全部摘掉。晓桀的原话是"以后每一步都不会阻断同步，我最后会专门设计**检查阶段**"——
     /// 也就是说"检查"将来会是一件独立的事，不该长在每步的出口上。
     ///

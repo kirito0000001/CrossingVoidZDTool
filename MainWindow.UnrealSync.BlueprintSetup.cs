@@ -15,7 +15,7 @@ using WinRT.Interop;
 
 namespace CrossingVoidZDTool
 {
-    /// <summary>第六步「蓝图置入」：角色蓝图白名单字段与 2DInfor 三张数据表。</summary>
+    /// <summary>第五步「蓝图置入」：角色蓝图白名单字段与 2DInfor 三张数据表。</summary>
     public sealed partial class MainWindow
     {
         private async void ApplyUnrealBlueprintSetupButton_Click(object sender, RoutedEventArgs e)
@@ -72,8 +72,9 @@ namespace CrossingVoidZDTool
                     $"已写入 {result.AppliedStableIds.Count} 项，剩余待写入 {sync.BlueprintSetupPendingCount} 项。");
                 AppendLog(LogKind.Info,
                     $"[Blueprint Setup] applied={result.AppliedStableIds.Count} saved={result.SavedAssets.Count} pending={sync.BlueprintSetupPendingCount}");
-                // 第六步是最后一步，没有「下一步」可以触发收尾行，这里自己补一条。
-                LogWorkflowStepFinished(6);
+                // 这一步的成功点是「写入完成」这个动作，不是导航 ——
+                // 通用路径只在「离开这一步」时补结束行，所以这里自己报一次。
+                LogWorkflowStepFinished(5);
                 await HideGlobalProgressAfterDelayAsync();
             }
             catch (OperationCanceledException ex)
@@ -113,7 +114,7 @@ namespace CrossingVoidZDTool
             ShowGlobalProgress("检测蓝图数据", character.Code);
             try
             {
-                sync.ReturnToWorkflowStep(6);
+                sync.ReturnToWorkflowStep(5);
                 var result = await ExecuteUnrealBlueprintSetupAsync(character, apply: false, Array.Empty<string>());
                 sync.SetBlueprintSetupResult(result);
                 CompleteGlobalProgress(

@@ -224,16 +224,16 @@ internal sealed class UnrealBridgeSequencePublishService
     public IReadOnlyList<string> SkippedActionCodes { get; private set; } = [];
 
     /// <summary>
-    /// **第七步「特效同步」**的计划：同一套动作解析，但只留特效那一项。
+    /// **第六步「特效同步」**的计划：同一套动作解析，但只留特效那一项。
     ///
-    /// 第五步从此回到纯角色序列（用户拍板："我最早说的是在第七步同步，不要给第五步压得太重"）；
+    /// 第四步从此回到纯角色序列（用户拍板，步号按当时的编号："我最早说的是在第七步同步，不要给第五步压得太重"）；
     /// 特效的产物也只剩网格 sheet + 材质实例两样（面片 / 母材质 / 粒子系统都在插件里共享）。
     /// </summary>
     /// <summary>
-    /// 第七步的**无导出计划**：不需要"勾选的变化"，凡是有特效层的动作都算一条。
+    /// 第六步的**无导出计划**：不需要"勾选的变化"，凡是有特效层的动作都算一条。
     ///
-    /// 特效该不该同步只看工作区里有没有特效帧 —— 所以第七步的检测**不用**先跑一遍
-    /// Unreal 全量导出（第五步那条会把整条序列的帧全打开，第七步不需要，用户明确要求省掉）。
+    /// 特效该不该同步只看工作区里有没有特效帧 —— 所以第六步的检测**不用**先跑一遍
+    /// Unreal 全量导出（第四步那条会把整条序列的帧全打开，第六步不需要，用户明确要求省掉）。
     /// </summary>
     public UnrealBridgeSequenceSyncPlan BuildEffectSyncPlanForAll(
         CharacterCard character,
@@ -276,7 +276,7 @@ internal sealed class UnrealBridgeSequencePublishService
         IReadOnlyList<UnrealBridgeChange> selectedSequenceChanges,
         IReadOnlyDictionary<string, UnrealBridgeSequenceAtlasInput>? atlases = null)
     {
-        // 借第五步那套解析算出"哪些动作被勾选、形态几、帧率多少、图集在哪"，
+        // 借第四步那套解析算出"哪些动作被勾选、形态几、帧率多少、图集在哪"，
         // 再把非特效的项剔掉 —— 解析只有一处，两个入口各取所需。
         var plan = BuildSequenceSyncPlan(
             character, projectPath, selectedSequenceChanges, atlases, includeEffectLayers: true);
@@ -448,9 +448,9 @@ internal sealed class UnrealBridgeSequencePublishService
                 .ToList();
             plan.Actions.Add(action);
 
-            // 特效是**第七步**的事（用户拍板："我最早说的是在第七步同步，不要给第五步压得太重"）。
+            // 特效是**第六步**的事（用户拍板，步号按当时的编号："我最早说的是在第七步同步，不要给第五步压得太重"）。
             // 这个开关让两个入口共用同一份"哪些动作、形态几、帧率多少"的解析，不写两套；
-            // 第五步最终会传 false（只出角色序列），第七步的入口见 BuildEffectSyncPlan。
+            // 第四步最终会传 false（只出角色序列），第六步的入口见 BuildEffectSyncPlan。
             if (includeEffectLayers)
             {
                 AppendEffectAction(

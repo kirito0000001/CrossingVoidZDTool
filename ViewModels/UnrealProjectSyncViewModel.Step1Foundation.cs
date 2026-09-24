@@ -12,7 +12,7 @@ namespace CrossingVoidZDTool.ViewModels;
 ///
 /// 这一块只关心两件事：**检查项**和**它自己的缓存文件**。
 /// 以前第 1 步的状态是从整体会话缓存（所有步骤共用的一大坨）恢复的，
-/// 那份缓存串台过好几次（`_loadedPublishStep` 默认写 3、发布阶段劫持第三步的过滤……），
+/// 那份缓存串台过好几次（`_loadedPublishStep` 默认写 3、发布阶段劫持第二步的过滤……），
 /// 所以这里改成读 `<角色>\<工具目录>\UnrealSync\step1-foundation.json`。
 /// </summary>
 internal sealed partial class UnrealProjectSyncViewModel
@@ -21,7 +21,7 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     /// <summary>
     /// 这份检查属于**第 1 步**，所以口径固定按 1 问 —— 不能拿当前步号去问：
-    /// 切角色时可能正停在第 5 步（那边"不查类型"），算出来的档位会把这一步的结果写歪。
+    /// 切角色时可能正停在第 4 步（那边"不查类型"），算出来的档位会把这一步的结果写歪。
     /// </summary>
     private const int FoundationCheckStep = 1;
 
@@ -103,15 +103,15 @@ internal sealed partial class UnrealProjectSyncViewModel
             .ToArray();
     }
 
-    // ── 别处往这一步挂错误（第 4 步的基础配置检测用）─────────────────────────
+    // ── 别处往这一步挂错误（第 3 步的基础配置检测用）─────────────────────────
 
     /// <summary>
-    /// 第 4 步的基础配置检测发现某条依赖不对时，把这条**挂到第 1 步的检查列表**上
+    /// 第 3 步的基础配置检测发现某条依赖不对时，把这条**挂到第 1 步的检查列表**上
     /// （同名的那条先删掉再插），这样回到第 1 步就能看到"配置错误"。
     ///
     /// 它住在这一步的文件里，是因为它增删的就是**这一步的检查项** ——
-    /// 虽然入参是第 4 步的结果类型，但按"一步一个文件"，改这一步状态的入口该在这一步；
-    /// 调用方（壳里第 4 步那条路）照旧调用，不用知道它住哪。
+    /// 虽然入参是第 3 步的结果类型，但按"一步一个文件"，改这一步状态的入口该在这一步；
+    /// 调用方（壳里第 3 步那条路）照旧调用，不用知道它住哪。
     /// </summary>
     public void SetFoundationConfigurationError(UnrealLightConfigurationResultItem error)
     {

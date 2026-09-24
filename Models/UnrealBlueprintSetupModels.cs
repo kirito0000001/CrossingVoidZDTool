@@ -15,9 +15,9 @@ internal enum UnrealBlueprintSetupStatus
 }
 
 /// <summary>
-/// 第六步「蓝图置入」下发给 Unreal 的目标值。
+/// 第五步「蓝图置入」下发给 Unreal 的目标值。
 ///
-/// 和第四步一样走「请求 -> 扫描/应用」而不是「导出清单 -> C# 比对」：
+/// 和第三步一样走「请求 -> 扫描/应用」而不是「导出清单 -> C# 比对」：
 /// 写入侧本来就必须拿到工具箱这份目标值（FText 要保留命名空间和键、
 /// 图标是 TSoftObjectPtr、状态是枚举），所以扫描和应用共用同一份载荷，
 /// 比对也就留在离真实对象最近的地方，不必再维护一套「规范文本」。
@@ -176,7 +176,7 @@ internal sealed class UnrealBlueprintSetupResultItem
     public string ErrorMessage { get; set; } = string.Empty;
 }
 
-/// <summary>中栏一张字段卡片。展示规则沿用第四步：单值直接显示，多形态铺成标签。</summary>
+/// <summary>中栏一张字段卡片。展示规则沿用第三步：单值直接显示，多形态铺成标签。</summary>
 internal sealed class UnrealBlueprintSetupViewItem : ObservableObject
 {
     private static readonly Regex UnrealObjectPathRegex = new(

@@ -44,10 +44,10 @@ namespace CrossingVoidZDTool.Services;
 [JsonSerializable(typeof(Step2NormalizationCacheDocument))]
 // 第二步「同步素材」（合并后）自己的另一半缓存：素材差异 + 勾选。
 [JsonSerializable(typeof(Step2MaterialSyncCacheDocument))]
-// 第四步「基础配置」自己的小缓存（检测项 + 勾选）。
-[JsonSerializable(typeof(Step4LightConfigurationCacheDocument))]
-// 第五步「序列同步」自己的小缓存（序列差异 + 勾选）。
-[JsonSerializable(typeof(Step5SequenceSyncCacheDocument))]
+// 第三步「基础配置」自己的小缓存（检测项 + 勾选）。
+[JsonSerializable(typeof(Step3LightConfigurationCacheDocument))]
+// 第四步「序列同步」自己的小缓存（序列差异 + 勾选）。
+[JsonSerializable(typeof(Step4SequenceSyncCacheDocument))]
 [JsonSerializable(typeof(UnrealSyncNormalizationCacheItem))]
 [JsonSerializable(typeof(UnrealAssetNormalizationCandidate))]
 [JsonSerializable(typeof(UnrealRemotePythonJob))]
@@ -81,7 +81,7 @@ internal sealed partial class AppJsonSerializerContext : JsonSerializerContext
 }
 
 /// <summary>
-/// 第六步「蓝图置入」的请求和结果单独用一个上下文，因为它跟桥接脚本约定的是
+/// 第五步「蓝图置入」的请求和结果单独用一个上下文，因为它跟桥接脚本约定的是
 /// camelCase：请求由 C# 写、Python 读，结果反过来，两边字段名必须一致。
 /// 其余协议沿用 <see cref="AppJsonSerializerContext"/> 的 PascalCase，不受影响。
 /// </summary>

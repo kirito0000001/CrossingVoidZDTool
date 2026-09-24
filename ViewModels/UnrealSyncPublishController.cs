@@ -11,7 +11,7 @@ using Microsoft.UI.Xaml.Controls;
 namespace CrossingVoidZDTool.ViewModels;
 
 /// <summary>
-/// 「同步素材到虚幻」这条编排（第三、第五步共用）。
+/// 「同步素材到虚幻」这条编排（第三、第四步共用）。
 ///
 /// 从 MainWindow 里整体搬出来，是为了能拿一个假 Host 真跑着测——
 /// 以前它长在按钮的 async void 里，680 多行只有跑起界面、点一次同步才能验证。
@@ -30,9 +30,9 @@ internal sealed class UnrealSyncPublishController(
     private readonly UnrealProjectSyncViewModel _sync = sync;
 
     /// <summary>
-    /// 第七步「特效同步」的发布：**不跑 Unreal 全量导出**。
+    /// 第六步「特效同步」的发布：**不跑 Unreal 全量导出**。
     ///
-    /// 和第五步的区别就是这一条：第五步要先 `CharacterSequences` 导出（把整条序列的帧全打开）
+    /// 和第四步的区别就是这一条：第四步要先 `CharacterSequences` 导出（把整条序列的帧全打开）
     /// 才能算出差异、才能知道要同步哪些动作；而特效该不该同步只看工作区里有没有特效帧，
     /// 所以这里本地打网格 sheet + 建计划，然后交给**同一个桥接脚本**
     /// （`sync_character_sequences.py` 里 `isEffectLayer` 那条只出 sheet + 材质实例）。
@@ -121,7 +121,7 @@ internal sealed class UnrealSyncPublishController(
 
         if (!result.Succeeded)
         {
-            throw new InvalidOperationException($"第七步特效同步失败：{result.ErrorMessage}");
+            throw new InvalidOperationException($"第六步特效同步失败：{result.ErrorMessage}");
         }
 
         // 特效同步完不跑复扫导出：这一步不产出角色序列资产，也就没有"还剩多少序列差异"要重算。
@@ -150,9 +150,9 @@ internal sealed class UnrealSyncPublishController(
 
         _host.IsPublishRunning = true;
         _sync.SetPublishRunning(true);
-        // 第五步「序列同步」和第七步「特效同步」共用这条发布链路（同一条检测/发布管线），
-        // 区别只在最终用哪个计划：第五步 = BuildSequenceSyncPlan，第七步 = BuildEffectSyncPlan。
-        // 「这一步要不要序列数据」的口径按步号问 ViewModel（Step5SequenceSync.cs），别在这里写字面量。
+        // 第四步「序列同步」和第六步「特效同步」共用这条发布链路（同一条检测/发布管线），
+        // 区别只在最终用哪个计划：第四步 = BuildSequenceSyncPlan，第六步 = BuildEffectSyncPlan。
+        // 「这一步要不要序列数据」的口径按步号问 ViewModel（Step4SequenceSync.cs），别在这里写字面量。
         var isSequenceSynchronization = UnrealProjectSyncViewModel.UsesSequenceData(_sync.WorkflowStep);
         // 百分比按各阶段实测耗时分配；备份开着时它会占掉大半条，这是事实。
         var progressPlan = WorkflowProgressPlan.ForSequenceSync(_host.Settings.BackupBeforeUnrealSync);
@@ -162,9 +162,9 @@ internal sealed class UnrealSyncPublishController(
             await Task.Yield();
             var enginePath = _sync.EnginePath;
             var projectPath = _sync.ProjectPath;
-            // 第七步「特效同步」：**不跑 Unreal 全量导出**（第五步那条会把整条序列的帧全打开），
+            // 第六步「特效同步」：**不跑 Unreal 全量导出**（第四步那条会把整条序列的帧全打开），
             // 直接本地打网格 sheet + 建特效计划，再交给同一个桥接脚本执行。
-            if (_sync.WorkflowStep == 7)
+            if (_sync.WorkflowStep == 6)
             {
                 await PublishEffectSyncOnlyAsync(character, enginePath, projectPath, progressPlan);
                 return;
@@ -181,7 +181,7 @@ internal sealed class UnrealSyncPublishController(
             //
             // 晓桀 2026-09-24：「同步的时候不需要检测以前的了，只管自己阶段的」——
             // 这里原来还调了 `ValidateFoldersForStep` + `ValidatePublishCharacterFolders`，
-            // 那是**第 1 步（底层检测）和第 2 步（底层/规整态）**的校验，属于"以前的"；
+            // 那是**第 1 步（底层检测）和第 2 步（规整态）**的校验，属于"以前的"；
             // 而且两个都会抛错拦住同步，和 ③「每一步都不阻断同步」也冲突。都去掉了。
             //
             // 也**不再用 try/catch 把人挪走**：原来失败（**包括取消**）会 `ReturnToWorkflowStep(1)`，
@@ -215,10 +215,10 @@ internal sealed class UnrealSyncPublishController(
             // 提示'请先完成第二步'」。已摘掉：检查将来是**一个独立阶段**，
             // 不该长在"同步"这个动作的门口。要提醒也得由那个阶段去提醒。
             //
-            // 第五步和第七步共用这条发布链路，但**同步完要回到自己那一步**：
-            // 第七步同步完跳回第五步，用户会以为特效跑到序列步去了（实测就是这么发生的）。
+            // 第四步和第六步共用这条发布链路，但**同步完要回到自己那一步**：
+            // 第六步同步完跳回第四步，用户会以为特效跑到序列步去了（实测就是这么发生的）。
             _sync.ReturnToWorkflowStep(
-                _sync.WorkflowStep == 7 ? 7 : isSequenceSynchronization ? 5 : 2);
+                _sync.WorkflowStep == 6 ? 6 : isSequenceSynchronization ? 4 : 2);
             var latestToolboxSnapshot = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character);
             var latestUnrealSnapshot = new UnrealBridgeSemanticSnapshotService().Build(latestCandidate);
             // 序列：把「上次同步时记下的素材内容摘要」补进 Unreal 侧载荷，
@@ -261,7 +261,7 @@ internal sealed class UnrealSyncPublishController(
                 UnrealBridgePublishSupportPolicy.CanExecute,
                 _host.GetGlobalProgressCancellationToken(),
                 // 同步路径里 _host.WorkflowStepAfterPublishDetection 早已被检测流程清零，
-                // 用它判断会恒传 true，把第五步默认勾选成"全选"，和检测路径语义相反。
+                // 用它判断会恒传 true，把第四步默认勾选成"全选"，和检测路径语义相反。
                 selectPendingByDefault: UnrealProjectSyncViewModel.SelectsPendingChangesByDefault(_sync.WorkflowStep));
             _sync.RestoreSelectionState(selectionBeforeRefresh);
             // 重建树时写过一次缓存，那时勾选还是默认态。恢复完必须再存一次，
@@ -312,7 +312,7 @@ internal sealed class UnrealSyncPublishController(
                 if (_sync.HasNoPublishChanges)
                 {
                     _sync.CompletePublishOperation(0, 0);
-                    // 第五步不进基础配置，和 653 行的收尾保持一致。
+                    // 序列那一步（第四步）不做基础配置预检，和 653 行的收尾保持一致。
                     if (!isSequenceSynchronization &&
                         !_sync.IsLightConfigurationLoaded)
                     {
@@ -374,8 +374,8 @@ internal sealed class UnrealSyncPublishController(
                 {
                     _host.AppendLog(LogKind.Warning,
                         $"[Sync Aborted] reason=nothing-executable character={character.Code} deferred={deferredCount} leaves={selectionLeaves.Length}");
-                    _host.CompleteGlobalProgress("尚有未同步素材", $"还有 {deferredCount} 项未执行，请完成第三步后再进入基础配置。");
-                    _host.ShowFloatingTip(InfoBarSeverity.Warning, "第三步尚未完成", $"还有 {deferredCount} 项素材未同步。");
+                    _host.CompleteGlobalProgress("尚有未同步素材", $"还有 {deferredCount} 项未执行，请完成第二步后再进入基础配置。");
+                    _host.ShowFloatingTip(InfoBarSeverity.Warning, "第二步尚未完成", $"还有 {deferredCount} 项素材未同步。");
                     await _host.HideGlobalProgressAfterDelayAsync();
                     return;
                 }
@@ -415,8 +415,8 @@ internal sealed class UnrealSyncPublishController(
                     _host.GetGlobalProgressCancellationToken());
                 _host.AppendLog(LogKind.Info, $"[Sequence Atlas] character={character.Code} atlases={atlases.Count}");
                 var sequencePublishService = new UnrealBridgeSequencePublishService();
-                // 第七步只要特效那一条（第五步的计划里已经不掺特效了）。
-                sequencePlan = _sync.WorkflowStep == 7
+                // 第六步只要特效那一条（第四步的计划里已经不掺特效了）。
+                sequencePlan = _sync.WorkflowStep == 6
                     ? sequencePublishService.BuildEffectSyncPlan(character, projectPath, changes, atlases)
                     : sequencePublishService.BuildSequenceSyncPlan(character, projectPath, changes, atlases);
                 if (sequencePublishService.SkippedActionCodes.Count > 0)
@@ -430,7 +430,7 @@ internal sealed class UnrealSyncPublishController(
                 {
                     _host.AppendLog(LogKind.Info, $"[Sequence Plan Action] code={action.ActionCode} display={_host.FormatSyncLogValue(action.DisplayName)} targetSequence={action.TargetSequencePath} frames={action.Frames.Count} fps={action.Fps}");
                 }
-                // 第五步会重命名并删除历史序列资产，备份策略与第三步一致：
+                // 第四步会重命名并删除历史序列资产，备份策略与第二步一致：
                 // 整体设置开启，或本批包含更新、改名、冲突、删除时都先备份。
                 await _host.BackupUnrealProjectIfRequestedAsync(
                     enginePath,
@@ -510,7 +510,7 @@ internal sealed class UnrealSyncPublishController(
                     UnrealBridgeExecutionItemResult.SelectSucceededActionStableIds(sequenceResult.Items);
                 if (!sequenceResult.Succeeded && succeededActionCodes.Length == 0)
                 {
-                    throw new InvalidOperationException($"第五步序列同步失败：{sequenceResult.ErrorMessage}");
+                    throw new InvalidOperationException($"第四步序列同步失败：{sequenceResult.ErrorMessage}");
                 }
                 _host.UpdateGlobalProgress(
                     "阶段 4/4 · 正在复扫验证序列资产",
@@ -617,7 +617,7 @@ internal sealed class UnrealSyncPublishController(
                         $"已成功 {succeededActionCodes.Length} 个动作并写入基线；其余失败：{sequenceResult.ErrorMessage}");
                     _host.ShowFloatingTip(InfoBarSeverity.Warning, "部分序列同步失败",
                         $"已成功 {succeededActionCodes.Length} 个动作，剩余请查看日志后重试。");
-                    _host.LogUserOperation($"第五步序列部分同步：{character.Code}，Succeeded={succeededActionCodes.Length}，Error={sequenceResult.ErrorMessage}");
+                    _host.LogUserOperation($"第四步序列部分同步：{character.Code}，Succeeded={succeededActionCodes.Length}，Error={sequenceResult.ErrorMessage}");
                     await _host.HideGlobalProgressAfterDelayAsync();
                     return;
                 }
@@ -633,7 +633,7 @@ internal sealed class UnrealSyncPublishController(
                     _host.CompleteGlobalProgress("阶段 5/5 · 本批序列同步完成", $"已执行 {executableCount} 项动作；复扫发现 {remainingActionCount} 个动作仍有差异，请确认后继续。");
                     _host.ShowFloatingTip(InfoBarSeverity.Success, "本批序列已同步", $"仍有 {remainingActionCount} 个动作差异，未自动勾选。");
                 }
-                _host.LogUserOperation($"第五步序列同步完成：{character.Code}，Executed={executableCount}，RemainingActions={remainingActionCount}");
+                _host.LogUserOperation($"第四步序列同步完成：{character.Code}，Executed={executableCount}，RemainingActions={remainingActionCount}");
                 await _host.HideGlobalProgressAfterDelayAsync();
                 return;
             }
@@ -692,12 +692,12 @@ internal sealed class UnrealSyncPublishController(
                         58 + value.CompletedCount * 24d / Math.Max(1, value.TotalCount),
                         $"动作进度：{value.CompletedCount}/{value.TotalCount} · {value.StableId}")),
                 _host.GetGlobalProgressCancellationToken());
-            // 第五步早就逐条记执行结果，第三步这里以前拿到 result 之后一个字段都没读过：
+            // 第四步早就逐条记执行结果，第二步这里以前拿到 result 之后一个字段都没读过：
             // 失败时用户只看到「以下同步项没有成功结果：xxx」这句由后面验证阶段拼出来的话，
             // 而 Python 侧真正的异常文本（result.Items[].Message）从头到尾没人展示，
             // 排查只能靠猜——又是一例「显示成功但实际没做成」。
             //
-            // 明细分两路走，沿用 LogSequenceChanges 定下的规矩：第三步的条目数是按
+            // 明细分两路走，沿用 LogSequenceChanges 定下的规矩：第二步的条目数是按
             // 素材张数算的（整角色首同步上百条很正常），全塞进日志面板会被 300 条上限
             // 当场挤掉，还要为每条建一次 XAML 元素。所以成功项只落 runtime.log，
             // 失败项——本来就没几条，而且正是这次要救的那批——才进面板。
@@ -717,7 +717,7 @@ internal sealed class UnrealSyncPublishController(
                 var line =
                     $"[Sync Execution Item] stableId={item.StableId} succeeded={item.Succeeded} " +
                     $"objectPath={_host.FormatSyncLogValue(item.ObjectPath)} message={_host.FormatSyncLogValue(item.Message)}";
-                // 成功项也进日志面板，和第五步保持一致：用户要能看到「这一条到底做了什么」，
+                // 成功项也进日志面板，和第四步保持一致：用户要能看到「这一条到底做了什么」，
                 // 而不只是失败时才有交代。面板有 300 条上限，超出的会被挤掉，
                 // 但完整明细同时也落在 runtime.log 里，回头查得到。
                 _host.AppendLog(item.Succeeded ? LogKind.Info : LogKind.Error, line);

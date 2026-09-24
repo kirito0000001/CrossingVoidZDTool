@@ -1,4 +1,4 @@
-"""第六步「蓝图置入」：把工具箱的目标值比对进角色蓝图和 2DInfor 数据表。
+"""第五步「蓝图置入」：把工具箱的目标值比对进角色蓝图和 2DInfor 数据表。
 
 两种模式共用同一份请求载荷：
     Scan  只读，逐字段给出「当前值 / 目标值 / 是否有差异」；
@@ -149,8 +149,8 @@ def _object_key(value):
     （老资产叫 Defatk、规范名是 DefAtk）会得到一条永远消不掉的待写入项：
     写入其实成功了，复查时又因为大小写判成有差异。
 
-    资产改名是第二步规整素材、第五步序列同步的事；
-    第六步只负责把引用写进蓝图，引用指到同一个资产就算到位。
+    资产改名是第二步规整素材、第四步序列同步的事；
+    第五步只负责把引用写进蓝图，引用指到同一个资产就算到位。
     """
     return _normalize_object_path(value).casefold()
 
@@ -199,7 +199,7 @@ class Report(object):
             missing = _missing_object_targets(target_values)
             if missing:
                 error = "目标资产不存在：" + "、".join(missing) + \
-                        "。请先完成第三步同步素材，把它发布到工程里。"
+                        "。请先完成第二步同步素材，把它发布到工程里。"
         if error:
             status = STATUS_ERROR
         elif not writable:

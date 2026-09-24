@@ -20,7 +20,7 @@ internal static class UnrealBridgePublishSupportPolicy
         if (change.Kind == UnrealBridgeChangeKind.DeleteCandidate)
         {
             // 以前只有序列帧能删，于是 Unreal 侧多出来的语音和图片只能一直挂在
-            // 差异列表里，第三步的差异永远归不了零。两侧素材本来就该一一对应。
+            // 差异列表里，第二步的差异永远归不了零。两侧素材本来就该一一对应。
             if (change.Module is not (UnrealBridgeModule.SequenceFrames
                 or UnrealBridgeModule.Voices
                 or UnrealBridgeModule.BaseMaterials))
@@ -57,7 +57,7 @@ internal static class UnrealBridgePublishSupportPolicy
         if (change.Kind == UnrealBridgeChangeKind.Added)
         {
             // 空白帧没有源文件，但它在 Flipbook 里要占一个关键帧，属于可执行内容。
-            // 按"必须存在源文件"判会让它变成待重定向项，而第五步没有规整工作区，
+            // 按"必须存在源文件"判会让它变成待重定向项，而第四步没有规整工作区，
             // 这个条件永远满足不了，含空白帧的动作就整批同步不了。
             if (change.Module == UnrealBridgeModule.SequenceFrames)
             {

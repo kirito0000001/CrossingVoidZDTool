@@ -1,4 +1,4 @@
-"""第五步《序列同步》结果协议的自检。
+"""第四步《序列同步》结果协议的自检。
 
     python Tools/UnrealBridge/tests/check_sequence_sync.py
 

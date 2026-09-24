@@ -169,7 +169,7 @@ internal sealed class UnrealSyncSelectionTreeItem : ObservableObject
         //
         // 但只有在「组内一个叶子 ID 都没记录」时才整组勾上——那说明叶子 ID 变了，
         // 只能靠组 ID 兜底。若有叶子被记录，就按叶子逐个恢复：否则用户在组里特意
-        // 取消掉的删除项会被强行勾回来，而第五步的删除项是真的会删 Unreal 资产。
+        // 取消掉的删除项会被强行勾回来，而第四步的删除项是真的会删 Unreal 资产。
         var groupWasSelected = selectedStableIds.Contains(StableId) &&
             !Children.Any(child => selectedStableIds.Contains(child.StableId));
         if (groupWasSelected)

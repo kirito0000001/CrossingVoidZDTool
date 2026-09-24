@@ -291,7 +291,7 @@ namespace CrossingVoidZDTool
         /// <summary>
         /// 复制**本次流程**的全部日志。
         ///
-        /// 面板只留 300 条，跑完第五步时第一到第四步的日志早就被挤掉了，
+        /// 面板只留 300 条，跑完第四步时第一到第三步的日志早就被挤掉了，
         /// 「复制全部」复制的是面板里残下来的那点。这一条按当前 RunId
         /// 从 runtime.log 里捞全量行——它才是「一次同步的完整日志」的入口。
         /// </summary>
@@ -510,7 +510,7 @@ namespace CrossingVoidZDTool
         /// <summary>
         /// 只追加新的一条、并摘掉溢出的旧条目。
         /// 以前每写一行日志都要 Items.Clear() 再重建满 300 个 Border，外加一次同步排版，
-        /// 单行实测 400ms；一次第五步检测有上千行日志，界面就会整个僵住十几分钟。
+        /// 单行实测 400ms；一次第四步检测有上千行日志，界面就会整个僵住十几分钟。
         /// </summary>
         private void AppendLogItem(
             LogKind kind,
@@ -808,7 +808,7 @@ namespace CrossingVoidZDTool
 
         /// <summary>
         /// 这一行归哪一段。步骤标题行说的是**它指的那一步**，
-        /// 不是「写这条日志时当前停在哪一步」——离开第三步时当前步已经是第四步了。
+        /// 不是「写这条日志时当前停在哪一步」——离开第二步时当前步已经是第三步了。
         /// </summary>
         private RuntimeLogScope ScopeFor(int? stepOverride) =>
             stepOverride is { } step ? new RuntimeLogScope(CurrentLogRunId, step) : CurrentLogScope;
@@ -913,8 +913,8 @@ namespace CrossingVoidZDTool
         /// <summary>
         /// 某一批流程走完时补一条结束行。
         ///
-        /// 前五步的结束行在「离开这一步」时就写了；第六步是最后一步，没有下一步可走，
-        /// 所以它的收尾动作（蓝图置入写入成功）要自己报一次。
+        /// 一般步骤的结束行走通用路径（「离开这一步」时写）；蓝图置入的收尾动作是
+        /// 「写入成功」而不是导航，所以它的结束行由它自己报一次。
         /// </summary>
         private void LogWorkflowStepFinished(int step)
         {

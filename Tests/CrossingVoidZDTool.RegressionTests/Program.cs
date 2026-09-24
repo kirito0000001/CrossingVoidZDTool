@@ -127,7 +127,7 @@ var tests = new (string Name, Action Run)[]
     ("同步进度按角色和步骤存进角色目录", WorkflowStepCacheLivesInCharacterFolder),
     ("已加载的步骤不再重复触发虚幻检测", WorkflowStepSkipsDetectionWhenAlreadyLoaded),
     ("切换角色后各自的步骤与结果互不串台", WorkflowStateIsIsolatedPerCharacter),
-    ("第五步序列差异存进自己的小缓存并能读回", SequenceSyncStepKeepsItsOwnCacheFile),
+    ("第四步序列差异存进自己的小缓存并能读回", SequenceSyncStepKeepsItsOwnCacheFile),
     ("角色目录里的路径落盘时不带盘符", CharacterOwnedPathsArePortableOnDisk),
     ("角色目录搬家后图标路径依然指得到", PortablePathsSurviveCharacterFolderMove),
     ("旧机器留下的图标路径会被修回来", StaleIconPathIsRepairedOnRead),
@@ -166,7 +166,7 @@ var tests = new (string Name, Action Run)[]
     ("会话缓存读回后仍按大小写不敏感查表", SessionCacheKeepsCaseInsensitiveLookupAfterRoundTrip),
     ("语音与序列帧不再互相依赖", VoiceAndSequenceServicesDoNotDependOnEachOther),
     ("蓝图置入的引用比较与纠偏自检", BlueprintSetupSelfCheckPasses),
-    ("第五步序列同步自检", SequenceSyncSelfCheckPasses),
+    ("第四步序列同步自检", SequenceSyncSelfCheckPasses),
     ("依次检测不再因待处理步骤停下", DetectAllStepsIgnoresPendingSteps),
     ("某一步检测失败就不再往下跑", DetectAllStepsStopsOnStepFailure),
     ("重新加载先落步再检测", ReloadingStepNavigatesBeforeDetecting),
@@ -206,7 +206,7 @@ var tests = new (string Name, Action Run)[]
     ("无旧基线时已有配对素材先迁移为未修改", UnrealBridgeDiffMigratesMatchedItemsWithoutBaseline),
     ("特殊字符清洗后的语音仍按规范路径配对", UnrealBridgeDiffPairsSanitizedVoiceNames),
     ("规范连字符语音不会误报改名", UnrealBridgeDiffKeepsCanonicalVoiceNameUnchanged),
-    ("虚幻基础配置使用独立第四步工作区", UnrealLightConfigurationUsesDedicatedFourthStep),
+    ("虚幻基础配置使用独立第三步工作区", UnrealLightConfigurationUsesDedicatedFourthStep),
     ("虚幻基础配置脚本遵守确认字段白名单", UnrealLightConfigurationScriptUsesConfirmedWhitelist),
     ("新基线按源文件哈希识别工具箱更新", UnrealBridgeDiffDetectsSourceFileChangeAfterMigration),
     ("虚幻执行计划只包含选中项且删除排最后", UnrealBridgeExecutionPlanUsesSelectedChangesAndDeletesLast),
@@ -4689,13 +4689,13 @@ static void UnrealBridgeBackupPolicyProtectsRiskyChanges()
 static void BackupSettingGovernsEveryStep()
 {
     // 整体设置是唯一开关。以前只要计划里含更新/改名/删除就会绕过设置强制备份，
-    // 而第五步必然带删除项 —— 等于这个开关对第五步完全无效：
+    // 而第四步必然带删除项 —— 等于这个开关对第四步完全无效：
     // 关着开关点同步，照样先压一份几个 G 的工程出来。
     AssertEqual(
         UnrealBridgeBackupDecision.Skip,
         UnrealBridgeBackupPolicy.Decide(backupEnabledInSettings: false, planTouchesExistingAssets: false));
 
-    // 第五步的典型情形：开关关着，但这一批要删历史资产 —— 依然不备份，只记一条警告。
+    // 第四步的典型情形：开关关着，但这一批要删历史资产 —— 依然不备份，只记一条警告。
     AssertEqual(
         UnrealBridgeBackupDecision.SkipWithRiskWarning,
         UnrealBridgeBackupPolicy.Decide(backupEnabledInSettings: false, planTouchesExistingAssets: true));
@@ -4708,7 +4708,7 @@ static void BackupSettingGovernsEveryStep()
         UnrealBridgeBackupDecision.Backup,
         UnrealBridgeBackupPolicy.Decide(backupEnabledInSettings: true, planTouchesExistingAssets: true));
 
-    // 第五步整批删除项走进来时，计划侧仍然应判定「会动既有资产」，
+    // 第四步整批删除项走进来时，计划侧仍然应判定「会动既有资产」，
     // 这样关着开关时才会留下那条警告。
     var sequenceDeletes = new[]
     {
@@ -4774,7 +4774,7 @@ static void UnrealProjectBackupStaysInsideToolboxWorkspace()
         AssertEqual(true, destination.StartsWith(expectedDirectory, StringComparison.OrdinalIgnoreCase));
         AssertEqual(true, destination.EndsWith("Misaka-20260919-143042.zip", StringComparison.Ordinal));
 
-        // 带标签的那条（第六步 / 基础配置）沿用同一套命名。
+        // 带标签的那条（第三步 / 基础配置）沿用同一套命名。
         var labeled = UnrealProjectBackupLocator.ResolveDestination(root, "Misaka", stamp, "基础配置");
         AssertEqual(true, labeled.EndsWith("Misaka-基础配置-20260919-143042.zip", StringComparison.Ordinal));
 
@@ -5942,7 +5942,7 @@ static void SequencePlanCarriesEffectLayerAction()
             [change],
             WithEffectAtlas(BuildTestAtlas("Click", 2), "Misaka_Click_Effect_Sheet", 1, 2));
 
-        // 第七步的计划里**只有特效那一项**（第五步不再掺特效）。
+        // 第六步的计划里**只有特效那一项**（第四步不再掺特效）。
         AssertSequence(["Click_Effect"], plan.Actions.Select(item => item.ActionCode).ToArray());
         var effect = plan.Actions[0];
         AssertEqual(true, effect.IsEffectLayer);
@@ -6007,7 +6007,7 @@ static void EffectFramesJoinActionFingerprint()
         _ = ImportEffectFrames(character, action, Path.Combine(root, "drawn"), 4, 1, 3);
 
         var change = CreateSequenceDeleteChange("Click", "/Game/GameActor2D/Misaka/Material/Click/Old.Old");
-        // 第五步（角色序列）与第七步（特效）各出一份计划；指纹要两边都算进去，所以拼起来。
+        // 第四步（角色序列）与第六步（特效）各出一份计划；指纹要两边都算进去，所以拼起来。
         var effectAtlases = WithEffectAtlas(BuildTestAtlas("Click", 2), "Misaka_Click_Effect_Sheet", 1, 2);
         var publishService = new UnrealBridgeSequencePublishService();
         var plan = new UnrealBridgeSequenceSyncPlan();
@@ -6172,7 +6172,7 @@ static void BlueprintSetupApplyButtonEnablesAfterScan()
 
 static void BlueprintSetupSupportsSelectAllToggle()
 {
-    // 全选/全不选/反选是六步通用的一组，不再由第六步自己实现一遍。
+    // 全选/全不选/反选是六步通用的一组，不再由第五步自己实现一遍。
     var viewModel = CreateBlueprintSetupViewModel(3);
     AssertEqual(3, viewModel.SelectedStepItemCount);
     AssertEqual(3, viewModel.SelectableStepItemCount);
@@ -6309,7 +6309,7 @@ static void DetectAllStepsIgnoresPendingSteps()
     var (sync, controller, host, root) = CreateWorkflowController(4);
     try
     {
-        // 第四步检测完留着一堆没处理的项 —— 以前这会把它卡住
+        // 第三步检测完留着一堆没处理的项 —— 以前这会把它卡住
         host.OnDetect = _ =>
         {
             sync.SetLightConfigurationResult(new UnrealLightConfigurationResult
@@ -6330,8 +6330,8 @@ static void DetectAllStepsIgnoresPendingSteps()
 
         controller.DetectAllStepsAsync().GetAwaiter().GetResult();
 
-        // 一路检测到最大步，不再停在第 4 步。
-        // 用 Range 写而不是写死 4,5,6,7：以后挪号（合并第 2 步）这条不用再改。
+        // 一路检测到最大步，中间不再因"还有没处理的事"停下。
+        // 用 Range 写而不是写死 4,5,6：以后挪号（合并第 2 步）这条不用再改。
         AssertSequence(
             Enumerable.Range(4, UnrealSyncWorkflow.MaxStep - 3).ToArray(),
             host.DetectedSteps.ToArray());
@@ -6402,7 +6402,7 @@ static void ReloadingStepNavigatesBeforeDetecting()
         }
 
         AssertEqual(true, threw);
-        // 检测开始时步号已经落到第四步了，不是等检测成功才落
+        // 检测开始时步号已经落到第三步了，不是等检测成功才落
         AssertEqual(4, stepWhenDetecting);
         AssertEqual(4, sync.WorkflowStep);
     }
@@ -6414,7 +6414,7 @@ static void ReloadingStepNavigatesBeforeDetecting()
 
 static void WorkflowProgressIsPhasedForEveryStep()
 {
-    // 以前只有第五步用了分段权重，其余步骤全是写死的百分比（15、45、90…），
+    // 以前只有第四步用了分段权重，其余步骤全是写死的百分比（15、45、90…），
     // 而且第四、六步调虚幻的那十几秒进度条完全不动，看着像卡死。
 
     // 扫描只有一个阶段，不该显示成「阶段 1/1」那种废话。
@@ -6473,7 +6473,7 @@ static void WorkflowProgressIsPhasedForEveryStep()
 
 static void BlueprintSetupSelfCheckPasses()
 {
-    // 第六步的比较逻辑住在 Python 里（要在虚幻进程内跑），C# 这边够不着，
+    // 第五步的比较逻辑住在 Python 里（要在虚幻进程内跑），C# 这边够不着，
     // 所以带着它自己的自检脚本一起跑。脚本把 unreal 用桩顶掉，不需要引擎。
     var script = Path.Combine("Tools", "UnrealBridge", "tests", "check_blueprint_setup.py");
     AssertEqual(true, File.Exists(script));
@@ -6499,7 +6499,7 @@ static void BlueprintSetupSelfCheckPasses()
 }
 
 /// <summary>
-/// 第五步的自检脚本也要跟着回归一起跑。
+/// 第四步的自检脚本也要跟着回归一起跑。
 ///
 /// 为什么单列一条：它以前**没人跑**。self-check 里钉的是「动作异常不再拖垮整批」
 /// 这轮改动的契约，而脚本改了、它没跟着改，于是一红就是好几周，谁都不知道。
@@ -6515,7 +6515,7 @@ static void SequenceSyncSelfCheckPasses()
     {
         if (exitCode != 0)
         {
-            throw new InvalidOperationException("第五步序列同步自检未通过：\n" + output);
+            throw new InvalidOperationException("第四步序列同步自检未通过：\n" + output);
         }
 
         return;
@@ -6568,7 +6568,7 @@ static (bool Ran, int ExitCode, string Output) TryRunPythonScript(string scriptP
 }
 
 /// <summary>
-/// 第五步桥接脚本的源码。跨语言契约（C# 写的字段名 Python 读得到、脚本里必须有哪些护栏）
+/// 第四步桥接脚本的源码。跨语言契约（C# 写的字段名 Python 读得到、脚本里必须有哪些护栏）
 /// 只能读源码来盯，所以**只留这一个读取口**：以前散在九处，每加一条契约就多读一次文件。
 /// </summary>
 static string ReadSequenceSyncScriptSource() =>
@@ -6920,8 +6920,8 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // `ViewModels/*.cs` 收了一个统一读取口 `ReadViewModelSource`，总数降下来一格。
     // 117 -> 117（持平）：新增一条漂移护栏「虚幻项目备份只落在工具箱工作区」——
     // 备份落点必须在工作区里，这条只能靠读壳源码盯着（同额度内的记账，不是涨额度）。
-    // 117 -> 111：同一招再用一次。第五步桥接脚本被读了九次（每条跨语言契约各读一遍），
-    // 收成 `ReadSequenceSyncScriptSource()` 一个口；期间新增的「第五步序列同步自检」护栏
+    // 117 -> 111：同一招再用一次。第四步桥接脚本被读了九次（每条跨语言契约各读一遍），
+    // 收成 `ReadSequenceSyncScriptSource()` 一个口；期间新增的「第四步序列同步自检」护栏
     // 也走这个口，所以是净降，不是拿新增护栏去挤额度。
     Ratchet("读源码文件的调用点", sourceReadCalls, 111);
 
@@ -6959,7 +6959,7 @@ static UnrealBridgeChange CreateImageDeleteChange(string kind, string assetName)
 static void StaleImagesAreDeletableExceptUnclassified()
 {
     // 以前只有序列帧的待删除能执行，于是 Unreal 侧多出来的图片和语音只能一直
-    // 挂在差异列表里，第三步的差异永远归不了零。
+    // 挂在差异列表里，第二步的差异永远归不了零。
     // 但「其他图片」是有意停在那儿的东西（还没归类、或压根不归工具箱管），
     // 不能因为工具箱这边没有同名文件就当成多余资产删掉。
     AssertEqual(true, UnrealBridgePublishSupportPolicy.CanExecute(
@@ -7026,7 +7026,7 @@ static void UnknownSkillStatesAreReported()
 
 static void UnparsableSkillNumbersAreReportedNotZeroed()
 {
-    // 第六步以前对解析不了的数值一律 `: 0d` —— 技能倍率、护援值被静默写成 0，
+    // 第五步以前对解析不了的数值一律 `: 0d` —— 技能倍率、护援值被静默写成 0，
     // 扫描时看不出任何异常。又一例「显示成功但实际没做成」。
     var root = CreateTemporaryTestFolder();
     try
@@ -7089,7 +7089,7 @@ static void SkillNumbersSurviveCommaDecimalCulture()
 
         var (character, info, skills) = BuildBlueprintSetupFixture(root);
 
-        // 走完整往返：Unreal 侧的数值 -> 回填成文本 -> 存进角色数据 -> 第六步再解析回去。
+        // 走完整往返：Unreal 侧的数值 -> 回填成文本 -> 存进角色数据 -> 第五步再解析回去。
         // 格式化用当前区域、解析用不变区域这个不对称，正是在这里断掉的。
         var formatted = UnrealCharacterPreviewFactory.FormatDouble(1.5);
         AssertEqual("1.5", formatted);
@@ -7259,7 +7259,7 @@ static void AtomicWriteLeavesNoTemporaryFile()
 static void VoicePathPolicyBuildsCanonicalFolder()
 {
     // UnrealBridgeVoicePathPolicy 是纯策略、零 IO，却一直没有任何测试覆盖，
-    // 而第三步语音改名的目标路径全靠它算。
+    // 而第二步语音改名的目标路径全靠它算。
     const string current = "/Game/GameActor2D/Misaka/Sound/Other/Misaka-Defeat-1.Misaka-Defeat-1";
 
     AssertEqual(true, UnrealBridgeVoicePathPolicy.TryBuildCanonicalObjectPath(
@@ -7421,7 +7421,7 @@ static void CharacterDataWriteIsAtomic()
 static void ReclassifiedVoiceSurvivesBaselineFilter()
 {
     // 用户报的：在工具箱里把一条语音从「待分配」归到「失败语音」，
-    // 第三步却怎么都同步不上去，Unreal 里那条一直躺在 Sound/Other。
+    // 第二步却怎么都同步不上去，Unreal 里那条一直躺在 Sound/Other。
     //
     // 差异服务其实判对了（Renamed，目标 Sound/Defeat），丢失发生在它之上：
     // 恢复分步缓存时会拿基线把「已经同步过的」剔掉，而那个判定只比内容哈希。
@@ -7512,11 +7512,11 @@ static void ReclassifiedVoiceSurvivesBaselineFilter()
 
 static void RefreshKeepsFreshSequenceTreeOverCache()
 {
-    // 「重新加载序列同步」的尾部是：检测 → 建树 → SetLoadedPublishStep(5)
-    // → ReturnToWorkflowStep(5)。最后这一步以前会老老实实读第五步的会话缓存，
+    // 「重新加载序列同步」的尾部是：检测 → 建树 → SetLoadedPublishStep(4)
+    // → ReturnToWorkflowStep(4)。最后这一步以前会老老实实读第四步的会话缓存，
     // 把刚检测出来的结果当场盖掉 —— 用户按了刷新，列表却还是刷新前那一份。
     //
-    // 顺带钉住另一半：第五步从缓存恢复时**不能**把 Unchanged 剔掉
+    // 顺带钉住另一半：第四步从缓存恢复时**不能**把 Unchanged 剔掉
     // （动作节点本身就是 Unchanged），否则「Unreal 现有几个帧位」这类现状
     // 摘要会整条消失，帧也全部配不成对。
     var root = CreateTemporaryTestFolder();
@@ -7554,13 +7554,13 @@ static void RefreshKeepsFreshSequenceTreeOverCache()
             actionCode, "/Game/GameActor2D/Misaka/Material/Sk2/Sk2_Frame22.Sk2_Frame22");
         var staleChanges = new List<UnrealBridgeChange> { actionNode, staleDelete };
 
-        // 上一次留下的第五步缓存。
+        // 上一次留下的第四步缓存。
         var writer = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
         writer.Load(enginePath, projectPath);
         writer.IsEngineToToolbox = false;
         writer.RefreshDraftSources([character]);
         writer.SelectSource(writer.CharacterSources.Single());
-        writer.ReturnToWorkflowStep(5);
+        writer.ReturnToWorkflowStep(4);
         writer.SetPublishSelectionTree(
             UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
                 staleChanges, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: false),
@@ -7573,7 +7573,7 @@ static void RefreshKeepsFreshSequenceTreeOverCache()
         reader.IsEngineToToolbox = false;
         reader.RefreshDraftSources([character]);
         reader.SelectSource(reader.CharacterSources.Single());
-        AssertEqual(true, reader.IsWorkflowStepLoaded(5));
+        AssertEqual(true, reader.IsWorkflowStepLoaded(4));
         var restored = reader.SelectionTreeRoots.ToArray();
         AssertEqual(1, restored.Length);
         AssertEqual(true, restored[0].DetailText.Contains("Unreal 现有 23 个帧位", StringComparison.Ordinal));
@@ -7591,8 +7591,8 @@ static void RefreshKeepsFreshSequenceTreeOverCache()
             UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
                 freshChanges, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: false),
             freshChanges);
-        reader.SetLoadedPublishStep(5);
-        reader.ReturnToWorkflowStep(5);
+        reader.SetLoadedPublishStep(4);
+        reader.ReturnToWorkflowStep(4);
 
         var afterRefresh = reader.SelectionTreeRoots.SelectMany(root => root.Children).ToArray();
         AssertEqual(true, afterRefresh.Any(child => child.StableId == freshDelete.StableId));
@@ -7609,8 +7609,8 @@ static void RefreshKeepsFreshSequenceTreeOverCache()
 
 static void SequenceSyncStepKeepsItsOwnCacheFile()
 {
-    // 第五步的差异（序列帧）和第三步的差异（图 / 声音）本来就是两回事，
-    // 以前都挤在同一份"所有步骤共用"的会话缓存里。现在第五步有自己的一份小文件：
+    // 第四步的差异（序列帧）和第二步的差异（图 / 声音）本来就是两回事，
+    // 以前都挤在同一份"所有步骤共用"的会话缓存里。现在第四步有自己的一份小文件：
     //   - 检测完（建树 + 认领归属）就该出现；
     //   - 只落在跑过这一步的角色目录里；
     //   - 就算会话缓存被删掉，它自己也能把整棵树恢复回来。
@@ -7658,23 +7658,23 @@ static void SequenceSyncStepKeepsItsOwnCacheFile()
         detector.IsEngineToToolbox = false;
         detector.RefreshDraftSources([misaka, kirito]);
         detector.SelectSource(SourceOf(detector, misaka));
-        detector.ReturnToWorkflowStep(5);
+        detector.ReturnToWorkflowStep(4);
         detector.SetPublishSelectionTree(
             UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
                 changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: false),
             changes);
-        detector.SetLoadedPublishStep(5);
+        detector.SetLoadedPublishStep(4);
         detector.FlushSessionCache();
 
         var misakaFolder = UnrealSyncSessionCacheService.GetCacheFolderPath(misaka);
-        var step5Path = Path.Combine(misakaFolder, Step5SequenceSyncCache.FileName);
+        var step5Path = Path.Combine(misakaFolder, Step4SequenceSyncCache.FileName);
         AssertEqual(true, File.Exists(step5Path));
         // 没跑过这一步的角色目录里不该出现它
         AssertEqual(
             false,
             File.Exists(Path.Combine(
                 UnrealSyncSessionCacheService.GetCacheFolderPath(kirito),
-                Step5SequenceSyncCache.FileName)));
+                Step4SequenceSyncCache.FileName)));
 
         // 换一个新会话，并把会话缓存那份删掉 —— 只剩它自己的小文件，照样要能恢复整棵树。
         var syncCacheFiles = Directory.GetFiles(misakaFolder, "sync-*.json");
@@ -7689,8 +7689,8 @@ static void SequenceSyncStepKeepsItsOwnCacheFile()
         reader.IsEngineToToolbox = false;
         reader.RefreshDraftSources([misaka, kirito]);
         reader.SelectSource(SourceOf(reader, misaka));
-        reader.ReturnToWorkflowStep(5);
-        AssertEqual(true, reader.IsWorkflowStepLoaded(5));
+        reader.ReturnToWorkflowStep(4);
+        AssertEqual(true, reader.IsWorkflowStepLoaded(4));
         var restoredRoots = reader.SelectionTreeRoots.ToArray();
         AssertEqual(1, restoredRoots.Length);
         AssertEqual(true, restoredRoots[0].Children.Any(child => child.StableId == frameChange.StableId));
@@ -7733,11 +7733,11 @@ static void SingleItemSelectionRefreshesStepSelectionText()
 
     var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
     // 计数是按当前步骤算的，默认停在第一步会去数底层检测项
-    viewModel.ReturnToWorkflowStep(5);
+    viewModel.ReturnToWorkflowStep(4);
     var roots = UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
         changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: false);
     viewModel.SetPublishSelectionTree(roots, changes);
-    AssertEqual(true, viewModel.IsWorkflowStepLoaded(5));
+    AssertEqual(true, viewModel.IsWorkflowStepLoaded(4));
 
     var leaf = viewModel.SelectionTreeRoots.SelectMany(root => root.Children).First();
     AssertEqual(false, leaf.IsChecked);
@@ -7780,7 +7780,7 @@ static void ResetImportOperationRefreshesWorkspaceAndWorkflow()
     var roots = UnrealSyncSelectionTreeBuilder.FromSequenceChanges(
         changes, UnrealBridgePublishSupportPolicy.CanExecute, selectPendingByDefault: true);
     viewModel.SetPublishSelectionTree(roots, changes);
-    viewModel.SetLoadedPublishStep(3);
+    viewModel.SetLoadedPublishStep(2);
     AssertEqual(true, viewModel.HasContentDetection);
 
     var changed = new List<string>();
@@ -7791,7 +7791,7 @@ static void ResetImportOperationRefreshesWorkspaceAndWorkflow()
     viewModel.FailImportDetection("检测失败");
 
     AssertEqual(false, viewModel.HasContentDetection);
-    AssertEqual(false, viewModel.IsWorkflowStepLoaded(3));
+    AssertEqual(false, viewModel.IsWorkflowStepLoaded(2));
     // 中栏必须被通知到，否则占位和内容可能双双隐藏
     AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.WorkspaceState)));
     AssertEqual(true, changed.Contains(nameof(UnrealProjectSyncViewModel.WorkspacePlaceholderVisibility)));
@@ -7970,7 +7970,7 @@ static void WorkspaceGroupsStayConsistentWithItems()
 static void WorkspaceNeverShowsBlankPanel()
 {
     // 中栏以前由九个各自独立的可见性绑定拼出来，「已加载」和「有内容」
-    // 两个条件之间漏掉的那块没人认领，就是一片空白——第四步和第六步都撞过：
+    // 两个条件之间漏掉的那块没人认领，就是一片空白——第三步和第五步都撞过：
     // 进去一片白，点一次重新加载才显示「没有差异」。
     var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService())
     {
@@ -8260,11 +8260,11 @@ static void WorkflowStateIsIsolatedPerCharacter()
             viewModel.CharacterSources.Single(item =>
                 string.Equals(item.DraftCharacter?.Code, character.Code, StringComparison.OrdinalIgnoreCase));
 
-        // 御坂走到第六步（蓝图置入）并留下一份检测结果。
-        // 注意写死 6：`UnrealSyncWorkflow.MaxStep` 现在已经是 7（第七步是特效同步），
+        // 御坂走到第五步（蓝图置入）并留下一份检测结果。
+        // 注意写死 5：`UnrealSyncWorkflow.MaxStep` 现在已经是 6（第六步是特效同步），
         // 拿 MaxStep 当"蓝图那一步"会走到特效步上去。
         viewModel.SelectSource(SourceOf(misaka));
-        viewModel.ReturnToWorkflowStep(6);
+        viewModel.ReturnToWorkflowStep(5);
         viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
         {
             Succeeded = true,
@@ -8280,20 +8280,20 @@ static void WorkflowStateIsIsolatedPerCharacter()
             ]
         });
         viewModel.FlushSessionCache();
-        // 这里说的是**第六步（蓝图置入）**，不是最大步：MaxStep 已经是 7（特效同步）。
-        AssertEqual(6, viewModel.WorkflowStep);
+        // 这里说的是**第五步（蓝图置入）**，不是最大步：MaxStep 已经是 6（特效同步）。
+        AssertEqual(5, viewModel.WorkflowStep);
         AssertEqual(1, viewModel.BlueprintSetupItems.Count);
 
         // 切到桐人：不能带着御坂的结果过去
         viewModel.SelectSource(SourceOf(kirito));
         AssertEqual(0, viewModel.BlueprintSetupItems.Count);
         AssertEqual(false, viewModel.IsBlueprintSetupLoaded);
-        AssertEqual(false, viewModel.IsWorkflowStepLoaded(6));
+        AssertEqual(false, viewModel.IsWorkflowStepLoaded(5));
         // 也不能带着御坂的差异树过去
         AssertEqual(0, viewModel.SelectionTreeRoots.Count);
 
-        // 桐人自己走到第四步，留下自己的结果
-        viewModel.ReturnToWorkflowStep(4);
+        // 桐人自己走到第三步（基础配置），留下自己的结果
+        viewModel.ReturnToWorkflowStep(3);
         viewModel.SetLightConfigurationResult(new UnrealLightConfigurationResult
         {
             Succeeded = true,
@@ -8316,7 +8316,7 @@ static void WorkflowStateIsIsolatedPerCharacter()
         AssertEqual(true, Directory.Exists(kiritoCache));
         // 角色目录下有**两类**分步文件，别用 `*step4*.json` 一把捞：
         //   1) 同步台的分步进度缓存：sync-<项目键>-step<N>.json
-        //   2) 各步自己的小缓存：    step1-foundation.json / step4-light-configuration.json …
+        //   2) 各步自己的小缓存：    step1-foundation.json / step3-light-configuration.json …
         // 这条用例验的是(1)不串台，所以按 `sync-` 前缀取；(2) 单独在下面验。
         AssertEqual(true, Directory.GetFiles(misakaCache, "sync-*step6*.json").Length == 1);
         AssertEqual(true, Directory.GetFiles(kiritoCache, "sync-*step4*.json").Length == 1);
@@ -8324,10 +8324,10 @@ static void WorkflowStateIsIsolatedPerCharacter()
         AssertEqual(0, Directory.GetFiles(misakaCache, "sync-*step4*.json").Length);
         AssertEqual(0, Directory.GetFiles(kiritoCache, "sync-*step6*.json").Length);
         // 各步自己的小缓存同样只落在跑过那一步的角色目录里
-        AssertEqual(1, Directory.GetFiles(kiritoCache, "step4-light-configuration.json").Length);
-        AssertEqual(0, Directory.GetFiles(misakaCache, "step4-light-configuration.json").Length);
+        AssertEqual(1, Directory.GetFiles(kiritoCache, "step3-light-configuration.json").Length);
+        AssertEqual(0, Directory.GetFiles(misakaCache, "step3-light-configuration.json").Length);
 
-        // 切回御坂：第六步的结果要能从它自己的缓存恢复回来
+        // 切回御坂：第五步的结果要能从它自己的缓存恢复回来
         viewModel.SelectSource(SourceOf(misaka));
         var restored = new UnrealSyncSessionCacheService()
             .LoadStep(misaka, projectPath, misaka.Code, 6);
@@ -8336,7 +8336,7 @@ static void WorkflowStateIsIsolatedPerCharacter()
         AssertEqual(true, restored.Cache.IsBlueprintSetupLoaded);
         AssertSequence(["bp.anti"], restored.Cache.BlueprintSetupItems.Select(item => item.StableId).ToArray());
 
-        // 桐人的第四步缓存同样完好，没有被御坂的写入覆盖
+        // 桐人的第三步缓存同样完好，没有被御坂的写入覆盖
         var kiritoRestored = new UnrealSyncSessionCacheService()
             .LoadStep(kirito, projectPath, kirito.Code, 4);
         AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, kiritoRestored.Status);
@@ -8351,19 +8351,31 @@ static void WorkflowStateIsIsolatedPerCharacter()
 
 static void WorkflowStepIsNotClampedBelowLastStep()
 {
-    // 步号上限以前散落着写死成 5：接上第六步之后点「下一步」会被静默夹回第五步，
+    // 步号上限以前散落着写死成 5：接上下一步之后点「下一步」会被静默夹回前一步，
     // 界面停在原地却已经跑起了虚幻检测，看着就像按钮直接执行了操作。
     // 加新步骤时只该改 UnrealSyncWorkflow.MaxStep 一处。
-    // 第七步「特效同步」接上之后，上限跟着到 7（这条用例就是盯着"加步骤别忘了抬上限"）。
-    AssertEqual(7, UnrealSyncWorkflow.MaxStep);
+    // 第六步「特效同步」接上之后，上限跟着到 6（这条用例就是盯着"加步骤别忘了抬上限"）。
+    AssertEqual(6, UnrealSyncWorkflow.MaxStep);
 
     var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
     // 流程步骤只存在于「工具箱 -> 虚幻」方向，默认方向是反过来的。
     viewModel.IsEngineToToolbox = false;
-    // 蓝图置入是**第六步**，不是最大步 —— 最大步已经是 7「特效同步」。
-    viewModel.ReturnToWorkflowStep(6);
-    AssertEqual(6, viewModel.WorkflowStep);
+    // 蓝图置入是**第五步**，不是最大步 —— 最大步已经是 6「特效同步」。
+    viewModel.ReturnToWorkflowStep(5);
+    AssertEqual(5, viewModel.WorkflowStep);
     AssertEqual(true, viewModel.IsBlueprintSetupWorkspace);
+
+    // 第 4 步（序列同步）在 ReturnToWorkflowStep 里有个**特判分支**：除了落步，
+    // 还要把发布阶段拨到"序列动画轨道"。那段里的三个数字必须同为 4 ——
+    // 2026-09-24 收口时只改了 `if` 的条件、里面两句还是旧的 5，于是
+    // 「进第 4 步」实际停在 5，界面上「上一步」永远回不去（当晚 19:46 实测）。
+    viewModel.ReturnToWorkflowStep(4);
+    AssertEqual(4, viewModel.WorkflowStep);
+    AssertEqual(true, viewModel.IsSequenceSynchronizationWorkspace);
+    AssertEqual(
+        UnrealBridgePublishStage.ZdAnimationTracks,
+        viewModel.SelectedPublishStage?.Stage);
+
     // 越界的步号才应该被夹住。
     viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep + 1);
     AssertEqual(UnrealSyncWorkflow.MaxStep, viewModel.WorkflowStep);
@@ -8388,22 +8400,22 @@ static void WorkflowStepIsNotClampedBelowLastStep()
         AssertEqual(0, host.DetectedSteps.Count);
 
         // ② 去掉自动检测之后：**进步骤一次虚幻都不跑**（原来这里会顺手检测一次、
-        // 然后靠"本步已有缓存"跳过）。写死 6 只是因为这条用例本来就停在第六步。
-        controller.EnterStepAsync(6).GetAwaiter().GetResult();
+        // 然后靠"本步已有缓存"跳过）。写死 5 只是因为这条用例本来就停在第五步。
+        controller.EnterStepAsync(5).GetAwaiter().GetResult();
         AssertSequence([], host.DetectedSteps.ToArray());
         sync.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
         {
             Succeeded = true, CharacterCode = "Misaka", Items = []
         });
-        controller.EnterStepAsync(6).GetAwaiter().GetResult();
+        controller.EnterStepAsync(5).GetAwaiter().GetResult();
         AssertSequence([], host.DetectedSteps.ToArray());
 
         // 检测只剩手动入口：「重新加载」每次都真跑，不因为"已经有数据"就跳过。
         controller.ReloadCurrentStepAsync().GetAwaiter().GetResult();
-        AssertSequence([6], host.DetectedSteps.ToArray());
+        AssertSequence([5], host.DetectedSteps.ToArray());
         controller.ReloadCurrentStepAsync().GetAwaiter().GetResult();
         AssertSequence(
-            [6, 6],
+            [5, 5],
             host.DetectedSteps.ToArray());
     }
     finally
@@ -8490,16 +8502,16 @@ static void WorkflowStepSkipsDetectionWhenAlreadyLoaded()
 {
     var viewModel = CreateBlueprintSetupViewModel(2);
 
-    // 第六步已经有数据，再进这一步就不该重跑虚幻检测。
-    AssertEqual(true, viewModel.IsWorkflowStepLoaded(6));
-    // 其余步骤各看各的状态，不能跟着第六步一起被认为已加载。
+    // 第五步已经有数据，再进这一步就不该重跑虚幻检测。
+    AssertEqual(true, viewModel.IsWorkflowStepLoaded(5));
+    // 其余步骤各看各的状态，不能跟着第五步一起被认为已加载。
+    AssertEqual(false, viewModel.IsWorkflowStepLoaded(2));
+    AssertEqual(false, viewModel.IsWorkflowStepLoaded(3));
+
+    // 第二步和第四步共用同一棵差异树，必须靠归属区分，
+    // 否则从第四步回第二步会误以为已经检测过。
     AssertEqual(false, viewModel.IsWorkflowStepLoaded(2));
     AssertEqual(false, viewModel.IsWorkflowStepLoaded(4));
-
-    // 第三步和第五步共用同一棵差异树，必须靠归属区分，
-    // 否则从第五步回第三步会误以为已经检测过。
-    AssertEqual(false, viewModel.IsWorkflowStepLoaded(3));
-    AssertEqual(false, viewModel.IsWorkflowStepLoaded(5));
 }
 
 static void BlueprintSetupRequestComesFromToolboxData()
@@ -8601,7 +8613,7 @@ static void BlueprintSetupSequenceBindingsMatchCatalog()
 {
     var bindings = UnrealBlueprintSetupService.BuildSequenceBindings("Misaka", 2);
 
-    // 只有代号表里标了蓝图属性的动作才归第六步管，其余靠 AnimMaps 绑定。
+    // 只有代号表里标了蓝图属性的动作才归第五步管，其余靠 AnimMaps 绑定。
     var expected = SequenceActionCatalog.Definitions
         .Where(item => !string.IsNullOrEmpty(item.BlueprintSequenceArrayProperty))
         .Select(item => item.BlueprintSequenceArrayProperty)
@@ -8672,7 +8684,7 @@ static void BlueprintSetupGroupsItemsAndHidesUnchanged()
 {
     var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
     viewModel.IsEngineToToolbox = false;
-    viewModel.ReturnToWorkflowStep(6);
+    viewModel.ReturnToWorkflowStep(5);
     viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
     {
         Succeeded = true,
@@ -9205,7 +9217,7 @@ static void UnrealBridgeDiffKeepsSyncedItemsAfterProjectMove()
     // 基线按 Unreal 工程路径散列分文件存。把工程换个盘符之后，旧基线留在旧文件里，
     // 新路径的基线可能只记了一部分模块（例如只同步过序列帧）。这时素材项查不到
     // 记录，如果还要求「整个基线文件为空」才认作已同步，它们会全部变成冲突——
-    // 而冲突不能自动执行，第三步就此卡死，列表再也归不了零。实测一个角色
+    // 而冲突不能自动执行，第二步就此卡死，列表再也归不了零。实测一个角色
     // 147 项素材里有 144 项被这样误判。
     var iconPath = Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml");
     var toolbox = new UnrealBridgeSnapshot(
@@ -9474,7 +9486,7 @@ static void UnrealLightConfigurationUsesDedicatedFourthStep()
     {
         IsEngineToToolbox = false
     };
-    viewModel.ReturnToWorkflowStep(4);
+    viewModel.ReturnToWorkflowStep(3);
     viewModel.SetLightConfigurationResult(new UnrealLightConfigurationResult
     {
         Succeeded = true,
@@ -10291,7 +10303,7 @@ static void SessionCacheKeepsCaseInsensitiveLookupAfterRoundTrip()
 {
     // System.Text.Json 对「有 setter 的集合属性」默认新建一个默认比较器的实例再赋值，
     // 声明处的 OrdinalIgnoreCase 就丢了——而这类丢失是静默的：
-    // 基线查不到就把已同步的素材判成新增/冲突，第三步差异永远归不了零。
+    // 基线查不到就把已同步的素材判成新增/冲突，第二步差异永远归不了零。
     // 声明处标了 [JsonObjectCreationHandling(Populate)] 才保得住，这条用例是它的回归网。
     var root = CreateTemporaryTestFolder();
     try
@@ -10955,7 +10967,7 @@ static void UnrealBridgePublishPolicySelectsOnlyMappedFileAssets()
     AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(new UnrealBridgeChange(
         semanticItem.StableId, semanticItem.Module, semanticItem.DisplayName, UnrealBridgeChangeKind.Updated,
         semanticItem, semanticItem, true)));
-    // 新增的文件素材也能自动执行——第三步要靠这条才能把新图片同步进去。
+    // 新增的文件素材也能自动执行——第二步要靠这条才能把新图片同步进去。
     // 这条断言原来写的是 false，那是「新增必须先在第二步选好重定向目标」
     // 时期留下的；现在有源文件就直接建，没有源文件（例如空白帧）另有分支。
     AssertEqual(true, UnrealBridgePublishSupportPolicy.CanExecute(new UnrealBridgeChange(
@@ -11675,7 +11687,7 @@ static void ToolboxSequenceActionCodesResolveThroughCatalog()
     {
         if (action.IsCombo)
         {
-            // 连携技尚未纳入规范动作目录，第五步也还不发布它。
+            // 连携技尚未纳入规范动作目录，第四步也还不发布它。
             AssertEqual(false, SequenceActionCatalog.TryResolve(action.Code, out _, out _));
             continue;
         }
@@ -11864,7 +11876,7 @@ static void SequenceSnapshotsAlignAcrossLegacySpellings()
         .Compare(toolbox, unreal, UnrealBridgeDirection.PublishToUnreal, null)
         .ToArray();
 
-    // 历史命名的帧要判成改名并拆成旧/新两行，不能判成冲突——冲突在第五步不可执行。
+    // 历史命名的帧要判成改名并拆成旧/新两行，不能判成冲突——冲突在第四步不可执行。
     var frameRows = changes
         .Where(change => change.SequenceGroupKey == SequenceFrameIdentity.BuildActionStableId("OnDamage"))
         .ToArray();
@@ -11891,7 +11903,7 @@ static void SequenceFramesAlreadyPublishedCountAsUnchanged()
     AssertEqual(14, changes.Length);
     AssertEqual(14, changes.Count(change => change.Kind == UnrealBridgeChangeKind.Unchanged));
 
-    // 已同步的帧两侧都在，可以直接迁移成基线；这是第五步能记录同步状态的前提。
+    // 已同步的帧两侧都在，可以直接迁移成基线；这是第四步能记录同步状态的前提。
     var baseline = new UnrealBridgeBaselineService().BuildFromChanges(
         "Misaka",
         @"C:\Unreal\CrossingVoid.uproject",
@@ -13290,7 +13302,7 @@ static void ExportSkipsUnchangedPngFiles()
 
 static void PostSyncExportRunsInTheSameEditorSession()
 {
-    // 一次第五步同步原本要开三次编辑器：同步前导出、桥接同步、复扫导出。
+    // 一次第四步同步原本要开三次编辑器：同步前导出、桥接同步、复扫导出。
     // 实测每次会话 13-15 秒，其中约 9 秒是纯启动开销。复扫要读的就是那个
     // 刚被自己改过、已经加载好的编辑器，没有理由再开一次。
     // 合并后实测 16 秒完成「同步 + 导出」，对比原先 13 + 15 = 28 秒。
@@ -13397,7 +13409,7 @@ static void BlankFrameDeletionIsExecutable()
     // 告警必须带上进程输出，否则等于什么线索都没留。
     AssertEqual(true, executor.Contains("进程输出"));
 
-    // 第五步不碰角色蓝图：绑定序列槽位是下一步的职责。
+    // 第四步不碰角色蓝图：绑定序列槽位是下一步的职责。
     // 而且 UBlueprint 的 generated_class 在这个引擎版本上并非可脚本化属性，
     // 硬写会让第一个带蓝图属性的动作（DefAtk）直接失败，拖垮整批同步。
     var syncScript2 = ReadSequenceSyncScriptSource();
@@ -13458,7 +13470,7 @@ static void MatchingSidesAreNotConflicts()
     // 冲突的语义是「两边都被人独立改过，得由人来裁决」。动画由工具箱定义，
     // Unreal 侧的布局和帧结构都是从工具箱推出去的，没有独立的编辑来源，
     // 所以这里合理的结论是「需要重建」（Updated），而不是把人拦下来。
-    // 第五步的差异项必须可执行，Conflict 在那边是勾不动的。
+    // 第四步的差异项必须可执行，Conflict 在那边是勾不动的。
     var drifted = unrealItem with { ContentHash = "DIFFERENT-HASH" };
     var conflictChanges = new UnrealBridgeDiffService().Compare(
         new UnrealBridgeSnapshot("Misaka", [toolbox]),
@@ -13587,7 +13599,7 @@ static void SyncCompletionLeavesVisibleFeedback()
     };
     viewModel.SelectedPublishStage = viewModel.PublishStages
         .First(stage => stage.Stage == UnrealBridgePublishStage.ZdAnimationTracks);
-    viewModel.ReturnToWorkflowStep(5);
+    viewModel.ReturnToWorkflowStep(4);
 
     var payload = SequenceFrameIdentity.BuildActionPayload("Click", 12);
     var item = new UnrealBridgeSnapshotItem(
@@ -13705,9 +13717,9 @@ static int RunUnrealSyncSmoke(string[] args)
             var toolboxSnapshot = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character);
             foreach (var (label, scope, modules) in new (string, UnrealProjectSyncExportScope, UnrealBridgeModule[])[]
                      {
-                         ("第三步 素材", UnrealProjectSyncExportScope.CharacterMaterials,
+                         ("第二步 素材", UnrealProjectSyncExportScope.CharacterMaterials,
                              [UnrealBridgeModule.BaseMaterials, UnrealBridgeModule.Voices]),
-                         ("第五步 序列", UnrealProjectSyncExportScope.CharacterSequences,
+                         ("第四步 序列", UnrealProjectSyncExportScope.CharacterSequences,
                              [UnrealBridgeModule.SequenceFrames]),
                      })
             {
@@ -14489,7 +14501,7 @@ static void EffectMaterialTargetsExAssetFolderAndStaysAdditiveOnly()
             CreateImageDeleteChange(nameof(BaseMaterialKind.Effect), "Misaka-FX-9")));
         AssertEqual(false, UnrealBridgePublishSupportPolicy.CanExecute(
             CreateImageDeleteChange(nameof(BaseMaterialKind.OtherImage), "Misaka-随手放的图")));
-        // 归了类却对不上的仍然要清得掉，否则第三步的差异归不了零
+        // 归了类却对不上的仍然要清得掉，否则第二步的差异归不了零
         AssertEqual(true, UnrealBridgePublishSupportPolicy.CanExecute(
             CreateImageDeleteChange(nameof(BaseMaterialKind.SkillIcon), "Misaka-SkillIcon-9")));
     }
@@ -14504,7 +14516,7 @@ static void AdditiveCategoriesOnlyShowAdditionsNotDeletions()
     // 特效素材、其他图片、其他语音（待分配）都不要求两侧一一对应：
     // Unreal 工程里本来就可能存着工具箱不认识的东西——手工丢进去的备用图、
     // 还没归类的语音、早先在工程里直接做的特效。
-    // 这些「Unreal 多出来」的项如果照常列成待删除，第三步的差异永远归不了零，
+    // 这些「Unreal 多出来」的项如果照常列成待删除，第二步的差异永远归不了零，
     // 而唯一的出路是删掉，那是删用户的素材。
     var addedEffect = new UnrealBridgeSnapshotItem(
         "material:fx-1",
@@ -14776,42 +14788,42 @@ static void StepLoadStoreKeepsPerStepStateSeparate()
 {
     // P5 收尾：六步的加载状态住进 UnrealSyncStepLoadStore 之后，
     // 「每一步只保存自己的、互不影响」在状态层就成立了；
-    // 第三、五步共用同一棵差异树，但同一时刻只能有一个归属——这条以前只是两处成对判断，
+    // 第二、四步共用同一棵差异树，但同一时刻只能有一个归属——这条以前只是两处成对判断，
     // 没有任何地方写下来。
     var store = new UnrealSyncStepLoadStore();
-    foreach (var step in new[] { 2, 3, 4, 5, 6 })
+    foreach (var step in new[] { 2, 3, 4, 5 })
     {
         AssertEqual(false, store.IsLoaded(step));
     }
 
-    // 第二步加载过不影响别的步；值没变时也不报「变了」，免得白刷一次界面
-    AssertEqual(true, store.SetLoaded(2, true));
-    AssertEqual(true, store.IsLoaded(2));
-    AssertEqual(false, store.IsLoaded(3));
-    AssertEqual(false, store.SetLoaded(2, true));
-
-    // 差异树：第三步认领之后第五步就不算加载
-    AssertEqual(true, store.ClaimPublishTree(3));
+    // 独立标志：第三、五步各存各的；值没变时也不报「变了」，免得白刷一次界面
+    AssertEqual(true, store.SetLoaded(3, true));
     AssertEqual(true, store.IsLoaded(3));
     AssertEqual(false, store.IsLoaded(5));
+    AssertEqual(false, store.SetLoaded(3, true));
+
+    // 差异树：第二步认领之后第四步就不算加载
+    AssertEqual(true, store.ClaimPublishTree(2));
+    AssertEqual(true, store.IsLoaded(2));
+    AssertEqual(false, store.IsLoaded(4));
     AssertEqual(true, store.HasPublishTree);
 
-    // 第五步重新检测后归属转移，第三步随之失效
-    AssertEqual(true, store.ClaimPublishTree(5));
-    AssertEqual(false, store.IsLoaded(3));
-    AssertEqual(true, store.IsLoaded(5));
+    // 第四步重新检测后归属转移，第二步随之失效
+    AssertEqual(true, store.ClaimPublishTree(4));
+    AssertEqual(false, store.IsLoaded(2));
+    AssertEqual(true, store.IsLoaded(4));
 
     // 只标「有树」不动归属——导入方向是这种形态（树不属于任何一步）
     AssertEqual(true, store.ClearPublishTree());
     AssertEqual(true, store.MarkPublishTree());
-    AssertEqual(false, store.IsLoaded(3));
-    AssertEqual(false, store.IsLoaded(5));
+    AssertEqual(false, store.IsLoaded(2));
+    AssertEqual(false, store.IsLoaded(4));
     AssertEqual(true, store.HasPublishTree);
 
     // 越界步号当场抛，别悄悄当成「没加载」——那是上一版状态散着放时的坑
     AssertEqual(true, ThrowsArgumentOutOfRange(() => store.IsLoaded(0)));
-    AssertEqual(true, ThrowsArgumentOutOfRange(() => store.SetLoaded(3, true)));
-    AssertEqual(true, ThrowsArgumentOutOfRange(() => store.ClaimPublishTree(4)));
+    AssertEqual(true, ThrowsArgumentOutOfRange(() => store.SetLoaded(1, true)));
+    AssertEqual(true, ThrowsArgumentOutOfRange(() => store.ClaimPublishTree(3)));
 }
 
 static bool ThrowsArgumentOutOfRange(Action action)
@@ -15097,15 +15109,15 @@ static void RuntimeLogLinesCarryRunAndStep()
     AssertEqual("[12:24:17] Log: x", RuntimeLogFormat.FormatPanelLine(now, RuntimeLogScope.None, "Log: x"));
 
     AssertEqual("R-20260918-1224-7f3a", RuntimeLogFormat.CreateRunId(now, 0x7f3a));
-    AssertEqual("▶ 第 5 步 · 序列同步", RuntimeLogFormat.FormatStepStart(5, "序列同步"));
-    AssertEqual("■ 第 5 步 · 结束：共检查 2 项", RuntimeLogFormat.FormatStepEnd(5, "共检查 2 项"));
+    AssertEqual("▶ 第 4 步 · 序列同步", RuntimeLogFormat.FormatStepStart(4, "序列同步"));
+    AssertEqual("■ 第 4 步 · 结束：共检查 2 项", RuntimeLogFormat.FormatStepEnd(4, "共检查 2 项"));
     // 没有摘要时也要有话说，不能留一个空尾巴
     AssertEqual("■ 第 3 步 · 结束：无摘要", RuntimeLogFormat.FormatStepEnd(3, "   "));
 }
 
 static void StickyLogLinesSurvivePanelEviction()
 {
-    // 一次第五步检测就写上百行明细，面板只留 300 条。
+    // 一次第四步检测就写上百行明细，面板只留 300 条。
     // 步骤标题行是 Sticky，必须熬过淘汰——否则「这次走到哪一步」又看不出来。
     var buffer = new LogPanelBuffer(capacity: 5, stickyCapacity: 50);
 
@@ -15254,7 +15266,7 @@ static void ChangingWorkflowStepNotifiesEveryDeclaredProperty()
         }
     };
 
-    // 第 2 步 = 合并后的「同步素材」（第 3 步的号已放空，别拿它当例子）
+    // 第 2 步 = 合并后的「同步素材」
     viewModel.ReturnToWorkflowStep(2);
     AssertEqual(2, viewModel.WorkflowStep);
 
@@ -15282,16 +15294,15 @@ static void WorkflowStateProjectionFollowsStepSemantics()
         bool step2Loaded = false,
         int step2Count = 0,
         bool step3Loaded = false,
-        bool step5Loaded = false,
-        int step35Count = 0,
         bool step4Loaded = false,
-        int step4Count = 0,
-        int step4Error = 0,
-        int step4Pending = 0,
-        bool step6Loaded = false,
-        int step6Count = 0,
-        int step6Error = 0,
-        int step6Pending = 0,
+        int sharedTreeCount = 0,
+        int step3Count = 0,
+        int step3Error = 0,
+        int step3Pending = 0,
+        bool step5Loaded = false,
+        int step5Count = 0,
+        int step5Error = 0,
+        int step5Pending = 0,
         bool hasDetection = false,
         bool importDirection = false) => new(
             IsImportDirection: importDirection,
@@ -15305,16 +15316,15 @@ static void WorkflowStateProjectionFollowsStepSemantics()
             Step2Loaded: step2Loaded,
             Step2ItemCount: step2Count,
             Step3Loaded: step3Loaded,
-            Step5Loaded: step5Loaded,
-            Step35ItemCount: step35Count,
             Step4Loaded: step4Loaded,
-            Step4ItemCount: step4Count,
-            Step4ErrorCount: step4Error,
-            Step4PendingCount: step4Pending,
-            Step6Loaded: step6Loaded,
-            Step6ItemCount: step6Count,
-            Step6ErrorCount: step6Error,
-            Step6PendingCount: step6Pending,
+            SharedTreeItemCount: sharedTreeCount,
+            Step3ItemCount: step3Count,
+            Step3ErrorCount: step3Error,
+            Step3PendingCount: step3Pending,
+            Step5Loaded: step5Loaded,
+            Step5ItemCount: step5Count,
+            Step5ErrorCount: step5Error,
+            Step5PendingCount: step5Pending,
             HasDetectionRun: hasDetection);
 
     // 没选角色 / 选了但没检测
@@ -15342,16 +15352,16 @@ static void WorkflowStateProjectionFollowsStepSemantics()
         UnrealSyncWorkspaceState.Failed,
         UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, hasFailure: true, isRunning: true)));
 
-    // 第 2 步（素材）和第五步共用同一棵差异树，但归属不同：树属于第 2 步时，第五步仍算「没加载」
-    var materialOwned = Inputs(2, step2Loaded: true, hasDetection: true, step35Count: 2);
+    // 第 2 步（素材）和第四步共用同一棵差异树，但归属不同：树属于第 2 步时，第四步仍算「没加载」
+    var materialOwned = Inputs(2, step2Loaded: true, hasDetection: true, sharedTreeCount: 2);
     AssertEqual(true, UnrealSyncWorkflowState.IsStepLoaded(materialOwned, 2));
     AssertEqual(false, UnrealSyncWorkflowState.IsStepLoaded(materialOwned, 5));
     AssertEqual(
         UnrealSyncWorkspaceState.HasContent,
         UnrealSyncWorkflowState.ResolveWorkspaceState(materialOwned));
 
-    // **每一步的缓存互不影响**：第 2 步已经加载过，不能因为现在站在第四步、
-    // 第四步还没检测就把它算成没加载；反过来也不作废已经设置好的数据。
+    // **每一步的缓存互不影响**：第 2 步已经加载过，不能因为现在站在第三步、
+    // 第三步还没检测就把它算成没加载；反过来也不作废已经设置好的数据。
     var step2LoadedStep4Empty = Inputs(4, step2Loaded: true, step2Count: 5);
     AssertEqual(true, UnrealSyncWorkflowState.IsStepLoaded(step2LoadedStep4Empty, 2));
     AssertEqual(false, UnrealSyncWorkflowState.IsStepLoaded(step2LoadedStep4Empty, 4));
@@ -15359,17 +15369,19 @@ static void WorkflowStateProjectionFollowsStepSemantics()
         UnrealSyncWorkspaceState.NotDetected,
         UnrealSyncWorkflowState.ResolveWorkspaceState(step2LoadedStep4Empty));
 
-    // 四、六步的徽标文案
-    AssertEqual("待处理", UnrealSyncWorkflowState.StepStatusText(Inputs(2, step4Loaded: true), 4));
-    AssertEqual("进行中", UnrealSyncWorkflowState.StepStatusText(Inputs(4), 4));
-    AssertEqual("有错误", UnrealSyncWorkflowState.StepStatusText(Inputs(4, step4Loaded: true, step4Error: 1), 4));
-    AssertEqual("待设置", UnrealSyncWorkflowState.StepStatusText(Inputs(4, step4Loaded: true, step4Pending: 2), 4));
-    AssertEqual("已完成", UnrealSyncWorkflowState.StepStatusText(Inputs(4, step4Loaded: true), 4));
-    AssertEqual("待检测", UnrealSyncWorkflowState.StepStatusText(Inputs(5), 5));
-    AssertEqual("进行中", UnrealSyncWorkflowState.StepStatusText(Inputs(5, hasDetection: true), 5));
-    AssertEqual("进行中", UnrealSyncWorkflowState.StepStatusText(Inputs(6), 6));
-    AssertEqual("存在错误", UnrealSyncWorkflowState.StepStatusText(Inputs(6, step6Loaded: true, step6Error: 1), 6));
-    AssertEqual("已完成", UnrealSyncWorkflowState.StepStatusText(Inputs(6, step6Loaded: true), 6));
+    // 三、五步的徽标文案。
+    // ⚠️ 收口后步号变过：3 = 基础配置、4 = 序列同步、5 = 蓝图置入 ——
+    // 这些断言是**按语义**写的（哪一步的哪一组文案），不是照抄旧数字。
+    AssertEqual("待处理", UnrealSyncWorkflowState.StepStatusText(Inputs(2, step3Loaded: true), 3));
+    AssertEqual("进行中", UnrealSyncWorkflowState.StepStatusText(Inputs(3), 3));
+    AssertEqual("有错误", UnrealSyncWorkflowState.StepStatusText(Inputs(3, step3Loaded: true, step3Error: 1), 3));
+    AssertEqual("待设置", UnrealSyncWorkflowState.StepStatusText(Inputs(3, step3Loaded: true, step3Pending: 2), 3));
+    AssertEqual("已完成", UnrealSyncWorkflowState.StepStatusText(Inputs(3, step3Loaded: true), 3));
+    AssertEqual("待检测", UnrealSyncWorkflowState.StepStatusText(Inputs(4), 4));
+    AssertEqual("进行中", UnrealSyncWorkflowState.StepStatusText(Inputs(4, hasDetection: true), 4));
+    AssertEqual("进行中", UnrealSyncWorkflowState.StepStatusText(Inputs(5), 5));
+    AssertEqual("存在错误", UnrealSyncWorkflowState.StepStatusText(Inputs(5, step5Loaded: true, step5Error: 1), 5));
+    AssertEqual("已完成", UnrealSyncWorkflowState.StepStatusText(Inputs(5, step5Loaded: true), 5));
 
     // 导入方向没有分步流程：树空就是无差异，有命中就是有内容
     AssertEqual(
@@ -15383,7 +15395,7 @@ static void WorkflowStateProjectionFollowsStepSemantics()
         UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, importDirection: true, hasDetection: true)));
     AssertEqual(
         UnrealSyncWorkspaceState.HasContent,
-        UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, importDirection: true, hasDetection: true, step35Count: 1)));
+        UnrealSyncWorkflowState.ResolveWorkspaceState(Inputs(1, importDirection: true, hasDetection: true, sharedTreeCount: 1)));
 }
 
 sealed class FakeWorkflowHost : IUnrealSyncWorkflowHost
