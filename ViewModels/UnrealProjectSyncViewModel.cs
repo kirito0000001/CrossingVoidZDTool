@@ -247,29 +247,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     public ObservableCollection<UnrealSyncSelectionTreeItem> SelectionTreeRoots { get; } = [];
     public ObservableCollection<UnrealLightConfigurationViewItem> LightConfigurationItems { get; } = [];
-    public ObservableCollection<UnrealPublishFoundationCheckItem> FoundationChecks { get; } = [];
-    private IReadOnlyList<UnrealPublishFoundationCheckItem> _visibleFoundationChecks = [];
-    public IReadOnlyList<UnrealPublishFoundationCheckItem> VisibleFoundationChecks
-    {
-        get => _visibleFoundationChecks;
-        private set => SetProperty(ref _visibleFoundationChecks, value);
-    }
-    private bool _hideCompletedFoundationChecks;
-
-    public bool HideCompletedFoundationChecks
-    {
-        get => _hideCompletedFoundationChecks;
-        set
-        {
-            if (SetProperty(ref _hideCompletedFoundationChecks, value))
-            {
-                RefreshVisibleFoundationChecks();
-                SaveSessionCache();
-            }
-        }
-    }
-
-    public string FoundationSummaryText => $"共 {FoundationChecks.Count} 项：合规 {FoundationChecks.Count(item => item.IsCompliant)}，待处理 {FoundationChecks.Count(item => !item.IsCompliant)}";
+    // ── 第一步「底层检测」的状态与逻辑都搬到了 UnrealProjectSyncViewModel.Step1Foundation.cs ──
     public ObservableCollection<string> PublishFilterOptions { get; } = ["全部", "待重定向", "可同步", "冲突"];
 
     public string PublishFilter
@@ -334,7 +312,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     }
 
     public bool IsDetectionWorkspace => !IsNormalizationWorkspace;
-    public bool IsFoundationWorkspace => !IsEngineToToolbox && WorkflowStep == 1;
     public bool IsLightConfigurationWorkspace => !IsEngineToToolbox && WorkflowStep == 4;
     /// <summary>
     /// 第五步「序列同步」和第七步「特效同步」共用同一块工作区（差异列表 / 同步按钮同构），
@@ -342,11 +319,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     /// </summary>
     public bool IsSequenceSynchronizationWorkspace =>
         !IsEngineToToolbox && WorkflowStep is 5 or 7;
-    public Visibility FoundationWorkspaceVisibility =>
-        IsFoundationWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-    public Visibility FoundationDetailsVisibility => IsFoundationWorkspace ? Visibility.Visible : Visibility.Collapsed;
     public Visibility LightConfigurationWorkspaceVisibility =>
         IsLightConfigurationWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
             ? Visibility.Visible
@@ -1144,20 +1116,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     public void ValidateSequenceCharacterFolders(string projectPath, string characterCode) =>
         _syncService.ValidateSequenceCharacterFolders(projectPath, characterCode);
 
-    public void RefreshFoundationChecks(string characterCode, bool requireAssetTypes = false)
-    {
-        FoundationChecks.Clear();
-        foreach (var item in _syncService.CheckPublishCharacterFolders(ProjectPath, characterCode, requireAssetTypes))
-        {
-            FoundationChecks.Add(item);
-        }
-
-        RefreshVisibleFoundationChecks();
-        OnPropertyChanged(nameof(FoundationSummaryText));
-        OnPropertyChanged(nameof(CanAdvanceWorkflow));
-        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
-    }
-
     public void SetFoundationConfigurationError(UnrealLightConfigurationResultItem error)
     {
         ArgumentNullException.ThrowIfNull(error);
@@ -1425,13 +1383,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 (!HideResolvedNormalizationItems || !item.IsResolved))
             .ToArray();
         OnPropertyChanged(nameof(NormalizationSummaryText));
-    }
-
-    private void RefreshVisibleFoundationChecks()
-    {
-        VisibleFoundationChecks = FoundationChecks
-            .Where(item => !HideCompletedFoundationChecks || !item.IsCompliant)
-            .ToArray();
     }
 
     public void CloseNormalizationWorkspace()
@@ -2300,6 +2251,10 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             return loadResult;
         }
         _loadedSessionCache = cache;
+
+        // 第 1 步「底层检测」**不再从这份整体缓存恢复**，它读自己的小缓存文件
+        // （`tool\UnrealSync\step1-foundation.json`）；整体缓存对它只写不读。
+        TryApplyFoundationCache(preferred);
 
         if (!string.Equals(cache.EnginePath, EnginePath, StringComparison.OrdinalIgnoreCase))
         {

@@ -38,6 +38,8 @@ namespace CrossingVoidZDTool.Services;
 [JsonSerializable(typeof(UnrealBridgeExecutionResult))]
 [JsonSerializable(typeof(UnrealBridgeExecutionItemResult))]
 [JsonSerializable(typeof(UnrealSyncSessionCache))]
+// 第一步「底层检测」自己的小缓存（一步一个文件，只装这一步的东西）。
+[JsonSerializable(typeof(Step1FoundationCacheDocument))]
 [JsonSerializable(typeof(UnrealSyncNormalizationCacheItem))]
 [JsonSerializable(typeof(UnrealAssetNormalizationCandidate))]
 [JsonSerializable(typeof(UnrealRemotePythonJob))]

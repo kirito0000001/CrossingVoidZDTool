@@ -33,6 +33,15 @@ namespace CrossingVoidZDTool
             {
                 case 1:
                     sync.RefreshFoundationChecks(characterCode);
+                    // 第一步自己的缓存：一步一个文件，只装这十几条检查项（跟着角色目录走）。
+                    // 整体那份会话缓存不再喂第一步 —— 它是所有步骤共用的一大坨，步骤互相串台的根就在那儿。
+                    if (sync.SelectedSource?.DraftCharacter is { } foundationCharacter)
+                    {
+                        Step1FoundationCache.Save(
+                            foundationCharacter,
+                            sync.FoundationChecks,
+                            requireAssetTypes: false);
+                    }
                     ShowFloatingTip(InfoBarSeverity.Informational, "底层检测已重新加载", sync.FoundationSummaryText);
                     break;
                 case 2:
