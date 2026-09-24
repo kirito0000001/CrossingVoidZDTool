@@ -67,6 +67,41 @@ internal static class Step3LightConfigurationCache
         }
     }
 
+    /// <summary>
+    /// 作废这一份缓存（删文件），下次读就是"没查过"。
+    ///
+    /// **什么时候必须作废**：这一步的检测结果里有一批项是「工程里有没有那个资产」——
+    /// 形态立绘、形态头像、普通角色语音、道具图标…，它们由**第 2 步同步素材**写进工程。
+    /// 所以素材一被同步，这份结果的前提就变了：里面那些「未找到某张立绘 / 某条语音」
+    /// 从"当时的事实"变成**假报错**（2026-09-24 实测：12:32 的结果里两条错，
+    /// 18:10 把素材同步进去之后，19:53 进第 3 步还在报），而且这类错误项不可勾选，
+    /// 用户在界面上**没有任何办法把它弄掉**。
+    ///
+    /// 只删文件是不够的 —— 调用方还要把内存里那份一起清掉
+    /// （见 <c>UnrealProjectSyncViewModel.InvalidateLightConfigurationResult</c>），
+    /// 否则界面照旧显示旧结果，而且下一次保存会把删掉的缓存又写回来。
+    /// </summary>
+    public static bool Invalidate(CharacterCard? character)
+    {
+        var path = GetFilePath(character);
+        if (character is null || string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return false;
+        }
+
+        // 删除走 AtomicFileWriter 里那份共享实现（"删不掉就算了"的那一套在六个服务里
+        // 各写过一遍，别再写第七份）。删不掉不算错误 —— 文件被占 / 只读都会这样，
+        // 而内存那份已经作废、下次真检测照样覆盖它；但要说一声，
+        // 否则"作废完再进这一步又看见旧结果"会变成一个查不出来的怪现象。
+        if (!AtomicFileWriter.TryDelete(path))
+        {
+            ToolboxLog.Warn($"第 3 步的缓存文件没删掉，下次可能还会读回旧结果：{path}");
+            return false;
+        }
+
+        return true;
+    }
+
     /// <summary>读缓存；没有 / 版本不认识 / 角色代号对不上 / 坏了，都返回 null（当作"没查过"）。</summary>
     public static Step3LightConfigurationCacheDocument? TryLoad(CharacterCard? character, string characterCode)
     {

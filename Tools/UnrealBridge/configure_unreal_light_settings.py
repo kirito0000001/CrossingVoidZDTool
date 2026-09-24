@@ -34,6 +34,24 @@ def _progress(message, percent, detail="", indeterminate=False):
         pass
 
 
+# 扫描（_build_entries）在整条进度条上占的那一段。两种模式窗口不同：
+# 扫描模式下整活就是这一次扫描；写入模式下它只是收尾的"复扫"，
+# 前面还有准备 / 写 Item / 写 MetaSound / 保存。
+_SCAN_BAND = [85.0, 100.0]
+
+
+def _scan_progress(message, sub_percent, detail=""):
+    """把扫描内部的 0-100 子进度映射到 _SCAN_BAND 那一段。
+
+    为什么要有这一层：同一个 _build_entries 两种模式共用，而它在进度条上的窗口不一样。
+    没有映射就只能挑一个写死 —— 另一条路的进度条要么倒退、要么整段不动
+    （扫描模式原来就是这样：只有"正在准备"和"正在复查"两条，中间十几秒全静默）。
+    """
+    start, end = _SCAN_BAND
+    sub = max(0.0, min(100.0, float(sub_percent)))
+    _progress(message, start + (end - start) * sub / 100.0, detail)
+
+
 STATUS_UNCHANGED = 0
 STATUS_PENDING = 1
 STATUS_ERROR = 2
@@ -618,6 +636,7 @@ def _build_entries(request):
     team_voice_path = _get(request, "TeamVoiceObjectPath", "teamVoiceObjectPath", default="")
     item_path = _get(request, "ItemObjectPath", "itemObjectPath", default="")
     meta_path = _get(request, "MetaSoundObjectPath", "metaSoundObjectPath", default="")
+    _scan_progress("正在加载 Item 资产与依赖…", 2, item_path)
     try:
         context = _collect_context(request)
     except Exception as error:
@@ -675,6 +694,7 @@ def _build_entries(request):
         ("item.passive", "被动介绍", "ItemData.CharData.SkillDescription", "CharacterInfo.PassiveSkills",
          _text_list(_read_property(char_data, "SkillDescription", [])), list(_get(request, "PassiveSkills", "passiveSkills", default=[]))),
     ]
+    _scan_progress("正在比对 Item 字段…", 18, "共 {} 项".format(len(item_specs)))
     for stable_id, display_name, field, source, current, target in item_specs:
         entries.append(_entry(
             stable_id, "Item 配置", display_name, item_path, field, source,
@@ -687,7 +707,8 @@ def _build_entries(request):
         ("item.shape-complete", "形态完整立绘", "ItemData.CharData.CharShapeComplete", "FullMorphPortrait 按编号升序", "ShapeCompleteObjectPaths", "shapeCompleteObjectPaths", char_data, "CharShapeComplete", "Texture2D"),
     ]
     shape_targets = []
-    for spec in reference_specs:
+    _scan_progress("正在校验素材引用…", 40, "道具图标 / 形态头像 / 形态立绘 / 完整立绘")
+    for spec_index, spec in enumerate(reference_specs):
         stable_id, display_name, field, source, pascal, camel, owner, prop, expected_class = spec
         raw_target = _get(request, pascal, camel, default=[] if "Paths" in pascal else "")
         targets = list(raw_target) if isinstance(raw_target, list) else [raw_target]
@@ -695,6 +716,12 @@ def _build_entries(request):
             if not targets or any(not value for value in targets):
                 raise RuntimeError("工具箱缺少{}规范素材".format(display_name))
             for index, target in enumerate(targets, start=1):
+                # 逐项报一次：这几项里有"工程里有没有那张图"的检查，
+                # 卡住时进度条上要能看出卡在哪个资产上（红条也是从这一项出来的）。
+                _scan_progress(
+                    "正在校验{}…".format(display_name),
+                    40 + spec_index * 9,
+                    "第 {}/{} 项：{}".format(index, len(targets), target))
                 _load_asset(target, "{} #{}".format(display_name, index), expected_class)
             current = _path_list(_read_property(owner, prop, [])) if len(targets) > 1 or "Paths" in pascal else [_object_path(_read_property(owner, prop))]
             entries.append(_entry(
@@ -715,6 +742,7 @@ def _build_entries(request):
 
     try:
         item_type_path = _get(request, "ItemTypeObjectPath", "itemTypeObjectPath", default="")
+        _scan_progress("正在读取角色物品类型…", 76, item_type_path)
         item_type = _load_asset(item_type_path, "角色物品类型")
         current_type = _object_path(_read_property(item_data, "Type"))
         entries.append(_entry(
@@ -724,6 +752,7 @@ def _build_entries(request):
         entries.append(_error_entry(
             "item.type", "Item 配置", "角色物品类型", item_path, "ItemData.Type", "固定 Chara_Type", error))
 
+    _scan_progress("正在读取受击 MetaSound…", 84, meta_path)
     try:
         entries.extend(_build_meta_entries(request))
     except Exception as error:
@@ -733,9 +762,15 @@ def _build_entries(request):
         talk_concurrency_path = _get(request, "TalkConcurrencyObjectPath", "talkConcurrencyObjectPath", default="")
         talk_concurrency = _load_asset(talk_concurrency_path, "普通语音并发", "SoundConcurrency")
         talk_paths = list(_get(request, "TalkVoiceObjectPaths", "talkVoiceObjectPaths", default=[]))
+        _scan_progress("正在校验普通角色语音并发…", 91, "共 {} 条".format(len(talk_paths)))
         incorrect = []
         talk_assets = []
-        for path in talk_paths:
+        for talk_index, path in enumerate(talk_paths, start=1):
+            # 语音最多几十条，逐条报"第 i/n 条"——这一段以前是整个扫描里最静的一段。
+            _scan_progress(
+                "正在校验普通角色语音并发…",
+                91,
+                "第 {}/{} 条：{}".format(talk_index, len(talk_paths), _voice_display_value(path)))
             sound = _load_asset(path, "普通角色语音", "SoundWave")
             talk_assets.append(sound)
             current = _path_list(_read_property(sound, "ConcurrencySet", []))
@@ -957,14 +992,16 @@ def _execute(request):
                 applied.append("team.voice")
             except Exception as error:
                 execution_errors["team.voice"] = str(error)
-        _progress("正在写入 Item 配置...", 25)
         item_ids = sorted(stable_id for stable_id in selected if stable_id.startswith("item."))
+        _progress("正在写入 Item 配置...", 25,
+                  "{} 项".format(len(item_ids)) if item_ids else "没有勾选 Item 字段")
         if item_ids:
             item_applied, item_errors = _apply_item(request, selected, changed_assets)
             applied.extend(item_applied)
             execution_errors.update(item_errors)
-        _progress("正在写入 MetaSound 配置...", 45)
         meta_ids = sorted(stable_id for stable_id in selected if stable_id.startswith("meta."))
+        _progress("正在写入 MetaSound 配置...", 45,
+                  "{} 项".format(len(meta_ids)) if meta_ids else "没有勾选 MetaSound 字段")
         if meta_ids:
             meta_applied, meta_errors = _apply_meta(request, selected, changed_assets)
             applied.extend(meta_applied)
@@ -982,8 +1019,14 @@ def _execute(request):
             for stable_id in selected:
                 execution_errors.setdefault(stable_id, str(error))
             applied = []
+        _SCAN_BAND[0], _SCAN_BAND[1] = 85.0, 100.0
+        _progress("正在复查基础配置...", 85, "把工程重读一遍，确认刚才写进去的值")
+    else:
+        # 扫描模式：这一次扫描就是全部工作量 —— 准备完之后整条进度条都归它，
+        # 否则就是"跳到 85% 然后十几秒不动"（用户 2026-09-24 报的正是这个）。
+        _SCAN_BAND[0], _SCAN_BAND[1] = 6.0, 100.0
+        _progress("正在扫描基础配置...", 5, "读取工作区素材清单，再逐项核对工程里的资产", True)
 
-    _progress("正在复查基础配置...", 85)
     entries = _build_entries(request)
     for item in entries:
         if item["stableId"] in execution_errors and item["status"] != STATUS_UNCHANGED:

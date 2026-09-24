@@ -1223,23 +1223,14 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             {
                 // 第 3 步先读自己的小缓存（`step3-light-configuration.json`），
                 // 整体缓存只在没有小缓存时兜底（兼容搬之前留下的旧进度）。
+                // 两件事都住它自己那个文件里 —— 这里只管"什么时候该试"。
                 if (TryApplyLightConfigurationCache(SelectedSource?.DraftCharacter))
                 {
                     return;
                 }
 
-                if (cache.IsLightConfigurationLoaded)
+                if (TryApplyLightConfigurationFromSessionCache(cache))
                 {
-                    SetLightConfigurationResult(
-                        new UnrealLightConfigurationResult
-                        {
-                            Succeeded = true,
-                            CharacterCode = cache.SelectedCharacterCode,
-                            Items = cache.LightConfigurationItems,
-                            ErrorMessage = cache.LightConfigurationResultMessage
-                        },
-                        cache.SelectedLightConfigurationIds,
-                        selectPendingByDefault: false);
                     return;
                 }
             }
@@ -1815,22 +1806,11 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                     selectPendingByDefault: false);
             }
 
-            // 第 3 步先读自己的小缓存，整体缓存只在没有小缓存时兜底。
-            if (!TryApplyLightConfigurationCache(SelectedSource?.DraftCharacter) &&
-                cache.IsLightConfigurationLoaded)
+            // 第 3 步先读自己的小缓存，整体缓存只在没有小缓存时兜底
+            // （构造细节都收在它自己那个文件里）。
+            if (!TryApplyLightConfigurationCache(SelectedSource?.DraftCharacter))
             {
-                SetLightConfigurationResult(
-                    new UnrealLightConfigurationResult
-                    {
-                        Succeeded = true,
-                        CharacterCode = cache.SelectedCharacterCode,
-                        Items = cache.LightConfigurationItems,
-                        ErrorMessage = cache.LightConfigurationResultMessage
-                    },
-                    cache.SelectedLightConfigurationIds,
-                    selectPendingByDefault: false);
-                _lightConfigurationResultMessage = cache.LightConfigurationResultMessage;
-                OnPropertyChanged(nameof(LightConfigurationResultMessage));
+                TryApplyLightConfigurationFromSessionCache(cache);
             }
 
             if (cache.IsPublishDetection)

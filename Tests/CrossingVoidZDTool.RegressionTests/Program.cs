@@ -128,6 +128,8 @@ var tests = new (string Name, Action Run)[]
     ("已加载的步骤不再重复触发虚幻检测", WorkflowStepSkipsDetectionWhenAlreadyLoaded),
     ("切换角色后各自的步骤与结果互不串台", WorkflowStateIsIsolatedPerCharacter),
     ("第四步序列差异存进自己的小缓存并能读回", SequenceSyncStepKeepsItsOwnCacheFile),
+    ("素材同步后作废过期的第 3 步基础配置缓存", MaterialSyncInvalidatesStaleLightConfiguration),
+    ("基础配置的刷新与应用只碰自己这一步（同步流程）", LightConfigurationOnlyTouchesItsOwnStep),
     ("角色目录里的路径落盘时不带盘符", CharacterOwnedPathsArePortableOnDisk),
     ("角色目录搬家后图标路径依然指得到", PortablePathsSurviveCharacterFolderMove),
     ("旧机器留下的图标路径会被修回来", StaleIconPathIsRepairedOnRead),
@@ -6464,6 +6466,17 @@ static void WorkflowProgressIsPhasedForEveryStep()
         AssertEqual(true, text.Contains("def _progress("));
         // 光有函数没用，得真的在流程里调
         AssertEqual(true, CountOccurrences(text, "_progress(") >= 4);
+
+        // **扫描模式**以前一条进度都不报：只有"正在准备"和"正在复查"两条，中间十几秒进度条
+        // 一动不动（2026-09-24 用户报的正是这个）。现在扫描路径自己逐段报
+        // （加载 Item → 比对字段 → 逐项校验素材引用 → 物品类型 → MetaSound → 逐条语音），
+        // 而且它的子进度要经过 `_SCAN_BAND` 映射到进度条上的一个窗口 ——
+        // 同一个扫描函数两种模式共用，写死百分比会让某一条路的进度条倒退。
+        if (string.Equals(script, "configure_unreal_light_settings.py", StringComparison.Ordinal))
+        {
+            AssertEqual(true, text.Contains("_SCAN_BAND", StringComparison.Ordinal));
+            AssertEqual(true, CountOccurrences(text, "_scan_progress(") >= 5);
+        }
     }
 
     // 界面这一侧要把进度文件转成分段推进
@@ -8424,6 +8437,102 @@ static void WorkflowStepIsNotClampedBelowLastStep()
     }
 }
 
+static void MaterialSyncInvalidatesStaleLightConfiguration()
+{
+    // 第 3 步「基础配置」有一批项问的是**工程里有没有那个资产**（形态立绘 / 形态头像 /
+    // 普通角色语音 / 道具图标…），而它们由第 2 步同步素材写进去。素材一同步，旧结果里那些
+    // 「未找到…」就从"当时的事实"变成**假报错**，而且这类错误项勾不动、用户在界面上
+    // 没有任何办法清掉（2026-09-24 实测：12:32 的结果两条错，18:10 同步完素材后
+    // 19:53 进第 3 步还在报）。
+    //
+    // 这条钉住"作废"这个机制本身：内存清空 + **两个**缓存文件都盖掉 + 不进错误计数，
+    // 并且换一个新会话再进第 3 步也捡不回那份过期的。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var projectPath = Path.Combine(root, "CrossingVoid.uproject");
+        File.WriteAllText(projectPath, "{}");
+        var enginePath = Path.Combine(root, "UnrealEditor.exe");
+        File.WriteAllText(enginePath, "x");
+        var character = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴") with
+        {
+            IsCompleted = true,
+        };
+        // 角色目录里那个 UnrealSync 目录平时是整体会话缓存写第一份时建出来的；
+        // 这条用例先单独写第 3 步那一个文件，所以自己先把目录建好。
+        Directory.CreateDirectory(
+            Path.GetDirectoryName(Step3LightConfigurationCache.GetFilePath(character))!);
+
+        var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        viewModel.Load(enginePath, projectPath);
+        viewModel.IsEngineToToolbox = false;
+        viewModel.RefreshDraftSources([character]);
+        viewModel.SelectSource(viewModel.CharacterSources.Single());
+        viewModel.ReturnToWorkflowStep(3);
+        viewModel.SetLightConfigurationResult(new UnrealLightConfigurationResult
+        {
+            Succeeded = false,
+            CharacterCode = character.Code,
+            ErrorMessage = "基础配置存在结构或资产错误",
+            Items =
+            [
+                new UnrealLightConfigurationResultItem
+                {
+                    StableId = "item.shape-portraits",
+                    GroupName = "Item 配置",
+                    DisplayName = "形态立绘",
+                    TargetPath = "/Game/ITems/CharItemS/Item_Misaka.Item_Misaka",
+                    TargetField = "ItemData.CharData.CharShapeGroup",
+                    SourceSummary = "MorphPortrait 按编号升序",
+                    Status = UnrealLightConfigurationStatus.Error,
+                    ErrorMessage = "未找到形态立绘 #2：/Game/AssetMaterial/ImageS/CharaterS/Misaka/Misaka-MorphPortrait-2.Misaka-MorphPortrait-2"
+                }
+            ]
+        });
+
+        var cachePath = Step3LightConfigurationCache.GetFilePath(character);
+        AssertEqual(true, File.Exists(cachePath));
+        AssertEqual(1, viewModel.LightConfigurationErrorCount);
+        // 先把整体会话缓存落盘 —— 那份里也装着第 3 步的结果，
+        // 是"作废"必须一起盖掉的第二处（第 3 步读不到自己的小文件时会回退到它）。
+        viewModel.FlushSessionCache();
+        AssertEqual(
+            true,
+            new UnrealSyncSessionCacheService()
+                .LoadStep(character, projectPath, character.Code, 3).Cache!.IsLightConfigurationLoaded);
+
+        // 素材刚写进工程 —— 这一步的结果前提变了，作废它。
+        viewModel.InvalidateLightConfigurationResult();
+
+        AssertEqual(false, viewModel.IsLightConfigurationLoaded);
+        AssertEqual(0, viewModel.LightConfigurationItems.Count);
+        AssertEqual(0, viewModel.LightConfigurationErrorCount);
+        AssertEqual("尚未检测基础配置", viewModel.LightConfigurationSummaryText);
+        AssertEqual(false, File.Exists(cachePath));
+        // 两层缓存都要盖掉：小文件删了，整体会话缓存里那份也得是"没查过"。
+        AssertEqual(
+            false,
+            new UnrealSyncSessionCacheService()
+                .LoadStep(character, projectPath, character.Code, 3).Cache!.IsLightConfigurationLoaded);
+
+        // 换一个新会话再进第 3 步：小缓存没了、会话缓存也已是空的，
+        // 不能把那份过期结果捡回来（原来的洞就在这里）。
+        var reader = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        reader.Load(enginePath, projectPath);
+        reader.IsEngineToToolbox = false;
+        reader.RefreshDraftSources([character]);
+        reader.SelectSource(reader.CharacterSources.Single());
+        reader.ReturnToWorkflowStep(3);
+        AssertEqual(false, reader.IsLightConfigurationLoaded);
+        AssertEqual(0, reader.LightConfigurationErrorCount);
+        AssertEqual("尚未检测基础配置", reader.LightConfigurationSummaryText);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static void WorkflowStepCacheLivesInCharacterFolder()
 {
     var root = CreateTemporaryTestFolder();
@@ -9521,6 +9630,26 @@ static void UnrealLightConfigurationUsesDedicatedFourthStep()
     AssertEqual(1, viewModel.LightConfigurationPendingCount);
     AssertEqual(1, viewModel.LightConfigurationUnchangedCount);
     AssertEqual(true, viewModel.CanApplyLightConfiguration);
+}
+
+static void LightConfigurationOnlyTouchesItsOwnStep()
+{
+    // 晓桀 2026-09-24：「包括刷新也只刷新自己的」+「之后如果缺失什么前置条件，
+    // 就直接用报错log和红色tips了，这样子就不用重复检测第二步的东西了」。
+    //
+    // 第 3 步的刷新与应用以前各干三件越界的事：
+    //   ① 先调 `ValidatePublishCharacterFolders` —— 那是第 1 步的目录校验，
+    //      顺带还会把第 1 步那一整张检查表重刷一遍；
+    //   ② 缺依赖时 `ReturnToWorkflowStep(1)`、规整没做完时 `ReturnToWorkflowStep(2)` —— 把人挪走；
+    //   ③ 于是"我点一下刷新"等于顺手跑了一遍别的步骤的检查。
+    // 现在只留检测那条路还调 ①（MainWindow.UnrealSync.Publish.cs），第 3 步自己不碰；
+    // 缺前置条件改成一条报错 log + 一个红色 tip，人留在原地。
+    //
+    // 只能靠读壳源码盯着：这些都在按钮处理器里，要跑起 WinUI 才动得了，没有行为断言的缝。
+    var shell = ReadUnrealSyncWindowSource();
+    AssertEqual(1, CountOccurrences(shell, "ValidatePublishCharacterFolders("));
+    AssertEqual(1, CountOccurrences(shell, "还有未完成的素材规整项"));
+    AssertEqual(0, CountOccurrences(shell, "第二步仍有未完成的素材规整项目"));
 }
 
 static void UnrealLightConfigurationScriptUsesConfirmedWhitelist()

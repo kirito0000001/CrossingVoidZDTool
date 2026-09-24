@@ -43,19 +43,22 @@ namespace CrossingVoidZDTool
             ShowGlobalProgress("应用基础配置", character.Code);
             try
             {
-                try
-                {
-                    sync.ValidatePublishCharacterFolders(character.Code);
-                }
-                catch
-                {
-                    sync.ReturnToWorkflowStep(1);
-                    throw;
-                }
+                // **缺前置条件就直说，不去替用户重跑前一步**（晓桀 2026-09-24：
+                // 「之后如果缺失什么前置条件，就直接用报错log和红色tips了，
+                // 这样子就不用重复检测第二步的东西了」）。
+                //
+                // 原来这里先 `ValidatePublishCharacterFolders` —— 那是第 1 步的目录校验，
+                // 顺带还会**重刷第 1 步那一整张检查表**，失败时再把人踢回第 1 步；
+                // 接着又拿"规整没做完"把人踢回第 2 步。两条都不做了：
+                // 报错 log + 红色 tip 说清楚，人留在原地。
                 if (sync.NormalizationItems.Any(item => !item.IsResolved))
                 {
-                    sync.ReturnToWorkflowStep(2);
-                    throw new InvalidOperationException("第二步仍有未完成的素材规整项目。");
+                    const string blocked = "还有未完成的素材规整项，先把它们处理掉再应用基础配置。";
+                    AppendLog(LogKind.Error, $"[Light Config] {blocked}");
+                    ShowFloatingTip(InfoBarSeverity.Error, "还有未完成的素材规整", blocked);
+                    CompleteGlobalProgress("基础配置未应用", blocked);
+                    await HideGlobalProgressAfterDelayAsync();
+                    return;
                 }
 
                 var plan = WorkflowProgressPlan.ForStepApply(Settings.BackupBeforeUnrealSync);
@@ -84,7 +87,12 @@ namespace CrossingVoidZDTool
                     item.Status == UnrealLightConfigurationStatus.Error);
                 if (foundationError is not null)
                 {
+                    // 仍然汇总到第 1 步的检查列表（那是"配置错误"的落点，回到第 1 步看得到），
+                    // 但**不再把人挪走** —— 他站在第 3 步，红条就在眼前。
                     sync.SetFoundationConfigurationError(foundationError);
+                    AppendLog(
+                        LogKind.Error,
+                        $"[Light Config] 基础配置依赖有问题：{FormatSyncLogValue(foundationError.ErrorMessage)}");
                     if (IsOfflineAssetLoadFailure(foundationError))
                     {
                         // 离线实例加载不到资产 —— 这是**扫描环境**的问题，不是工程资产的问题。
@@ -92,10 +100,14 @@ namespace CrossingVoidZDTool
                         AppendLog(
                             LogKind.Warning,
                             "离线实例加载不到依赖资产，已留在第 3 步；建议重试，或关掉 Unreal 编辑器后重跑。");
+                        ShowFloatingTip(
+                            InfoBarSeverity.Warning,
+                            "离线实例读不到依赖资产",
+                            "已留在基础配置这一步；建议重试，或关掉 Unreal 编辑器后重跑。");
                     }
                     else
                     {
-                        sync.ReturnToWorkflowStep(1);
+                        ShowFloatingTip(InfoBarSeverity.Error, "基础配置依赖有问题", foundationError.ErrorMessage);
                     }
                 }
                 if (!result.Succeeded)
@@ -161,15 +173,12 @@ namespace CrossingVoidZDTool
             ShowGlobalProgress("检测基础配置", character.Code);
             try
             {
-                try
-                {
-                    sync.ValidatePublishCharacterFolders(character.Code);
-                }
-                catch
-                {
-                    sync.ReturnToWorkflowStep(1);
-                    throw;
-                }
+                // **只刷新自己这一步**（晓桀 2026-09-24：「包括刷新也只刷新自己的」）。
+                //
+                // 原来这里先调 `ValidatePublishCharacterFolders` —— 那是第 1 步的目录校验，
+                // 顺带还会**重刷第 1 步那一整张检查表**，失败时再把人踢回第 1 步。
+                // 现在都不做了：缺前置条件由这一轮扫描自己扫出来（脚本逐条 `_load_asset`
+                // 过一遍），用一条报错 log + 一个红色 tip 说清楚，人留在原地。
                 sync.ReturnToWorkflowStep(3);
                 var result = await ExecuteUnrealLightConfigurationAsync(character, apply: false, Array.Empty<string>());
                 sync.SetLightConfigurationResult(result);
@@ -178,16 +187,25 @@ namespace CrossingVoidZDTool
                     item.Status == UnrealLightConfigurationStatus.Error);
                 if (foundationError is not null)
                 {
+                    // 仍然汇总到第 1 步的检查列表（那是"配置错误"的落点，回到第 1 步看得到），
+                    // 但**不再把人挪走** —— 他站在第 3 步，红条就在眼前。
                     sync.SetFoundationConfigurationError(foundationError);
+                    AppendLog(
+                        LogKind.Error,
+                        $"[Light Config] 基础配置依赖有问题：{FormatSyncLogValue(foundationError.ErrorMessage)}");
                     if (IsOfflineAssetLoadFailure(foundationError))
                     {
                         AppendLog(
                             LogKind.Warning,
                             "离线实例加载不到依赖资产，已留在第 3 步；建议重试，或关掉 Unreal 编辑器后重跑。");
+                        ShowFloatingTip(
+                            InfoBarSeverity.Warning,
+                            "离线实例读不到依赖资产",
+                            "已留在基础配置这一步；建议重试，或关掉 Unreal 编辑器后重跑。");
                     }
                     else
                     {
-                        sync.ReturnToWorkflowStep(1);
+                        ShowFloatingTip(InfoBarSeverity.Error, "基础配置依赖有问题", foundationError.ErrorMessage);
                     }
                 }
                 var pending = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Pending);
@@ -268,6 +286,28 @@ namespace CrossingVoidZDTool
                     GetGlobalProgressCancellationToken(),
                     progressPath,
                     progress));
+        }
+
+        /// <summary>
+        /// **同步收尾时顺手做的基础配置预检**的日志出口（从
+        /// `MainWindow.UnrealSync.Publish.cs` 搬过来：名字是这一步的，人就该住这一步的文件）。
+        ///
+        /// 扫描失败不该把已经做完的同步一起判失败，所以这里不抛；但也不能像以前那样
+        /// 连 <see cref="UnrealLightConfigurationResult.Succeeded"/> 都不看就扔进视图层——
+        /// 失败时界面上只会摆出一条「无法读取基础配置」，Unreal 那边真正的报错
+        /// 一个字都留不下来，排查只能靠猜。
+        /// </summary>
+        private void LogLightConfigurationPreflight(string characterCode, UnrealLightConfigurationResult result)
+        {
+            if (result.Succeeded)
+            {
+                return;
+            }
+
+            AppendLog(
+                LogKind.Warning,
+                $"[Light Config Preflight] character={characterCode} succeeded=false " +
+                $"items={result.Items.Count} error={FormatSyncLogValue(result.ErrorMessage)}");
         }
 
         /// <summary>

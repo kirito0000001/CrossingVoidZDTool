@@ -303,25 +303,7 @@ namespace CrossingVoidZDTool
             }
         }
 
-        /// <summary>
-        /// 第二步收尾时顺手做的第三步预检。
-        ///
-        /// 扫描失败不该把已经做完的同步一起判失败，所以这里不抛；但也不能像以前那样
-        /// 连 <see cref="UnrealLightConfigurationResult.Succeeded"/> 都不看就扔进视图层——
-        /// 失败时界面上只会摆出一条「无法读取基础配置」，Unreal 那边真正的报错
-        /// 一个字都留不下来，排查只能靠猜。
-        /// </summary>
-        private void LogLightConfigurationPreflight(string characterCode, UnrealLightConfigurationResult result)
-        {
-            if (result.Succeeded)
-            {
-                return;
-            }
-
-            AppendLog(
-                LogKind.Warning,
-                $"[Light Config Preflight] character={characterCode} succeeded=false " +
-                $"items={result.Items.Count} error={FormatSyncLogValue(result.ErrorMessage)}");
-        }
+        // LogLightConfigurationPreflight 搬到了 MainWindow.UnrealSync.LightConfiguration.cs ——
+        // 名字是第三步的，人就该住第三步那个文件（一步一个文件）。
     }
 }

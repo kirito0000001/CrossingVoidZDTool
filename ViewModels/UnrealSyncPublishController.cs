@@ -747,6 +747,21 @@ internal sealed class UnrealSyncPublishController(
                 baseline);
             stateService.Save(character, projectPath, verifiedState);
             _sync.OpenNormalizationWorkspace();
+            // **素材刚被写进工程** —— 第 3 步「基础配置」的结果前提变了：它有一批项问的是
+            // "工程里有没有那个资产"（形态立绘 / 形态头像 / 普通角色语音 / 道具图标…），
+            // 而它们正是刚才才出现的。旧结果里那些「未找到…」于是变成假报错，
+            // 而且这类错误项勾不动、用户在界面上没有任何办法清掉（2026-09-24 实测）。
+            //
+            // 作废之后，下面那道基础配置预检的闸门（问的正是 `IsLightConfigurationLoaded`）
+            // 会自然放行、重扫一遍，交给第 3 步一份**新鲜**结果；
+            // 而 `deferredCount > 0` 那条提前 return 的路也已经作废过了，
+            // 进去只会看到「尚未检测」，不会看到过期结果。
+            //
+            // 序列同步（第 4 步）不碰这几个字段，所以只在素材那一路作废。
+            if (!isSequenceSynchronization)
+            {
+                _sync.InvalidateLightConfigurationResult();
+            }
             if (deferredCount > 0)
             {
                 var remainingChanges = new UnrealBridgeDiffService().Compare(

@@ -185,6 +185,72 @@ internal sealed partial class UnrealProjectSyncViewModel
         return true;
     }
 
+    /// <summary>
+    /// 从**整体会话缓存**里兜底恢复这一步的结果。
+    ///
+    /// 只在"没有自己的小文件"时才用得上 —— 为的是兼容"一步一个文件"改造**之前**
+    /// 留下的旧进度（那时候第 3 步的结果只存在整体缓存里）。
+    ///
+    /// 原来这段构造代码在共享文件里被抄了两遍（进入某一步时一处、打开页面恢复现场时一处），
+    /// 现在收在它自己的文件里；那两处只管"什么时候该试"。
+    /// 顺手带上"内存里已经有结果就别覆盖"这道闸：旧写法在第二处没有它，
+    /// 会把刚测出来的结果会话缓存盖回去。
+    /// </summary>
+    internal bool TryApplyLightConfigurationFromSessionCache(UnrealSyncSessionCache cache)
+    {
+        if (IsLightConfigurationLoaded || !cache.IsLightConfigurationLoaded)
+        {
+            return false;
+        }
+
+        SetLightConfigurationResult(
+            new UnrealLightConfigurationResult
+            {
+                Succeeded = true,
+                CharacterCode = cache.SelectedCharacterCode,
+                Items = cache.LightConfigurationItems,
+                ErrorMessage = cache.LightConfigurationResultMessage
+            },
+            cache.SelectedLightConfigurationIds,
+            selectPendingByDefault: false);
+
+        // SetLightConfigurationResult 会按"刚检测完"的口径重写文案，这里换回缓存里那句。
+        _lightConfigurationResultMessage = cache.LightConfigurationResultMessage;
+        OnPropertyChanged(nameof(LightConfigurationResultMessage));
+        return true;
+    }
+
+    /// <summary>
+    /// 作废这一步的检测结果：**内存清空 + 缓存文件删掉**，界面回到「尚未检测基础配置」。
+    ///
+    /// 由「第 2 步把素材写进工程」之后调用 —— 理由见
+    /// <see cref="Step3LightConfigurationCache.Invalidate"/>：这一步有一批项问的是
+    /// 「工程里有没有那个资产」，素材一同步，旧结果里的「未找到…」就成了假报错，
+    /// 而且那些项勾不动，用户自己没法清。
+    ///
+    /// 顺带把「同步收尾」那道基础配置预检的闸门打开：它问的正是
+    /// <see cref="IsLightConfigurationLoaded"/>（原来"已加载"被当成"结果还有效"，
+    /// 于是刚同步完素材反而**跳过**了重扫，把过期结果留在界面上）。
+    /// 没走预检的路径（比如只同步了一部分、提前 return 的那条）下，
+    /// 界面也只是显示「尚未检测」，而不是拿着一份过期结果骗人。
+    /// </summary>
+    internal void InvalidateLightConfigurationResult()
+    {
+        Step3LightConfigurationCache.Invalidate(SelectedSource?.DraftCharacter);
+        ClearLightConfigurationState();
+
+        // **整体会话缓存里也有这一份**（第 3 步读不到自己的小文件时会回退到它，
+        // 见 RestoreWorkflowStepCache 的 `cache.IsLightConfigurationLoaded` 那支）——
+        // 只删小文件的话，下一轮照样能从那份大缓存里把过期结果捡回来。
+        // 顺序不能反：FlushSessionCache 落盘的是**上一次**拍下的快照，
+        // 先 flush 等于把旧内容原样写回去。所以先重拍、再立刻写。
+        if (!_isRestoringSession && !string.IsNullOrWhiteSpace(ProjectPath))
+        {
+            SaveSessionCache();
+            FlushSessionCache();
+        }
+    }
+
     // ── 勾选 ──────────────────────────────────────────────────────────────
 
     public IReadOnlySet<string> GetSelectedLightConfigurationIds() =>
