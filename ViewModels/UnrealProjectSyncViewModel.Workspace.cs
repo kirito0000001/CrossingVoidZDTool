@@ -163,12 +163,24 @@ internal sealed partial class UnrealProjectSyncViewModel
     public string WorkflowStepConclusionText(int step) => step switch
     {
         1 => FoundationSummaryText,
-        2 => NormalizationSummaryText,
-        2 or 4 => DetectionResultSummaryText,
+        // 第 2 步是合并后的「同步素材」：**规整和素材差异都属于它**。
+        // 以前 `2 =>` 挡在 `2 or 4 =>` 前面，第 2 步的结束行永远只报规整那半，
+        // 差异摘要被静默吞掉（2026-09-24 体检）。两段都要，空的那段跳过、中间用「；」。
+        2 => JoinConclusion(NormalizationSummaryText, DetectionResultSummaryText),
+        4 => DetectionResultSummaryText,
         3 => LightConfigurationSummaryText,
         5 => BlueprintSetupSummaryText,
         _ => string.Empty,
     };
+
+    /// <summary>
+    /// 两段摘要拼一句（空的跳过、中间用「；」）。第 2 步是**合并步**，
+    /// 规整摘要和素材差异摘要都属于它，所以它的结论行得给两段。
+    /// </summary>
+    private static string JoinConclusion(string first, string second) =>
+        string.IsNullOrWhiteSpace(first) ? second
+            : string.IsNullOrWhiteSpace(second) ? first
+                : $"{first}；{second}";
 
     /// <summary>各步自己的列表；只有内容态才显示。</summary>
     public Visibility WorkspaceContentVisibility =>

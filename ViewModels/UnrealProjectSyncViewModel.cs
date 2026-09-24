@@ -264,6 +264,10 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         2 or 4 => HasImportDetection,
         // 第 3 步：检测过就有数据（不要求 0 待设置 / 0 错误）
         3 => IsLightConfigurationLoaded,
+        // 第 5 步「蓝图置入」：扫过一次就有数据。
+        // 以前漏了这一支、落进 `_ => true` —— 结果"没检测也能点下一步"，
+        // 和它自己的状态徽标显示「进行中」自相矛盾（2026-09-24 体检）。
+        5 => IsBlueprintSetupLoaded,
         _ => true
     };
 
@@ -630,7 +634,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 OnPropertyChanged(nameof(WorkspaceDescription));
                 NotifyDetectionSummaryChanged();
                 ClearLightConfigurationState();
-            ClearBlueprintSetupState();
                 ClearBlueprintSetupState();
                 SetSelectionTree([]);
                 SelectedSource = null;
@@ -1203,20 +1206,18 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
             if (step == 5)
             {
-                if (cache.IsBlueprintSetupLoaded)
+                // 第 5 步先读自己的小缓存（`step5-blueprint-setup.json`），
+                // 整体缓存只在没有小文件时兜底（兼容搬之前留下的旧进度）。
+                // 两件事都住它自己那个文件里 —— 这里只管"什么时候该试"。
+                if (TryApplyBlueprintSetupCache(SelectedSource?.DraftCharacter))
                 {
-                    SetBlueprintSetupResult(
-                        new UnrealBlueprintSetupResult
-                        {
-                            Succeeded = true,
-                            CharacterCode = cache.SelectedCharacterCode,
-                            Items = cache.BlueprintSetupItems,
-                            ErrorMessage = cache.BlueprintSetupResultMessage
-                        },
-                        cache.SelectedBlueprintSetupIds,
-                        selectPendingByDefault: false);
+                    return;
                 }
-                return;
+
+                if (TryApplyBlueprintSetupFromSessionCache(cache))
+                {
+                    return;
+                }
             }
 
             if (step == 3)
@@ -1792,18 +1793,11 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             // 它已经**没人读了** —— "这一步加载过没有"现在一律问步加载表（`_stepLoads.IsLoaded(2)`），
             // 理由见 `UnrealProjectSyncViewModel.Workspace.cs` 的 `BuildWorkflowInputs`。
             // 删掉是为了不留一个"看起来还在起作用"的假标志。
-            if (cache.IsBlueprintSetupLoaded)
+            // 第 5 步先读自己的小缓存，整体缓存只在没有小缓存时兜底
+            // （构造细节都收在它自己那个文件里）。
+            if (!TryApplyBlueprintSetupCache(SelectedSource?.DraftCharacter))
             {
-                SetBlueprintSetupResult(
-                    new UnrealBlueprintSetupResult
-                    {
-                        Succeeded = true,
-                        CharacterCode = cache.SelectedCharacterCode,
-                        Items = cache.BlueprintSetupItems,
-                        ErrorMessage = cache.BlueprintSetupResultMessage
-                    },
-                    cache.SelectedBlueprintSetupIds,
-                    selectPendingByDefault: false);
+                TryApplyBlueprintSetupFromSessionCache(cache);
             }
 
             // 第 3 步先读自己的小缓存，整体缓存只在没有小缓存时兜底

@@ -48,6 +48,8 @@ namespace CrossingVoidZDTool.Services;
 [JsonSerializable(typeof(Step3LightConfigurationCacheDocument))]
 // 第四步「序列同步」自己的小缓存（序列差异 + 勾选）。
 [JsonSerializable(typeof(Step4SequenceSyncCacheDocument))]
+// 第五步「蓝图置入」自己的小缓存（扫描出来的字段 + 勾选）。
+[JsonSerializable(typeof(Step5BlueprintSetupCacheDocument))]
 [JsonSerializable(typeof(UnrealSyncNormalizationCacheItem))]
 [JsonSerializable(typeof(UnrealAssetNormalizationCandidate))]
 [JsonSerializable(typeof(UnrealRemotePythonJob))]

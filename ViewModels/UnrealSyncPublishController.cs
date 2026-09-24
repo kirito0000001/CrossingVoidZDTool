@@ -763,6 +763,10 @@ internal sealed class UnrealSyncPublishController(
             // 进去只会看到「尚未检测」，不会看到过期结果。
             //
             // 序列同步（第 4 步）不碰这几个字段，所以只在素材那一路作废。
+            // 第 5 步「蓝图置入」的字段里同样有一批问的是"工程里有没有那个资产"
+            // （技能图标、序列引用…）—— 素材和序列刚写进工程，它的结果一起过期。
+            // 这条不分子序列：两种同步都可能补上它要引用的资产。
+            _sync.InvalidateBlueprintSetupResult();
             if (!isSequenceSynchronization)
             {
                 _sync.InvalidateLightConfigurationResult();

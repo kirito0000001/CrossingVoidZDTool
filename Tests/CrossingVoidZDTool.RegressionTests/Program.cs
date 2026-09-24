@@ -8340,6 +8340,10 @@ static void WorkflowStateIsIsolatedPerCharacter()
         AssertEqual(1, Directory.GetFiles(kiritoCache, "step3-light-configuration.json").Length);
         AssertEqual(0, Directory.GetFiles(misakaCache, "step3-light-configuration.json").Length);
 
+        // 第五步现在也有自己的小文件了（2026-09-24 体检补的）：御坂扫过、桐人没扫过。
+        AssertEqual(1, Directory.GetFiles(misakaCache, "step5-blueprint-setup.json").Length);
+        AssertEqual(0, Directory.GetFiles(kiritoCache, "step5-blueprint-setup.json").Length);
+
         // 切回御坂：第五步的结果要能从它自己的缓存恢复回来
         viewModel.SelectSource(SourceOf(misaka));
         var restored = new UnrealSyncSessionCacheService()

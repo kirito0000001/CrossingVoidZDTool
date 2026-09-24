@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Linq;
+using CrossingVoidZDTool.Services;
 using Microsoft.UI.Xaml;
 
 namespace CrossingVoidZDTool.ViewModels;
@@ -123,7 +124,102 @@ internal sealed partial class UnrealProjectSyncViewModel
                 ? "蓝图数据存在未完成项目。"
                 : result.ErrorMessage;
         NotifyBlueprintSetupChanged();
+        SaveBlueprintSetupCache(SelectedSource?.DraftCharacter);
         SaveSessionCache();
+    }
+
+    // ── 自己的缓存文件 ────────────────────────────────────────────────────
+
+    /// <summary>把当前扫描结果写进第 5 步自己的缓存文件。</summary>
+    internal bool SaveBlueprintSetupCache(CharacterCard? character) =>
+        character is not null &&
+        Step5BlueprintSetupCache.Save(
+            character,
+            _lastBlueprintSetupItems,
+            GetSelectedBlueprintSetupIds(),
+            _blueprintSetupResultMessage);
+
+    /// <summary>把第 5 步自己的小缓存回填到界面（内存里已经有结果时不覆盖）。</summary>
+    internal bool TryApplyBlueprintSetupCache(CharacterCard? character)
+    {
+        if (character is null || IsBlueprintSetupLoaded)
+        {
+            return false;
+        }
+
+        var document = Step5BlueprintSetupCache.TryLoad(character, character.Code);
+        if (document is null || document.Items.Length == 0)
+        {
+            return false;
+        }
+
+        SetBlueprintSetupResult(
+            new UnrealBlueprintSetupResult
+            {
+                Succeeded = true,
+                CharacterCode = character.Code,
+                Items = document.Items.Select(item => item.ToResultItem()).ToList(),
+                ErrorMessage = document.ResultMessage
+            },
+            document.SelectedStableIds.ToHashSet(StringComparer.OrdinalIgnoreCase),
+            selectPendingByDefault: false);
+
+        // SetBlueprintSetupResult 会按"刚检测完"的口径重写文案，这里换回缓存里那句。
+        _blueprintSetupResultMessage = document.ResultMessage;
+        OnPropertyChanged(nameof(BlueprintSetupResultMessage));
+        return true;
+    }
+
+    /// <summary>
+    /// 从**整体会话缓存**里兜底恢复这一步的结果。
+    ///
+    /// 只在"没有自己的小文件"时才用得上 —— 为的是兼容"一步一个文件"改造**之前**
+    /// 留下的旧进度。原来这段构造代码在共享文件里被抄了两遍（进出这一步、冷启动恢复现场各一次），
+    /// 现在收在这里；顺手带上"内存里已经有结果就别覆盖"那道闸。
+    /// </summary>
+    internal bool TryApplyBlueprintSetupFromSessionCache(UnrealSyncSessionCache cache)
+    {
+        if (IsBlueprintSetupLoaded || !cache.IsBlueprintSetupLoaded)
+        {
+            return false;
+        }
+
+        SetBlueprintSetupResult(
+            new UnrealBlueprintSetupResult
+            {
+                Succeeded = true,
+                CharacterCode = cache.SelectedCharacterCode,
+                Items = cache.BlueprintSetupItems,
+                ErrorMessage = cache.BlueprintSetupResultMessage
+            },
+            cache.SelectedBlueprintSetupIds,
+            selectPendingByDefault: false);
+
+        _blueprintSetupResultMessage = cache.BlueprintSetupResultMessage;
+        OnPropertyChanged(nameof(BlueprintSetupResultMessage));
+        return true;
+    }
+
+    /// <summary>
+    /// 作废这一步的检测结果：**内存清空 + 小文件删掉 + 整体会话缓存里那份盖掉**。
+    ///
+    /// 由「第 2 步把素材写进工程」/「第 4 步把序列写进工程」之后调用 ——
+    /// 这一步的字段里有一批问的是"工程里有没有那个资产"（技能图标、序列引用…），
+    /// 那两步一跑，旧结果里的「目标资产不存在…请先完成第二步同步素材」就是假报错，
+    /// 而且错误项不可勾选、用户没法弄掉（2026-09-24 体检）。
+    /// </summary>
+    internal void InvalidateBlueprintSetupResult()
+    {
+        Step5BlueprintSetupCache.Invalidate(SelectedSource?.DraftCharacter);
+        ClearBlueprintSetupState();
+
+        // 整体会话缓存里也有这一份（读不到小文件时会回退到它）。
+        // 顺序不能反：FlushSessionCache 落的是**上一次**拍下的快照，先 flush 等于把旧内容写回去。
+        if (!_isRestoringSession && !string.IsNullOrWhiteSpace(ProjectPath))
+        {
+            SaveSessionCache();
+            FlushSessionCache();
+        }
     }
 
     /// <summary>分组顺序跟着扫描结果走，桥接脚本那边是按写入顺序产出的。</summary>

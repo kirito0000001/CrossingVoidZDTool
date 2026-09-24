@@ -413,9 +413,26 @@ def _enum_name(value):
 
 # ---------------------------------------------------------------- 扫描
 
+# 「扫描 / 复查」那一段在整条进度条上占的窗口。两种模式不一样：
+#   写入模式：它只是收尾的复查（前面还有写蓝图、写数据表）；
+#   扫描模式：这一次扫描就是全部工作量。
+_SCAN_BAND = [85.0, 100.0]
+
+
+def _scan_progress(message, sub_percent, detail=""):
+    """把扫描内部的 0-100 子进度映射到 _SCAN_BAND 那一段。
+
+    没有这一层就只能把绝对百分比写死，于是扫描模式下会看到
+    「2% → 92% → 10% → 35% → …」的**回跳**（2026-09-24 体检抓到的）。
+    """
+    start, end = _SCAN_BAND
+    sub = max(0.0, min(100.0, float(sub_percent)))
+    _progress(message, start + (end - start) * sub / 100.0, detail)
+
+
 def _scan(request, report):
     code = _text(request.get("characterCode"))
-    _progress("正在读取角色蓝图...", 10, code)
+    _scan_progress("正在读取角色蓝图…", 5, code)
     row_name = _text(request.get("characterName"))
     blueprint_path = "{}/{}/{}.{}".format(CHARACTER_ACTOR_ROOT, code, code, code)
     cdo = _character_cdo(code)
@@ -440,7 +457,7 @@ def _scan(request, report):
                [current_anti], [anti])
 
     # --- 动作序列
-    _progress("正在比对动作序列...", 35)
+    _scan_progress("正在比对动作序列…", 35)
     for binding in request.get("sequences", []) or []:
         property_name = _text(binding.get("propertyName"))
         targets = [_text(item) for item in binding.get("objectPaths", []) or []]
@@ -460,7 +477,7 @@ def _scan(request, report):
                     "站街 Flipbook", _text(request.get("idleFlipbookObjectPath")))
 
     # --- 技能
-    _progress("正在比对技能与数据表...", 60)
+    _scan_progress("正在比对技能与数据表…", 60)
     sub_skill_row = _table_row_for(SUB_SKILL_TABLE, row_name)
     combo_row = _table_row_for(COMBO_TABLE, row_name)
     for payload in request.get("skills", []) or []:
@@ -479,7 +496,7 @@ def _scan(request, report):
             _scan_table_skill(report, COMBO_TABLE, partner_row, row_name, slot_key, payload, partner)
 
     # --- 护援头像
-    _progress("正在比对护援头像...", 88)
+    _scan_progress("正在比对护援头像…", 88)
     support_row = _table_row_for(SUPPORT_IMAGE_TABLE, row_name)
     for stable_id, json_key, display_name, target in (
             ("table.supportImage.sub1p", "Sub1P", "1P 护援头像", _text(request.get("support1PObjectPath"))),
@@ -552,6 +569,9 @@ def _target_skill_values(payload, request_key, value_kind):
 # ---------------------------------------------------------------- 应用
 
 def _apply(request, selected, applied, saved, failures, fatals):
+    # 写入这一段（写蓝图字段 → 保存 → 写数据表）原来**一句进度都不报** ——
+    # 进度条从 2% 一直停到复查，几十秒不动（2026-09-24 体检）。
+    _progress("正在写入角色蓝图字段...", 20, "按勾选把值写进蓝图与组件")
     """按勾选写入。只动被选中的字段，其余原样不碰。
 
     failures 收「哪一批条目没写成」，fatals 收「整趟活白干了」——
@@ -620,6 +640,7 @@ def _apply(request, selected, applied, saved, failures, fatals):
                     slot_key, message))
 
     if touched_blueprint:
+        _progress("正在保存角色蓝图...", 70, blueprint_path, True)
         if _save_asset(blueprint_path):
             saved.append(blueprint_path)
         else:
@@ -633,6 +654,7 @@ def _apply(request, selected, applied, saved, failures, fatals):
             fatals.append(message)
             unreal.log_error("ZDToolbox blueprint setup save failed: " + blueprint_path)
 
+    _progress("正在写入数据表行...", 78, "2DSubSkill / 12SkInfor")
     _apply_tables(request, selected, applied, saved, failures)
 
 
@@ -834,8 +856,14 @@ def _run():
         if _text(request.get("mode")).lower() == "apply":
             _apply(request, {_text(value) for value in request.get("selectedStableIds", []) or []},
                    applied, saved, failures, fatals)
-        # 应用之后再扫一遍，界面上直接看到写入后的状态。
-        _progress("正在复查写入结果...", 92)
+            _SCAN_BAND[0], _SCAN_BAND[1] = 85.0, 100.0
+            # 应用之后再扫一遍，界面上直接看到写入后的状态。
+            _progress("正在复查写入结果...", 85, "重读蓝图与数据表，确认刚才写进去的值")
+        else:
+            # 扫描模式：这一次扫描就是全部工作量 —— 准备完之后整条进度条都归它，
+            # 否则就是"先跳到 92% 再跌回 10%"。
+            _SCAN_BAND[0], _SCAN_BAND[1] = 6.0, 100.0
+            _progress("正在扫描蓝图数据...", 5, "读蓝图槽位、数据表行与素材引用", True)
         report = Report()
         _scan(request, report)
         # 以复查结果为准核对一遍：写入报告说写了、复查却还是有差异的，

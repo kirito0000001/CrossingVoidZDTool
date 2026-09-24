@@ -60,19 +60,16 @@ namespace CrossingVoidZDTool
                 // 耗时从"瞬间"变成 40 秒，离线（commandlet 上下文）实例还可能加载不到 Blueprint /
                 // MetaSound 这类资产，报出来的错看着像工程资产坏了（2026-09-24 实测踩过）。
                 // 留一行痕，下次一眼能分辨"慢 + 找不到资产"是这条路造成的。
-                _lastUnrealTaskRanOffline = true;
                 AppendLog(LogKind.Info, "没有匹配到可用的在线编辑器，本次直接走离线执行（较慢）。");
                 return await run(launch.StartInfo);
             }
 
-            _lastUnrealTaskRanOffline = false;
             try
             {
                 return await run(launch.StartInfo);
             }
             catch (Exception ex) when (UnrealPythonTaskExecutionService.IsRemoteUnavailable(ex))
             {
-                _lastUnrealTaskRanOffline = true;
                 AppendLog(LogKind.Warning,
                     "在线执行不可用，已自动退回离线执行（会慢十几秒）。" + FormatSyncLogValue(ex.Message));
                 ShowFloatingTip(
@@ -82,18 +79,6 @@ namespace CrossingVoidZDTool
                 return await run(offlineStartInfo);
             }
         }
-
-        /// <summary>
-        /// 上一次走 <see cref="RunUnrealTaskWithOfflineFallbackAsync{T}"/> 的任务是不是**离线**跑的。
-        ///
-        /// 只留给诊断：离线（commandlet 上下文）实例加载不到 WidgetBlueprint / MetaSound
-        /// 这类资产，"慢 + 找不到资产"看着像工程坏了 —— 有这一位就能一眼分辨是这条路造成的。
-        ///
-        /// ⚠️ 判断"这一条是不是离线假报"**不再靠它**：桥接脚本自己会问资产注册表，
-        /// 把"资产在、这次读不到"标成 `Unavailable`，比"离线 + 文案含未找到"准
-        /// （2026-09-24 改，见 `HandleLightConfigurationFoundationIssue`）。
-        /// </summary>
-        private bool _lastUnrealTaskRanOffline;
 
         private bool TryBeginUnrealWorkflowOperation()
         {
