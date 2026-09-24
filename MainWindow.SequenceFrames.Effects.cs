@@ -18,34 +18,105 @@ namespace CrossingVoidZDTool
         private DispatcherQueueTimer? _sequenceEffectSubFrameTimer;
         private int _sequenceEffectSubFrame;
         private int _sequenceEffectShownFrameOrdinal = -1;
+        /// <summary>
+        /// 时间轴上被点住的那一格（帧序号 + 第几张特效帧）。开着「预览叠特效」时时间轴
+        /// 按特效帧展开，点哪一格就把那一张**固定**在预览里；播放时清空，让定时器接管。
+        /// </summary>
+        private (int FrameIndex, int SubIndex)? _sequenceEffectPinnedSlot;
 
         // ── 导入 / 打开目录 / 清空 ────────────────────────────────────────────
 
-        /// <summary>
-        /// 「导入特效帧」：把画好的特效帧（就是"导出底板"那批图，画完的样子）导进当前动作的特效层。
-        ///
-        /// 选**文件夹**而不是选文件：底板是一整批平铺在一个目录里的，选目录一下就对上了。
-        /// 帧号取文件名里最后一段数字，所以"导出 → 画 → 导回"不需要改名。
-        /// </summary>
-        async Task ISequenceFramesCommandHost.ImportEffectFramesAsync()
+        Task ISequenceFramesCommandHost.ImportEffectFramesFromPsdAsync()
         {
-            if (CharacterDesk.CurrentCharacter is not { } character)
+            // 读 PSD 没有对话框，一路同步；帧数不多（几十层），和特效层读盘同一量级。
+            ImportEffectFramesFromBasePlatePsd();
+            return Task.CompletedTask;
+        }
+
+        Task ISequenceFramesCommandHost.ImportEffectFramesFromFolderAsync() =>
+            ImportEffectFramesFromPickedFolderAsync();
+
+        /// <summary>
+        /// 「导入特效帧 → 从底板 PSD 读回」（菜单里的第一条，也就是默认那条）。
+        ///
+        /// 前提是"导出底板 → 在 PS / 画世界里画 → 存回原处"：
+        /// 那份 PSD 就在底板目录里（和底板 PNG 同一个落点），所以这里不用弹框，
+        /// 按角色 + 动作算出路径直接读。**图层顺序就是帧顺序**，见
+        /// <see cref="SequenceEffectPsdImportService"/>。
+        ///
+        /// 图层数对不上会**先停下报数**，不猜：多一层少一层都会让整条特效时序错位，
+        /// 而且看起来很像"画的时候就是这样的"。
+        /// </summary>
+        private void ImportEffectFramesFromBasePlatePsd()
+        {
+            if (!TryResolveEffectImportTarget(out var character, out var section, out var expectedFrameCount))
             {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择角色", "请先在角色台选择当前制作角色。");
                 return;
             }
 
-            var section = _applicationViewModel.SequenceFrames.SelectedSection;
-            if (section is null)
+            // 底板落点要靠动作代号解析出来（"OnDamage" 与 "Ondm" 指向同一份底板），
+            // 认不出来就找不到那份 PSD，不如直接说清楚。
+            if (!SequenceActionCatalog.TryResolve(section.Action.Code, out var definition, out var parsedForm))
             {
-                ShowFloatingTip(InfoBarSeverity.Warning, "未选择动作", "先打开一个动作的序列编辑器，再导入特效。");
+                ShowFloatingTip(
+                    InfoBarSeverity.Error,
+                    "读不回特效帧",
+                    $"不认识的动作代号：{section.Action.Code}——认不出底板落在哪个目录。");
                 return;
             }
 
-            var expectedFrameCount = ResolveEffectFrameCount(character, section);
-            if (expectedFrameCount <= 0)
+            var plan = BuildBasePlatePlan(character, section, definition, parsedForm);
+            var psdPath = SequenceEffectPsdImportService.ResolveBasePlatePsdPath(plan);
+            var stagingFolder = SequenceEffectPsdImportService.GetStagingFolderPath(
+                character,
+                section.Action,
+                SequenceEffectService.DefaultLayerName);
+
+            try
             {
-                ShowFloatingTip(InfoBarSeverity.Warning, "没有素材帧", "这个动作还没有帧，先导入帧素材。");
+                var staged = new SequenceEffectPsdImportService().StageFrames(
+                    psdPath,
+                    expectedFrameCount,
+                    plan.CanvasWidth,
+                    plan.CanvasHeight,
+                    stagingFolder);
+                var result = new SequenceEffectService().ImportInOrder(
+                    character,
+                    section.Action,
+                    staged,
+                    expectedFrameCount);
+                ReloadEffectLayer(character, section);
+                ReportEffectImport(section, result, expectedFrameCount, Path.GetFileName(psdPath));
+            }
+            catch (InvalidOperationException ex)
+            {
+                // 层数 / 画布对不上属于"画的时候要对齐一下"，不是工具坏了。
+                ShowFloatingTip(InfoBarSeverity.Warning, "读不回特效帧", ex.Message);
+                AppendLog(LogKind.Warning, $"从底板 PSD 读回特效帧：{ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                ShowFloatingTip(InfoBarSeverity.Error, "读回特效失败", ex.Message);
+                AppendLog(LogKind.Error, $"从底板 PSD 读回特效帧失败：{psdPath}", ex);
+            }
+            finally
+            {
+                // 暂存目录只是中转，成败都不留在盘上。
+                DeleteStagingFolder(stagingFolder);
+            }
+        }
+
+        /// <summary>
+        /// 「导入特效帧 → 选择文件夹…」：挑一个装满 PNG 的目录，帧号取文件名末尾那段数字。
+        ///
+        /// 导出底板那批 PNG 和这套编号同名（<c>&lt;角色&gt;_&lt;动作&gt;_0001.png</c>），
+        /// 所以"导出 → 画 → 选目录"不用改名。之所以还留着这条路：改图、从别处凑素材、
+        /// 或者 PSD 那条走不通时，它不依赖任何别的东西。
+        /// </summary>
+        private async Task ImportEffectFramesFromPickedFolderAsync()
+        {
+            if (!TryResolveEffectImportTarget(out var character, out var section, out var expectedFrameCount))
+            {
                 return;
             }
 
@@ -69,25 +140,92 @@ namespace CrossingVoidZDTool
 
             try
             {
-                var service = new SequenceEffectService();
-                var result = service.Import(character, section.Action, sourceFiles, expectedFrameCount);
+                var result = new SequenceEffectService().Import(
+                    character,
+                    section.Action,
+                    sourceFiles,
+                    expectedFrameCount);
                 ReloadEffectLayer(character, section);
-                AppendLog(LogKind.User,
-                    $"导入特效帧：{section.Action.DisplayName} → {result.ImportedFrames}/{expectedFrameCount} 张"
-                    + $"，空帧 {result.EmptyFrames}"
-                    + (result.IgnoredFrames > 0 ? $"，忽略越界 {result.IgnoredFrames} 张" : string.Empty)
-                    + (result.ClearedFrames > 0 ? $"，先清掉旧帧 {result.ClearedFrames} 张" : string.Empty));
-                ShowFloatingTip(
-                    InfoBarSeverity.Success,
-                    $"特效已导入 {result.ImportedFrames} 张",
-                    result.EmptyFrames > 0
-                        ? $"另有 {result.EmptyFrames} 帧没有内容（空帧），同步到虚幻时是空关键帧。"
-                        : "全部帧都有内容。");
+                ReportEffectImport(section, result, expectedFrameCount, Path.GetFileName(folderPath));
             }
             catch (Exception ex)
             {
                 ShowFloatingTip(InfoBarSeverity.Error, "导入特效失败", ex.Message);
                 AppendLog(LogKind.Error, "导入特效帧失败。", ex);
+            }
+        }
+
+        /// <summary>
+        /// 两个导入入口共用的前置检查：有没有选角色、有没有打开动作、这个动作该有几张特效。
+        /// 任何一条不满足都只提示、不动盘（返回 false）。
+        /// </summary>
+        private bool TryResolveEffectImportTarget(
+            out CharacterCard character,
+            out SequenceFrameSection section,
+            out int expectedFrameCount)
+        {
+            character = null!;
+            section = null!;
+            expectedFrameCount = 0;
+
+            if (CharacterDesk.CurrentCharacter is not { } currentCharacter)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择角色", "请先在角色台选择当前制作角色。");
+                return false;
+            }
+
+            character = currentCharacter;
+            if (_applicationViewModel.SequenceFrames.SelectedSection is not { } currentSection)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择动作", "先打开一个动作的序列编辑器，再导入特效。");
+                return false;
+            }
+
+            section = currentSection;
+            expectedFrameCount = ResolveEffectFrameCount(character, section);
+            if (expectedFrameCount <= 0)
+            {
+                ShowFloatingTip(InfoBarSeverity.Warning, "没有素材帧", "这个动作还没有帧，先导入帧素材。");
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>导入成功后那一套提示：写日志 + 报"进来几张、空几张"。</summary>
+        private void ReportEffectImport(
+            SequenceFrameSection section,
+            SequenceEffectImportResult result,
+            int expectedFrameCount,
+            string sourceName)
+        {
+            AppendLog(LogKind.User,
+                $"导入特效帧：{section.Action.DisplayName} ← {sourceName} → "
+                + $"{result.ImportedFrames}/{expectedFrameCount} 张"
+                + $"，空帧 {result.EmptyFrames}"
+                + (result.IgnoredFrames > 0 ? $"，忽略越界 {result.IgnoredFrames} 张" : string.Empty)
+                + (result.ClearedFrames > 0 ? $"，先清掉旧帧 {result.ClearedFrames} 张" : string.Empty));
+            ShowFloatingTip(
+                InfoBarSeverity.Success,
+                $"特效已导入 {result.ImportedFrames} 张",
+                result.EmptyFrames > 0
+                    ? $"另有 {result.EmptyFrames} 帧没有内容（空帧），同步到虚幻时是空关键帧。"
+                    : "全部帧都有内容。");
+        }
+
+        private static void DeleteStagingFolder(string stagingFolder)
+        {
+            try
+            {
+                if (Directory.Exists(stagingFolder))
+                {
+                    Directory.Delete(stagingFolder, recursive: true);
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                // 暂存目录没删掉只是留了点垃圾，不该把一次成功的导入报成失败。
+                ToolboxLog.Warn($"特效导入的暂存目录没清掉：{stagingFolder}", ex);
             }
         }
 
@@ -125,6 +263,31 @@ namespace CrossingVoidZDTool
             }
         }
 
+        /// <summary>
+        /// 把「导入特效帧」按钮的菜单装上：清单来自 <see cref="SequenceEffectImportMenu"/>（纯函数），
+        /// 命令在 ViewModel 里配一次。
+        ///
+        /// **菜单本体也是在这儿建的**：`MainWindow.xaml` 的行数已经顶在棘轮上限上，
+        /// 而 XAML 那边只需要给按钮挂一个 `x:Name`（零行开销）。代价是看 XAML 看不出
+        /// 这个按钮有菜单 —— 所以这条注释得留着。
+        /// </summary>
+        private void BuildSequenceEffectImportMenu()
+        {
+            var flyout = new MenuFlyout();
+            foreach (var (item, command) in _applicationViewModel.SequenceFrames.EffectImportMenuActions)
+            {
+                var menuItem = new MenuFlyoutItem
+                {
+                    Text = item.Text,
+                    Command = command
+                };
+                ToolTipService.SetToolTip(menuItem, item.ToolTip);
+                flyout.Items.Add(menuItem);
+            }
+
+            SequenceEffectImportButton.Flyout = flyout;
+        }
+
         /// <summary>把这一层的现状读进 ViewModel，并立刻刷新预览上的特效层。</summary>
         private void ReloadEffectLayer(CharacterCard character, SequenceFrameSection section)
         {
@@ -135,8 +298,31 @@ namespace CrossingVoidZDTool
             _sequenceEffectPreviewCache.Clear();
             _sequenceEffectShownFrameOrdinal = -1;
             _sequenceEffectSubFrame = 0;
+            _sequenceEffectPinnedSlot = null;
             _applicationViewModel.SequenceFrames.SetEffectLayer(layer.HasFrames ? layer : null);
             UpdateSequenceEffectLayerSource();
+        }
+
+        /// <summary>
+        /// 帧清单被改过之后（增删 / 替换 / 改帧率）重读一次特效层。
+        ///
+        /// 特效层是"按动作算出来的"：一个动作帧占几格变了，特效该有多少张、每一格对应哪一张
+        /// 都会跟着变（时间轴按特效帧摊开的那份列表也一样）。编辑器没开着就什么都不用做。
+        /// </summary>
+        private void RefreshSequenceEffectLayerIfEditorOpen()
+        {
+            if (SequenceFramesManagerHost.Visibility != Visibility.Visible)
+            {
+                return;
+            }
+
+            if (CharacterDesk.CurrentCharacter is not { } character ||
+                _applicationViewModel.SequenceFrames.SelectedSection is not { } section)
+            {
+                return;
+            }
+
+            ReloadEffectLayer(character, section);
         }
 
         /// <summary>这个动作的特效该有多少张 = 导出底板会出多少张（总格数 × 倍数）。</summary>
@@ -184,13 +370,11 @@ namespace CrossingVoidZDTool
                 return;
             }
 
-            var multiplier = Math.Max(1, layer.Multiplier);
-            var durationFrames = Math.Max(1, current.DurationFrames);
             // 这一帧在特效序列里的起点：前面所有帧的格数 × 倍数，再加本帧内的子帧号。
             var startOrdinal = 1;
             for (var index = 0; index < currentIndex; index++)
             {
-                startOrdinal += Math.Max(1, frames[index].DurationFrames) * multiplier;
+                startOrdinal += Math.Max(1, frames[index].DurationFrames) * Math.Max(1, layer.Multiplier);
             }
 
             if (_sequenceEffectShownFrameOrdinal != currentIndex)
@@ -199,8 +383,7 @@ namespace CrossingVoidZDTool
                 _sequenceEffectSubFrame = 0;
             }
 
-            var subFrame = _sequenceEffectSubFrame % (durationFrames * multiplier);
-            var ordinal = startOrdinal + subFrame;
+            var ordinal = startOrdinal + ResolveSequenceEffectSubFrameOfCurrentFrame(current);
             var effectFrame = layer.Frames.FirstOrDefault(frame => frame.Ordinal == ordinal);
             if (effectFrame is null || effectFrame.IsEmpty)
             {
@@ -225,6 +408,27 @@ namespace CrossingVoidZDTool
             }
 
             ShowSequenceEffectSource(source);
+        }
+
+        /// <summary>
+        /// 当前这一帧现在该显示第几张特效帧（0 起）—— 一个动作帧占"格数 × 倍数"张。
+        ///
+        /// 点住某一格时看钉住的那张（不跟定时器走）；否则按特效层自己的节拍走。
+        /// **预览显示的那一张和时间轴上高亮的那一格共用这一个来源**，
+        /// 所以两边不会各说各话（播放时高亮就是一格一格往前走的）。
+        /// </summary>
+        private int ResolveSequenceEffectSubFrameOfCurrentFrame(SequenceFrameItem frame)
+        {
+            var multiplier = Math.Max(
+                1,
+                _applicationViewModel.SequenceFrames.EffectLayer?.Multiplier ?? BasePlateExportPlanner.Multiplier);
+            var slotCount = Math.Max(1, frame.DurationFrames) * multiplier;
+            if (_sequenceEffectPinnedSlot is { } pinned && pinned.FrameIndex == frame.Index)
+            {
+                return Math.Min(pinned.SubIndex, slotCount - 1);
+            }
+
+            return _sequenceEffectSubFrame % slotCount;
         }
 
         private void ShowSequenceEffectSource(ImageSource? source)

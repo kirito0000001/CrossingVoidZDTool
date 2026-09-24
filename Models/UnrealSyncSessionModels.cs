@@ -27,8 +27,14 @@ internal static class UnrealSyncWorkflow
 {
     public const int MinStep = 1;
 
-    /// <summary>1 底层检测、2 规整素材、3 同步素材、4 基础配置、5 序列同步、6 蓝图置入。</summary>
-    public const int MaxStep = 6;
+    /// <summary>
+    /// 1 底层检测、2 规整素材、3 同步素材、4 基础配置、5 序列同步、6 蓝图置入、**7 特效同步**。
+    ///
+    /// 第七步是**独立的一步**，不是第五步的一部分：第五步只管角色序列（图集/精灵/Flipbook/序列/AnimMaps），
+    /// 特效那套（网格 sheet + SubUV 材质实例 + 共享 Niagara 面片系统）走第七步自己的检测与同步。
+    /// 用户明确要求过："我最早说的是在第七步同步，不要给第五步压得太重"。
+    /// </summary>
+    public const int MaxStep = 7;
 }
 
 internal sealed class UnrealSyncSessionCache

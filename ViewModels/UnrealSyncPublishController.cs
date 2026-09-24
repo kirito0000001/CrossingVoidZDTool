@@ -29,6 +29,106 @@ internal sealed class UnrealSyncPublishController(
     private readonly IUnrealSyncPublishHost _host = host;
     private readonly UnrealProjectSyncViewModel _sync = sync;
 
+    /// <summary>
+    /// 第七步「特效同步」的发布：**不跑 Unreal 全量导出**。
+    ///
+    /// 和第五步的区别就是这一条：第五步要先 `CharacterSequences` 导出（把整条序列的帧全打开）
+    /// 才能算出差异、才能知道要同步哪些动作；而特效该不该同步只看工作区里有没有特效帧，
+    /// 所以这里本地打网格 sheet + 建计划，然后交给**同一个桥接脚本**
+    /// （`sync_character_sequences.py` 里 `isEffectLayer` 那条只出 sheet + 材质实例）。
+    /// </summary>
+    private async Task PublishEffectSyncOnlyAsync(
+        CharacterCard character,
+        string enginePath,
+        string projectPath,
+        WorkflowProgressPlan progressPlan)
+    {
+        _host.UpdateGlobalProgress("阶段 1/3 · 正在打包特效网格", 20, $"角色：{character.Code}", true);
+        var atlases = await new SequenceAtlasPackService().PackEffectSheetsAsync(
+            character,
+            _host.Settings.AtlasPythonPath,
+            null,
+            _host.GetGlobalProgressCancellationToken());
+
+        var publishService = new UnrealBridgeSequencePublishService();
+        var plan = publishService.BuildEffectSyncPlanForAll(character, projectPath, atlases);
+        _host.AppendLog(LogKind.User, $"[Effect Plan] character={character.Code} actions={plan.Actions.Count}");
+        if (plan.Actions.Count == 0)
+        {
+            _host.CompleteGlobalProgress("没有要同步的特效", "这个角色没有任何动作带特效层。");
+            await _host.HideGlobalProgressAfterDelayAsync();
+            return;
+        }
+
+        foreach (var action in plan.Actions)
+        {
+            _host.AppendLog(
+                LogKind.Info,
+                $"[Effect Plan Action] code={action.ActionCode} frames={action.Frames.Count} "
+                + $"grid={action.EffectColumns}x{action.EffectRows} mi={action.EffectMaterialName}");
+        }
+
+        var folder = Path.Combine(
+            Path.GetDirectoryName(projectPath)!, "Intermediate", "ZDToolboxBridge", character.Code);
+        var planPath = Path.Combine(folder, "effect-sync-plan.json");
+        var progressPath = Path.Combine(folder, "effect-sync-progress.json");
+        var resultPath = Path.Combine(folder, "effect-sync-result.json");
+        publishService.Save(planPath, plan);
+
+        var scriptPath = Path.Combine(AppContext.BaseDirectory, "Tools", "UnrealBridge", "sync_character_sequences.py");
+        var executor = new UnrealBridgeExecutorService();
+        var startInfo = executor.BuildProcessStartInfo(
+            enginePath, projectPath, planPath, progressPath, resultPath, scriptPath);
+        startInfo.Environment["ZD_SEQUENCE_SYNC_PLAN_PATH"] = planPath;
+        startInfo.Environment["ZD_SEQUENCE_SYNC_RESULT_PATH"] = resultPath;
+
+        var launch = new UnrealPythonTaskExecutionService().BuildLaunch(
+            enginePath,
+            projectPath,
+            scriptPath,
+            Path.Combine(folder, "effect-sync.remote-job.json"),
+            startInfo);
+        _host.UpdateGlobalProgress(
+            launch.UsesRunningEditor
+                ? "阶段 2/3 · 正在连接已打开的 Unreal Editor"
+                : "阶段 2/3 · 正在启动 Unreal 执行特效同步",
+            progressPlan[WorkflowProgressPlan.BridgeExecute].At(0),
+            $"待执行 {plan.Actions.Count} 个动作的特效",
+            true);
+
+        var result = await executor.ExecuteAsync(
+            launch.StartInfo,
+            progressPath,
+            resultPath,
+            new Progress<UnrealBridgeExecutionProgress>(value => _host.UpdateGlobalProgress(
+                $"阶段 2/3 · 执行特效动作：{value.Message}",
+                progressPlan[WorkflowProgressPlan.BridgeExecute].At(
+                    value.CompletedCount * 100d / Math.Max(1, value.TotalCount)),
+                $"动作进度：{value.CompletedCount}/{value.TotalCount} · {value.StableId}")),
+            _host.GetGlobalProgressCancellationToken());
+
+        _host.AppendLog(
+            result.Succeeded ? LogKind.Info : LogKind.Error,
+            $"[Effect Execution] character={character.Code} succeeded={result.Succeeded} "
+            + $"items={result.Items.Count} error={_host.FormatSyncLogValue(result.ErrorMessage)}");
+        foreach (var item in result.Items)
+        {
+            _host.AppendLog(
+                item.Succeeded ? LogKind.Info : LogKind.Error,
+                $"[Effect Execution Item] stableId={item.StableId} succeeded={item.Succeeded} "
+                + $"message={_host.FormatSyncLogValue(item.Message)}");
+        }
+
+        if (!result.Succeeded)
+        {
+            throw new InvalidOperationException($"第七步特效同步失败：{result.ErrorMessage}");
+        }
+
+        // 特效同步完不跑复扫导出：这一步不产出角色序列资产，也就没有"还剩多少序列差异"要重算。
+        _host.CompleteGlobalProgress("特效同步完成", $"{plan.Actions.Count} 个动作的特效已写入 Unreal。");
+        await _host.HideGlobalProgressAfterDelayAsync();
+    }
+
     public async Task PublishCurrentCharacterAssetsToUnrealAsync()
     {
         _host.LogUserOperation("同步当前角色素材到 Unreal", startsRun: true);
@@ -50,7 +150,9 @@ internal sealed class UnrealSyncPublishController(
 
         _host.IsPublishRunning = true;
         _sync.SetPublishRunning(true);
-        var isSequenceSynchronization = _sync.WorkflowStep == 5;
+        // 第五步「序列同步」和第七步「特效同步」共用这条发布链路（同一条检测/发布管线），
+        // 区别只在最终用哪个计划：第五步 = BuildSequenceSyncPlan，第七步 = BuildEffectSyncPlan。
+        var isSequenceSynchronization = _sync.WorkflowStep is 5 or 7;
         // 百分比按各阶段实测耗时分配；备份开着时它会占掉大半条，这是事实。
         var progressPlan = WorkflowProgressPlan.ForSequenceSync(_host.Settings.BackupBeforeUnrealSync);
         _host.ShowGlobalProgress("同步前检测", character.Code);
@@ -59,6 +161,14 @@ internal sealed class UnrealSyncPublishController(
             await Task.Yield();
             var enginePath = _sync.EnginePath;
             var projectPath = _sync.ProjectPath;
+            // 第七步「特效同步」：**不跑 Unreal 全量导出**（第五步那条会把整条序列的帧全打开），
+            // 直接本地打网格 sheet + 建特效计划，再交给同一个桥接脚本执行。
+            if (_sync.WorkflowStep == 7)
+            {
+                await PublishEffectSyncOnlyAsync(character, enginePath, projectPath, progressPlan);
+                return;
+            }
+
             var stateService = new UnrealBridgeStateService();
             var baseline = stateService.Load(character, projectPath);
             // 在任何重新扫描、重建差异树之前保存用户当前勾选的叶子项。
@@ -119,7 +229,10 @@ internal sealed class UnrealSyncPublishController(
                 await _host.HideGlobalProgressAfterDelayAsync();
                 return;
             }
-            _sync.ReturnToWorkflowStep(isSequenceSynchronization ? 5 : 3);
+            // 第五步和第七步共用这条发布链路，但**同步完要回到自己那一步**：
+            // 第七步同步完跳回第五步，用户会以为特效跑到序列步去了（实测就是这么发生的）。
+            _sync.ReturnToWorkflowStep(
+                _sync.WorkflowStep == 7 ? 7 : isSequenceSynchronization ? 5 : 3);
             var latestToolboxSnapshot = new UnrealBridgeToolboxSnapshotService().BuildForSynchronization(character);
             var latestUnrealSnapshot = new UnrealBridgeSemanticSnapshotService().Build(latestCandidate);
             // 序列：把「上次同步时记下的素材内容摘要」补进 Unreal 侧载荷，
@@ -318,7 +431,10 @@ internal sealed class UnrealSyncPublishController(
                     _host.GetGlobalProgressCancellationToken());
                 _host.AppendLog(LogKind.Info, $"[Sequence Atlas] character={character.Code} atlases={atlases.Count}");
                 var sequencePublishService = new UnrealBridgeSequencePublishService();
-                sequencePlan = sequencePublishService.BuildSequenceSyncPlan(character, projectPath, changes, atlases);
+                // 第七步只要特效那一条（第五步的计划里已经不掺特效了）。
+                sequencePlan = _sync.WorkflowStep == 7
+                    ? sequencePublishService.BuildEffectSyncPlan(character, projectPath, changes, atlases)
+                    : sequencePublishService.BuildSequenceSyncPlan(character, projectPath, changes, atlases);
                 if (sequencePublishService.SkippedActionCodes.Count > 0)
                 {
                     _host.AppendLog(LogKind.Warning, $"[Sequence Plan Skipped] character={character.Code} actions={string.Join("、", sequencePublishService.SkippedActionCodes)}（工具箱侧没有序列帧数据）");

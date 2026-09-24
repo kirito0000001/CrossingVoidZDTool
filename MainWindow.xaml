@@ -2841,6 +2841,22 @@
                                                     <TextBlock Grid.Column="1" Text="蓝图置入" />
                                                     <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep6StatusText, Mode=OneWay}" />
                                                 </Grid>
+                                                <!--
+                                                    第 7 步「特效同步」：和上面六步同构（序号 / 名称 / 状态）。
+                                                    特效有自己的检测与同步（网格 sheet + 材质实例），不再挂在第五步上 ——
+                                                    用户原话："我最早说的是在第七步同步，不要给第五步压得太重"。
+                                                    Step7 的页面与处理器另开一轮接（XAML 有静默崩溃的先例，这里先只补流程列表这一行）。
+                                                -->
+                                                <Grid ColumnSpacing="8">
+                                                    <Grid.ColumnDefinitions>
+                                                        <ColumnDefinition Width="Auto" />
+                                                        <ColumnDefinition Width="*" />
+                                                        <ColumnDefinition Width="Auto" />
+                                                    </Grid.ColumnDefinitions>
+                                                    <TextBlock FontSize="16" Text="7" />
+                                                    <TextBlock Grid.Column="1" Text="特效同步" />
+                                                    <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep7StatusText, Mode=OneWay}" />
+                                                </Grid>
                                                 <Grid ColumnSpacing="10">
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="*" />
@@ -4630,7 +4646,12 @@
                                 <Button Command="{Binding SequenceFrames.PreviousFrameCommand}" Style="{StaticResource IconToolButtonStyle}" ToolTipService.ToolTip="上一帧">
                                     <FontIcon Glyph="&#xE892;" />
                                 </Button>
-                                <Button Grid.Column="1" Command="{Binding SequenceFrames.ToggleEditorPreviewPlaybackCommand}" Style="{StaticResource IconToolButtonStyle}" ToolTipService.ToolTip="{Binding SequenceFrames.PlayPauseToolTip, Mode=OneWay}">
+                                <Button
+                                    x:Name="SequenceEditorPlayButton"
+                                    Grid.Column="1"
+                                    Command="{Binding SequenceFrames.ToggleEditorPreviewPlaybackCommand}"
+                                    Style="{StaticResource IconToolButtonStyle}"
+                                    ToolTipService.ToolTip="{Binding SequenceFrames.PlayPauseToolTip, Mode=OneWay}">
                                     <FontIcon Glyph="{Binding SequenceFrames.PlayPauseGlyph, Mode=OneWay}" />
                                 </Button>
                                 <Button Grid.Column="2" Command="{Binding SequenceFrames.NextFrameCommand}" Style="{StaticResource IconToolButtonStyle}" ToolTipService.ToolTip="下一帧">
@@ -4875,9 +4896,9 @@
                                                 <ColumnDefinition Width="*" />
                                             </Grid.ColumnDefinitions>
                                             <Button
+                                                x:Name="SequenceEffectImportButton"
                                                 HorizontalAlignment="Stretch"
-                                                Command="{Binding SequenceFrames.ImportEffectFramesCommand}"
-                                                Content="导入特效帧"
+                                                Content="导入特效帧 ▾"
                                                 Style="{StaticResource PrimaryToolButtonStyle}" />
                                             <Button
                                                 Grid.Column="1"
@@ -4908,19 +4929,19 @@
                             <StackPanel Orientation="Horizontal" Spacing="12">
                                 <TextBlock FontWeight="SemiBold" Text="帧时间轴" />
                             </StackPanel>
-                            <TextBlock x:Name="SequenceTimelineModeText" Grid.Column="1" Style="{StaticResource SubtleTextStyle}" Text="拖动帧块排序" />
+                            <TextBlock x:Name="SequenceTimelineModeText" Grid.Column="1" Style="{StaticResource SubtleTextStyle}" Text="{Binding SequenceFrames.TimelineHintText, Mode=OneWay}" />
                         </Grid>
                         <ListView
                             x:Name="SequenceFrameTimelineListView"
                             Grid.Row="1"
-                            AllowDrop="True"
-                            CanDragItems="True"
-                            CanReorderItems="True"
+                            AllowDrop="{Binding SequenceFrames.CanReorderTimeline, Mode=OneWay}"
+                            CanDragItems="{Binding SequenceFrames.CanReorderTimeline, Mode=OneWay}"
+                            CanReorderItems="{Binding SequenceFrames.CanReorderTimeline, Mode=OneWay}"
                             DragItemsCompleted="SequenceFrameManagerGridView_DragItemsCompleted"
                             DragItemsStarting="SequenceFrameManagerGridView_DragItemsStarting"
                             IsItemClickEnabled="True"
                             ItemClick="SequenceFrameTimelineListView_ItemClick"
-                            ItemsSource="{Binding SequenceFrames.SelectedSectionFrames, Mode=OneWay}"
+                            ItemsSource="{Binding SequenceFrames.TimelineFrames, Mode=OneWay}"
                             KeyDown="SequenceFrameTimelineListView_KeyDown"
                             ReorderMode="Enabled"
                             SelectionChanged="SequenceFrameTimelineListView_SelectionChanged"
@@ -4967,7 +4988,7 @@
                                                 x:Name="SequenceTimelineFrameThumbnail"
                                                 Height="96"
                                                 Background="{ThemeResource LayerFillColorAltBrush}">
-                                                <Image Source="{Binding FileUri, Mode=OneWay}" Stretch="Uniform" />
+                                                <Image Source="{Binding TimelineThumbnailSource, Mode=OneWay}" Stretch="Uniform" />
                                                 <TextBlock HorizontalAlignment="Center" VerticalAlignment="Center" Style="{StaticResource SubtleTextStyle}" Text="空白帧" Visibility="{Binding BlankVisibility, Mode=OneWay}" />
                                                 <Border
                                                     BorderBrush="{Binding ReuseBrush, Mode=OneWay}"

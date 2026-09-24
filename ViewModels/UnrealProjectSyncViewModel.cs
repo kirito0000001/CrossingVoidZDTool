@@ -336,7 +336,12 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     public bool IsDetectionWorkspace => !IsNormalizationWorkspace;
     public bool IsFoundationWorkspace => !IsEngineToToolbox && WorkflowStep == 1;
     public bool IsLightConfigurationWorkspace => !IsEngineToToolbox && WorkflowStep == 4;
-    public bool IsSequenceSynchronizationWorkspace => !IsEngineToToolbox && WorkflowStep == 5;
+    /// <summary>
+    /// 第五步「序列同步」和第七步「特效同步」共用同一块工作区（差异列表 / 同步按钮同构），
+    /// 区别只在计划来源（`BuildSequenceSyncPlan` vs `BuildEffectSyncPlan`）。
+    /// </summary>
+    public bool IsSequenceSynchronizationWorkspace =>
+        !IsEngineToToolbox && WorkflowStep is 5 or 7;
     public Visibility FoundationWorkspaceVisibility =>
         IsFoundationWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
             ? Visibility.Visible
@@ -429,7 +434,12 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         _lastPublishChanges.All(change => change.Kind == UnrealBridgeChangeKind.Unchanged);
     public bool CanStartPublish => HasPublishSelection &&
         !IsPublishRunning && IsWorkflowOperationIdle;
-    public string PublishActionText => WorkflowStep == 5 ? "同步序列到虚幻" : "同步到虚幻";
+    public string PublishActionText => WorkflowStep switch
+    {
+        5 => "同步序列到虚幻",
+        7 => "同步特效到虚幻",
+        _ => "同步到虚幻"
+    };
 
     public bool IsWorkflowOperationIdle => !IsWorkflowOperationRunning;
 
@@ -588,6 +598,14 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     public string WorkflowStep3StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 3);
     public string WorkflowStep4StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 4);
     public string WorkflowStep5StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 5);
+    /// <summary>
+    /// 第 7 步「特效同步」的状态文字。
+    ///
+    /// 步骤计数住在 <see cref="UnrealSyncWorkflow.MaxStep"/>（已经是 7），这里按同一套写法补上；
+    /// 第七步自己的"检测/同步"输入还没接（见 Docs/特效Niagara-面片与序列同步-设计.md 第十一节），
+    /// 所以这一步现在只会照规则显示"未开始"，不会谎报完成。
+    /// </summary>
+    public string WorkflowStep7StatusText => UnrealSyncWorkflowState.StepStatusText(BuildWorkflowInputs(), 7);
     public string WorkflowNextText => WorkflowStep switch
     {
         1 => "规整素材",
@@ -595,6 +613,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         3 => "基础配置",
         4 => "序列同步",
         5 => "蓝图置入",
+        6 => "特效同步",
         _ => "已完成"
     };
     public string WorkflowReloadText => WorkflowStep switch
@@ -605,6 +624,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         4 => "重新加载基础配置",
         5 => "重新加载序列同步",
         6 => "重新加载蓝图置入",
+        7 => "重新加载特效同步",
         _ => "重新加载同步结果"
     };
 
@@ -616,7 +636,10 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         3 => HasNoPublishChanges && IsWorkflowOperationIdle,
         4 => CanAdvanceWorkflow && IsWorkflowOperationIdle,
         5 => CanAdvanceWorkflow && IsWorkflowOperationIdle,
-        6 => false,
+        // 第六步（蓝图置入）之后还有第七步「特效同步」——以前这里写死 false，
+        // 于是"下一步"永远是灰的「已完成」，用户根本进不去第七步。
+        6 => CanAdvanceWorkflow && IsWorkflowOperationIdle,
+        7 => false,
         _ => WorkflowStep < 3 && CanAdvanceWorkflow && IsWorkflowOperationIdle
     };
 
@@ -1753,19 +1776,30 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     public IReadOnlyList<UnrealBridgeChange> FilterPublishChanges(IReadOnlyList<UnrealBridgeChange> changes)
     {
-        if (WorkflowStep == 5 || SelectedPublishStage?.Stage == UnrealBridgePublishStage.ZdAnimationTracks)
+        // **先按当前步骤判，再按（从会话缓存恢复的）发布阶段判。**
+        //
+        // 顺序颠倒过一次，后果是：第五步跑过之后 SelectedPublishStage 停在 ZdAnimationTracks 并被持久化，
+        // 回到第三步时上面那个 `||` 立刻成立 —— 素材变更被当成序列变更过滤，整批丢掉，
+        // 界面显示"共检查 0 项 · 无差异 0 项"，真该报的新增（幻形立绘 #2 / 失败语音 #1）全被吞掉。
+        // （2026-09-24 实测，用户看到的正是这个。）
+        // 序列那一路：第五/七步，**或者**阶段明确停在"序列动画轨道"（会话缓存恢复时步骤可能还没落定，只有阶段可信）。
+        // 但**第三步除外**：那一步要的是素材，残留的序列阶段不能在这里生效。
+        if (WorkflowStep is 5 or 7 ||
+            (WorkflowStep != 3 &&
+             SelectedPublishStage?.Stage == UnrealBridgePublishStage.ZdAnimationTracks))
         {
             return changes.Where(change => change.Module == UnrealBridgeModule.SequenceFrames).ToArray();
         }
 
-        if (SelectedPublishStage?.Stage != UnrealBridgePublishStage.CharacterMaterials)
+        if (WorkflowStep == 3 || SelectedPublishStage?.Stage == UnrealBridgePublishStage.CharacterMaterials)
         {
-            return [];
+            return changes
+                .Where(change => change.Module is UnrealBridgeModule.BaseMaterials or UnrealBridgeModule.Voices)
+                .ToArray();
         }
 
-        return changes
-            .Where(change => change.Module is UnrealBridgeModule.BaseMaterials or UnrealBridgeModule.Voices)
-            .ToArray();
+        // 其它阶段（ItemData / Buffs / 角色蓝图…）各有自己的界面，这棵素材树不由它们过滤。
+        return [];
     }
 
     public bool MatchesCurrentPublishChanges(IReadOnlyList<UnrealBridgeChange> latestChanges)

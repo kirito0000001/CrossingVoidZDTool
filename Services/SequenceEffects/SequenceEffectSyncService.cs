@@ -20,6 +20,11 @@ internal sealed record SequenceEffectSyncLayout(
     string LayerCode,
     string AtlasName,
     string FlipbookAssetName,
+    string SheetName,
+    string MaterialName,
+    string NiagaraSystemName,
+    int Columns,
+    int Rows,
     string MaterialFolderPackagePath,
     double OutputFps,
     IReadOnlyList<SequenceEffectSyncFrame> Frames,
@@ -59,6 +64,39 @@ internal static class SequenceEffectSyncService
     public static string BuildFlipbookName(string variantCode) => $"{variantCode}_{LayerSuffix}_Flipbook";
 
     /// <summary>
+    /// Niagara 用的**网格 sheet**：<c>Misaka_Sk2_Effect_Sheet</c>。
+    ///
+    /// 为什么不和 Paper2D 那张图集共用：那张是 <c>pack + trim</c> 的紧凑排布
+    /// （每格矩形不同，精灵按矩形取图），而 Niagara 的 Sub UV 只认**等分网格**。
+    /// 各用一张，Paper2D 那条已经跑通的链路就一点不用动；
+    /// 等哪天特效不再需要 Paper2D 口径，再并成一张也不迟。
+    /// </summary>
+    public static string BuildSheetName(string characterCode, string variantCode) =>
+        $"{characterCode}_{variantCode}_{LayerSuffix}_Sheet";
+
+    /// <summary>
+    /// 每个动作一个**材质实例**：<c>MI_Sk2_Effect</c>。
+    ///
+    /// 母材质（`/ZDBridge/FX/M_FXSheet`）和粒子系统（`/ZDBridge/FX/NS_FXSheet`）都是**共享的、跟插件走**，
+    /// 每个动作只有这个 MI 不同：它把 Sheet / Columns / Rows / Frames 填进去。
+    /// </summary>
+    public static string BuildMaterialName(string variantCode) => $"MI_{variantCode}_{LayerSuffix}";
+
+    /// <summary>Niagara 系统：<c>NS_Sk2_Effect</c>（面片 + 网格序列帧）。</summary>
+    public static string BuildNiagaraSystemName(string variantCode) => $"NS_{variantCode}_{LayerSuffix}";
+
+    /// <summary>
+    /// 网格行列数：取接近正方（列数 = ⌈√帧数⌉）。**空帧也占格**，所以
+    /// "第 N 格 = 第 N 个输出帧"，Sub UV 索引就是帧号，不需要额外的映射表。
+    /// </summary>
+    public static void ResolveGrid(int frameCount, out int columns, out int rows)
+    {
+        var count = Math.Max(1, frameCount);
+        columns = Math.Max(1, (int)Math.Ceiling(Math.Sqrt(count)));
+        rows = Math.Max(1, (int)Math.Ceiling(count / (double)columns));
+    }
+
+    /// <summary>
     /// 精灵名：<c>Sk2_Effect_Frame00_Sprite</c>。
     /// 序号从 0 起、两位补零，和角色序列那边（<c>Sk2_Frame00_Sprite</c>）同一套写法。
     /// </summary>
@@ -84,7 +122,13 @@ internal static class SequenceEffectSyncService
                 name.EndsWith("_Sprite", StringComparison.OrdinalIgnoreCase)) ||
                name.EndsWith($"_{LayerSuffix}_Flipbook", StringComparison.OrdinalIgnoreCase) ||
                // 图集贴图：<角色>_<动作>_Effect
-               name.EndsWith($"_{LayerSuffix}", StringComparison.OrdinalIgnoreCase);
+               name.EndsWith($"_{LayerSuffix}", StringComparison.OrdinalIgnoreCase) ||
+               // Niagara 那一路（2026-09-23）：网格 sheet、SubUV 材质、以及系统复制出来的 emitter。
+               // 少认一个，刚生成的资产下一轮就会被列成"待删除" —— 冒烟实测抓到过一次
+               // （`Click_Effect_Emitter` 出现在第五步的 DeleteCandidate 里）。
+               name.EndsWith($"_{LayerSuffix}_Sheet", StringComparison.OrdinalIgnoreCase) ||
+               name.EndsWith($"_{LayerSuffix}_Material", StringComparison.OrdinalIgnoreCase) ||
+               name.EndsWith($"_{LayerSuffix}_Emitter", StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -138,20 +182,29 @@ internal static class SequenceEffectSyncService
         // Python 当清理范围用，而清理那一步是拿"重建出来的资产路径"去比的。
         // 归一化会连大小写一起改掉，于是清理认不出自己刚建的那批（2026-09-22 实测：
         // 新建的图集/精灵/Flipbook 被整批删掉，紧接着读 Flipbook 就报实例为空）。
+        // **特效只有这两样是这个动作自己的产物**（只出特效，2026-09-23 用户拍板）：
+        // 网格 sheet + 材质实例。面片网格 / 参数化母材质 / 粒子系统都跟着插件走（`/ZDBridge/FX`），
+        // 不归这一层清，也永远不该出现在动作目录里。
+        //
+        // 这份名单是"先清后建"的权威依据，和生产必须同时改：少一条会留下清不掉的历史资产，
+        // 多一条会把刚建出来的东西删掉（大小写归一化那次就是这么翻车的）。
         var canonicalPaths = new List<string>
         {
-            BuildObjectPath(materialFolder, BuildFlipbookName(variantCode)),
-            BuildObjectPath(materialFolder, atlasName)
+            BuildObjectPath(materialFolder, BuildSheetName(character.Code, variantCode)),
+            BuildObjectPath(materialFolder, BuildMaterialName(variantCode))
         };
-        canonicalPaths.AddRange(frames
-            .Where(frame => !frame.IsEmpty)
-            .Select(frame => BuildObjectPath(materialFolder, frame.SpriteAssetName)));
 
         var fps = actionFps > 0 ? actionFps : SequenceFrameService.DefaultFps;
+        ResolveGrid(frames.Count, out var columns, out var rows);
         return new SequenceEffectSyncLayout(
             BuildLayerCode(variantCode),
             atlasName,
             BuildFlipbookName(variantCode),
+            BuildSheetName(character.Code, variantCode),
+            BuildMaterialName(variantCode),
+            BuildNiagaraSystemName(variantCode),
+            columns,
+            rows,
             materialFolder,
             fps * multiplier,
             frames,

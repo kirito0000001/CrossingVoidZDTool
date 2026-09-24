@@ -42,8 +42,12 @@ def _load(path):
                      'blueprintFormSlotIndex', 'animMapsEntryName', 'targetSequencePath', 'targetMaterialFolder',
                      'sequenceAssetName', 'flipbookAssetName', 'legacyNameTokens',
                      'staleAssetObjectPaths', 'hasStaleAssetSelection',
-                     # 特效层：只建图集贴图 + 精灵 + Flipbook，不建序列、不写 AnimMaps、不碰蓝图。
-                     'isEffectLayer'):
+                     # 特效层：只建网格 sheet + 材质实例，不建序列、不写 AnimMaps、不碰蓝图。
+                     # 下面这几个 Effect* 字段是 2026-09-24 加的：C# 计划里是 PascalCase，
+                     # **漏登记就会被静默当成默认值**（真同步时会变成"没有任何特效可同步"）。
+                     'isEffectLayer',
+                     'effectSheetName', 'effectSheetImagePath', 'effectColumns', 'effectRows',
+                     'effectMaterialName', 'effectNiagaraSystemName', 'effectFps'):
             action[name] = get(action, name, action.get(name, ''))
         frames = get(action, 'frames', []) or []
         for frame in frames:
@@ -883,6 +887,102 @@ def _is_effect_layer(action):
     return action.get('isEffectLayer') is True
 
 
+def _bridge_json_ok(payload, code, label):
+    """ZDBridge 的助手统一返回 JSON；这里只认 ok=true，错误信息原样带出来。"""
+    text = payload if isinstance(payload, str) else str(payload)
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        raise RuntimeError('%s: %s 返回的不是 JSON：%s' % (code, label, text[:200]))
+    if not parsed.get('ok'):
+        raise RuntimeError('%s: %s 失败：%s' % (code, label, parsed.get('error') or text[:200]))
+    return parsed
+
+
+def _sync_effect_niagara(action, code, material_folder):
+    """这一层的**网格 sheet** → 一个材质实例（MI）。
+
+    **共享的东西不进动作目录**：面片网格、参数化母材质、粒子系统都跟着插件走
+    （`/ZDBridge/FX/…`，见 Docs/特效Niagara-面片与序列同步-设计.md 第十节），
+    每个动作只有两样：这张 sheet，和把 Sheet/Columns/Rows/Frames 填进去的 MI。
+
+    帧号由驱动方按**角色序列时间**写 `User.FrameIndex`（= floor(AnimTime × 动作fps × 2)），
+    所以角色动画暂停/倒放/循环都不会错位 —— 而不是让 Niagara 自己按寿命跑。
+
+    没打 sheet（比如整层都是空帧）就整段跳过：那是正常情况，不是失败。
+    返回这一轮新建/复用的资产路径，交给清理用（不在名单里的会被当历史资产删掉）。
+    """
+    sheet_path = str(action.get('effectSheetImagePath') or '').strip()
+    sheet_name = str(action.get('effectSheetName') or '').strip()
+    material_name = str(action.get('effectMaterialName') or '').strip()
+    columns = int(action.get('effectColumns') or 0)
+    rows = int(action.get('effectRows') or 0)
+    frame_count = len(action.get('frames') or [])
+    fps = float(action.get('effectFps') or 0.0)
+    if not sheet_path or not sheet_name or not material_name:
+        return []
+    if columns <= 0 or rows <= 0 or frame_count <= 0:
+        return []
+
+    library = getattr(unreal, 'ZDBridgeLibrary', None)
+    if library is None:
+        raise RuntimeError('%s: ZDBridge 的 Niagara 助手不可用（插件没加载？）' % code)
+
+    created = []
+    sheet = _require(_import_texture(sheet_path, material_folder, sheet_name, code), code)
+    _save(sheet.get_path_name())
+    created.append(sheet.get_path_name())
+
+    # ── 共享三样（插件 Content，跟着插件走）：只确保在，不往动作目录里塞 ──────────
+    shared_folder = '/ZDBridge/FX'
+    # 用**完整对象路径**（`<包>.<资产>`）：包路径虽然引擎也能解析，但那是靠"取包里第一个对象"，
+    # 遇到包里有多个对象时结果就不确定了。这条也踩过（测试桩直接把包路径当成文件夹）。
+    plane_object_path = '%s/FXDefault.FXDefault' % shared_folder
+    mother_object_path = '%s/M_FXSheet.M_FXSheet' % shared_folder
+    template_object_path = '%s/NS_FXSheet.NS_FXSheet' % shared_folder
+    plane = unreal.load_asset(plane_object_path)
+    if plane is None:
+        _bridge_json_ok(
+            library.ensure_effect_plane_mesh('', shared_folder, 'FXDefault'), code, '导入特效面片')
+        plane = unreal.load_asset(plane_object_path)
+    if plane is None:
+        raise RuntimeError('%s: 共享面片读不到（%s/FXDefault）' % (code, shared_folder))
+
+    mother = unreal.load_asset(mother_object_path)
+    if mother is None:
+        _bridge_json_ok(
+            library.ensure_effect_sheet_material(shared_folder, 'M_FXSheet', True),
+            code,
+            '创建共享 SubUV 母材质')
+        mother = unreal.load_asset(mother_object_path)
+    if mother is None:
+        raise RuntimeError('%s: 共享母材质读不到（%s/M_FXSheet）' % (code, shared_folder))
+
+    template = unreal.load_asset(template_object_path)
+    if template is None:
+        _bridge_json_ok(
+            library.ensure_effect_niagara_template(shared_folder, 'NS_FXSheet', plane, mother, 10.0),
+            code,
+            '创建共享面片系统')
+
+    # ── 这个动作自己的那一样：材质实例 ────────────────────────────────────────
+    _bridge_json_ok(
+        library.create_effect_sheet_material_instance(
+            material_folder, material_name, sheet, columns, rows, frame_count),
+        code,
+        '创建特效材质实例')
+    instance = unreal.load_asset('%s/%s.%s' % (material_folder, material_name, material_name))
+    if instance is None:
+        raise RuntimeError('%s: 特效材质实例建完读不到（%s）' % (code, material_name))
+    created.append(instance.get_path_name())
+
+    # 占位符和实参必须一一对上：以前这里多塞了一个 code，`%d` 收到字符串直接抛 TypeError ——
+    # 表现是"材质实例建出来了、但整个动作被记成失败"，而且日志里只有一行 TypeError，很难看出是哪行。
+    unreal.log('SequenceSync: action=%s effectSheet=%s MI=%s grid=%dx%d frames=%d fps=%s'
+               % (code, sheet_name, material_name, columns, rows, frame_count, fps))
+    return created
+
+
 def _sync_effect_layer(action):
     """同步一个动作的特效层。
 
@@ -902,6 +1002,24 @@ def _sync_effect_layer(action):
     material_folder = str(action.get('targetMaterialFolder') or '').strip()
     if not material_folder:
         raise RuntimeError('%s: sync plan has no target material folder' % code)
+
+    # 「只出特效」（2026-09-23 用户拍板）：这一层只产出**网格 sheet + 材质实例**。
+    # 下面那段"图集贴图 / 切精灵 / 建 Flipbook"是 Paper2D 口径，已经不再走；
+    # 保留在文件里是为了万一要退回旧口径时能直接接回来。
+    #
+    # 注意返回协议要和旧口径一致（**dict**，带 actionCode/frameCount/deletedAssets…）：
+    # 上层是按这个形状汇总结果和日志的，返回 list 会让整条特效记录变成"没有动作"。
+    old_assets = _collect_action_assets(action)
+    created_paths = _sync_effect_niagara(action, code, material_folder)
+    skipped, deleted = _cleanup_old_assets(old_assets, created_paths, action)
+    return {
+        'actionCode': code,
+        'isEffectLayer': True,
+        'frameCount': len(action.get('frames') or []),
+        'deletedAssets': deleted,
+        'legacyAssetsNotDeleted': skipped,
+    }
+
     source_images = action.get('sourceImages') or []
     if not source_images:
         raise RuntimeError('%s: sync plan has no atlas information' % code)
@@ -971,9 +1089,12 @@ def _sync_effect_layer(action):
     unreal.log('SequenceSync: effectLayer=%s sprites=%d blankFrames=%d fps=%s'
                % (code, len(source_images), sum(1 for sprite in sprites if sprite is None),
                   action.get('fps')))
+    # Niagara 面片那一路：网格 sheet → SubUV 材质 → 面片系统。
+    # 它和上面的 Paper2D 产物并排存在（同一层的两种口径），路径要一起进保留名单。
+    niagara_paths = _sync_effect_niagara(action, code, material_folder)
     new_paths = sorted({texture.get_path_name() for texture in atlas_texture_by_name.values()}) + sorted(
         {sprite.get_path_name() for sprite in sprite_by_index.values()}
-    ) + [flipbook.get_path_name()]
+    ) + [flipbook.get_path_name()] + niagara_paths
     skipped, deleted = _cleanup_old_assets(old_assets, new_paths, action)
     return {
         'actionCode': code,

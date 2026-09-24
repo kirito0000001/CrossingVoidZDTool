@@ -72,15 +72,23 @@ namespace CrossingVoidZDTool
         {
             if (!launch.UsesRunningEditor)
             {
+                // 这条分支以前**完全静默**：编辑器明明开着，却因为"匹配不上"而直接起了一个离线实例 ——
+                // 耗时从"瞬间"变成 40 秒，离线（commandlet 上下文）实例还可能加载不到 Blueprint /
+                // MetaSound 这类资产，报出来的错看着像工程资产坏了（2026-09-24 实测踩过）。
+                // 留一行痕，下次一眼能分辨"慢 + 找不到资产"是这条路造成的。
+                _lastUnrealTaskRanOffline = true;
+                AppendLog(LogKind.Info, "没有匹配到可用的在线编辑器，本次直接走离线执行（较慢）。");
                 return await run(launch.StartInfo);
             }
 
+            _lastUnrealTaskRanOffline = false;
             try
             {
                 return await run(launch.StartInfo);
             }
             catch (Exception ex) when (UnrealPythonTaskExecutionService.IsRemoteUnavailable(ex))
             {
+                _lastUnrealTaskRanOffline = true;
                 AppendLog(LogKind.Warning,
                     "在线执行不可用，已自动退回离线执行（会慢十几秒）。" + FormatSyncLogValue(ex.Message));
                 ShowFloatingTip(
@@ -90,6 +98,14 @@ namespace CrossingVoidZDTool
                 return await run(offlineStartInfo);
             }
         }
+
+        /// <summary>
+        /// 上一次走 <see cref="RunUnrealTaskWithOfflineFallbackAsync{T}"/> 的任务是不是**离线**跑的。
+        ///
+        /// 用途只有一个：离线实例加载不到资产时，报出来的"未找到 X"是**扫描环境**的问题，
+        /// 不是工程资产的问题 —— 调用方据此决定"别把步骤踢回去、也别让人去改工程"。
+        /// </summary>
+        private bool _lastUnrealTaskRanOffline;
 
         private bool TryBeginUnrealWorkflowOperation()
         {

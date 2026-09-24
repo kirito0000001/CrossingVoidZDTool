@@ -85,7 +85,18 @@ namespace CrossingVoidZDTool
                 if (foundationError is not null)
                 {
                     sync.SetFoundationConfigurationError(foundationError);
-                    sync.ReturnToWorkflowStep(1);
+                    if (IsOfflineAssetLoadFailure(foundationError))
+                    {
+                        // 离线实例加载不到资产 —— 这是**扫描环境**的问题，不是工程资产的问题。
+                        // 以前这种假报也会把人踢回第 1 步，看着像"第 1 步的东西坏了"（2026-09-24 实测）。
+                        AppendLog(
+                            LogKind.Warning,
+                            "离线实例加载不到依赖资产，已留在第 4 步；建议重试，或关掉 Unreal 编辑器后重跑。");
+                    }
+                    else
+                    {
+                        sync.ReturnToWorkflowStep(1);
+                    }
                 }
                 if (!result.Succeeded)
                 {
@@ -121,6 +132,19 @@ namespace CrossingVoidZDTool
             }
         }
 
+        /// <summary>
+        /// 这条错误是不是"离线实例加载不到资产"造成的**假报**。
+        ///
+        /// 两个条件同时成立才算：
+        /// ① 上一次任务确实是离线跑的（<see cref="_lastUnrealTaskRanOffline"/>）；
+        /// ② 文案是脚本里 `_load_asset` 失败时写的那种"未找到…"。
+        /// 只认①会吞掉真缺资产的情况，只认②会把在线跑出来的真错误也当环境问题 —— 所以两条都要。
+        /// </summary>
+        private bool IsOfflineAssetLoadFailure(UnrealLightConfigurationResultItem item) =>
+            _lastUnrealTaskRanOffline &&
+            !string.IsNullOrEmpty(item.ErrorMessage) &&
+            item.ErrorMessage.Contains("未找到", StringComparison.Ordinal);
+
         private async Task ReloadUnrealLightConfigurationStepAsync(UnrealProjectSyncViewModel sync)
         {
             var character = sync.SelectedSource?.DraftCharacter;
@@ -155,7 +179,16 @@ namespace CrossingVoidZDTool
                 if (foundationError is not null)
                 {
                     sync.SetFoundationConfigurationError(foundationError);
-                    sync.ReturnToWorkflowStep(1);
+                    if (IsOfflineAssetLoadFailure(foundationError))
+                    {
+                        AppendLog(
+                            LogKind.Warning,
+                            "离线实例加载不到依赖资产，已留在第 4 步；建议重试，或关掉 Unreal 编辑器后重跑。");
+                    }
+                    else
+                    {
+                        sync.ReturnToWorkflowStep(1);
+                    }
                 }
                 var pending = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Pending);
                 var errors = result.Items.Count(item => item.Status == UnrealLightConfigurationStatus.Error);

@@ -55,6 +55,24 @@ internal sealed class UnrealBridgeSequenceSyncAction
     /// 空帧在 Flipbook 里保留一个"精灵为空"的关键帧，时间照占（和角色序列同一套处理）。
     /// </summary>
     public bool IsEffectLayer { get; set; }
+
+    // ── 特效层的 Niagara 面片（只对 IsEffectLayer 的那一项有意义）────────────────
+    // 面片 + 网格 sheet + 材质 + 系统的名字都由工具箱算好带过来：命名规则只有一处，
+    // Python 那边不重新拼一套（拼两套迟早对不上）。
+
+    /// <summary>Niagara 用的等分网格 sheet（和 Paper2D 那张紧凑图集分开，见 SequenceEffectSyncService）。</summary>
+    public string EffectSheetName { get; set; } = string.Empty;
+    public string EffectSheetImagePath { get; set; } = string.Empty;
+    /// <summary>网格列数 / 行数：空帧也占格，所以第 N 格 = 第 N 个输出帧。</summary>
+    public int EffectColumns { get; set; }
+    public int EffectRows { get; set; }
+    /// <summary>贴图烘在材质里的 SubUV 母材质名（一个动作一张）。</summary>
+    public string EffectMaterialName { get; set; } = string.Empty;
+    /// <summary>面片 + 网格序列帧的 Niagara 系统名。</summary>
+    public string EffectNiagaraSystemName { get; set; } = string.Empty;
+    /// <summary>特效自己的帧率（= 动作 fps × 倍数）。</summary>
+    public double EffectFps { get; set; }
+
     /// <summary>
     /// 用户在差异树里勾选的待删除资产对象路径。这是清理的权威依据：
     /// 按资产名 token 猜测既会漏删（历史命名不含动作 token），也会误删
@@ -205,11 +223,79 @@ internal sealed class UnrealBridgeSequencePublishService
     /// <summary>本次因为没有序列帧数据而被跳过的动作，供调用方提示用户。</summary>
     public IReadOnlyList<string> SkippedActionCodes { get; private set; } = [];
 
-    public UnrealBridgeSequenceSyncPlan BuildSequenceSyncPlan(
+    /// <summary>
+    /// **第七步「特效同步」**的计划：同一套动作解析，但只留特效那一项。
+    ///
+    /// 第五步从此回到纯角色序列（用户拍板："我最早说的是在第七步同步，不要给第五步压得太重"）；
+    /// 特效的产物也只剩网格 sheet + 材质实例两样（面片 / 母材质 / 粒子系统都在插件里共享）。
+    /// </summary>
+    /// <summary>
+    /// 第七步的**无导出计划**：不需要"勾选的变化"，凡是有特效层的动作都算一条。
+    ///
+    /// 特效该不该同步只看工作区里有没有特效帧 —— 所以第七步的检测**不用**先跑一遍
+    /// Unreal 全量导出（第五步那条会把整条序列的帧全打开，第七步不需要，用户明确要求省掉）。
+    /// </summary>
+    public UnrealBridgeSequenceSyncPlan BuildEffectSyncPlanForAll(
+        CharacterCard character,
+        string projectPath,
+        IReadOnlyDictionary<string, UnrealBridgeSequenceAtlasInput>? atlases = null)
+    {
+        ArgumentNullException.ThrowIfNull(character);
+        atlases ??= new Dictionary<string, UnrealBridgeSequenceAtlasInput>(StringComparer.OrdinalIgnoreCase);
+
+        var frameService = new SequenceFrameService();
+        var sections = frameService.LoadSections(character, new CharacterSkillsService().Load(character));
+        var plan = new UnrealBridgeSequenceSyncPlan
+        {
+            CharacterCode = character.Code,
+            UnrealProjectPath = Path.GetFullPath(projectPath)
+        };
+        foreach (var section in sections)
+        {
+            if (TryResolveActionCode(section.Action.Code) is not { } resolved)
+            {
+                continue;
+            }
+
+            AppendEffectAction(
+                plan,
+                character,
+                section,
+                resolved.Definition,
+                resolved.FormIndex,
+                frameService.GetActionFps(character, section.Action),
+                atlases);
+        }
+
+        return plan;
+    }
+
+    public UnrealBridgeSequenceSyncPlan BuildEffectSyncPlan(
         CharacterCard character,
         string projectPath,
         IReadOnlyList<UnrealBridgeChange> selectedSequenceChanges,
         IReadOnlyDictionary<string, UnrealBridgeSequenceAtlasInput>? atlases = null)
+    {
+        // 借第五步那套解析算出"哪些动作被勾选、形态几、帧率多少、图集在哪"，
+        // 再把非特效的项剔掉 —— 解析只有一处，两个入口各取所需。
+        var plan = BuildSequenceSyncPlan(
+            character, projectPath, selectedSequenceChanges, atlases, includeEffectLayers: true);
+        var effectActions = plan.Actions.Where(action => action.IsEffectLayer).ToList();
+        plan.Actions.Clear();
+        foreach (var action in effectActions)
+        {
+            plan.Actions.Add(action);
+        }
+
+        return plan;
+    }
+
+    public UnrealBridgeSequenceSyncPlan BuildSequenceSyncPlan(
+        CharacterCard character,
+        string projectPath,
+        IReadOnlyList<UnrealBridgeChange> selectedSequenceChanges,
+        IReadOnlyDictionary<string, UnrealBridgeSequenceAtlasInput>? atlases = null,
+        bool includeEffectLayers = false)
     {
         ArgumentNullException.ThrowIfNull(character);
         atlases ??= new Dictionary<string, UnrealBridgeSequenceAtlasInput>(StringComparer.OrdinalIgnoreCase);
@@ -362,22 +448,20 @@ internal sealed class UnrealBridgeSequencePublishService
                 .ToList();
             plan.Actions.Add(action);
 
-            // 特效层跟着它的动作走：动作被重建时，这一层的图集/精灵/Flipbook 一起重建。
-            // 为什么不做成差异树里的独立行：特效资产就住在动作的 Material 目录里，
-            // 布局（哪几张精灵）不影响角色序列那张 Flipbook 的对错，所以让它**随动作同步**最省事；
-            // "特效改了"靠动作的内容指纹体现（指纹里算了特效图的哈希）。
-            AppendEffectAction(
-                plan,
-                character,
-                section,
-                definition,
-                formIndex,
-                fps,
-                atlases.TryGetValue(
-                    AtlasKey(SequenceEffectSyncService.BuildLayerCode(variantCode), formIndex),
-                    out var packedEffectAtlas)
-                    ? packedEffectAtlas
-                    : null);
+            // 特效是**第七步**的事（用户拍板："我最早说的是在第七步同步，不要给第五步压得太重"）。
+            // 这个开关让两个入口共用同一份"哪些动作、形态几、帧率多少"的解析，不写两套；
+            // 第五步最终会传 false（只出角色序列），第七步的入口见 BuildEffectSyncPlan。
+            if (includeEffectLayers)
+            {
+                AppendEffectAction(
+                    plan,
+                    character,
+                    section,
+                    definition,
+                    formIndex,
+                    fps,
+                    atlases);
+            }
         }
 
         if (plan.Actions.Count == 0 && plan.DetachSequenceObjectPaths.Count == 0)
@@ -393,7 +477,11 @@ internal sealed class UnrealBridgeSequencePublishService
 
     /// <summary>
     /// 把动作的特效层追加成计划里的一条（<see cref="UnrealBridgeSequenceSyncAction.IsEffectLayer"/>）。
-    /// 没有特效图、或者没打图集，就什么都不加。
+    /// 没有特效图、或者没打出网格 sheet，就什么都不加。
+    ///
+    /// "只出特效"（2026-09-23 用户拍板）：这一项**不再**带图集/精灵/Flipbook ——
+    /// 那些是 Paper2D 口径，特效只用"网格 sheet + 材质实例"两样；面片、母材质、粒子系统都是
+    /// 跟着插件走的共享资产（`/ZDBridge/FX/…`）。
     /// </summary>
     private static void AppendEffectAction(
         UnrealBridgeSequenceSyncPlan plan,
@@ -402,12 +490,23 @@ internal sealed class UnrealBridgeSequencePublishService
         SequenceActionDefinition definition,
         int formIndex,
         int actionFps,
-        UnrealBridgeSequenceAtlasInput? effectAtlas)
+        IReadOnlyDictionary<string, UnrealBridgeSequenceAtlasInput> atlases)
     {
         var layer = new SequenceEffectService().Load(character, section.Action);
         var layout = SequenceEffectSyncService.TryBuildLayout(
             character, section, definition, formIndex, layer, actionFps);
-        if (layout is null || effectAtlas is null)
+        if (layout is null)
+        {
+            return;
+        }
+
+        // 网格 sheet 是这一轮单独打的那张；没打出来就只留名字（Python 那边会跳过，不报错）。
+        var sheetImagePath = atlases.TryGetValue(
+            AtlasKey(layout.SheetName, formIndex), out var packedSheet)
+            ? packedSheet.ImagePath
+            : string.Empty;
+        // 没打出网格 sheet 就整条不加：宁可不做，也不拿半份计划去同步。
+        if (string.IsNullOrEmpty(sheetImagePath))
         {
             return;
         }
@@ -415,6 +514,12 @@ internal sealed class UnrealBridgeSequencePublishService
         var action = new UnrealBridgeSequenceSyncAction
         {
             IsEffectLayer = true,
+            EffectSheetName = layout.SheetName,
+            EffectSheetImagePath = sheetImagePath,
+            EffectColumns = layout.Columns,
+            EffectRows = layout.Rows,
+            EffectMaterialName = layout.MaterialName,
+            EffectFps = layout.OutputFps,
             ActionCode = layout.LayerCode,
             BaseActionCode = definition.Code,
             FormIndex = formIndex,
@@ -428,27 +533,13 @@ internal sealed class UnrealBridgeSequencePublishService
             TargetSequencePath = string.Empty,
             TargetMaterialFolder = layout.MaterialFolderPackagePath,
             SequenceAssetName = string.Empty,
-            FlipbookAssetName = layout.FlipbookAssetName,
+            // Paper2D 那三样（序列/Flipbook/图集）不产出，所以名字一律留空。
+            FlipbookAssetName = string.Empty,
             LegacyNameTokens = [],
-            // 特效资产的命名是确定的（这一版才引入，没有历史命名），所以直接给显式待删列表：
-            // Python 那边只删这一层自己的资产，绝不按名字猜（猜错了会删掉角色序列的精灵）。
+            // 这一层自己的产物只有两样（sheet + MI）；面片/母材质/系统在插件里，不归它清。
             StaleAssetObjectPaths = layout.CanonicalAssetObjectPaths.ToList(),
-            HasStaleAssetSelection = true,
-            Atlas = new UnrealBridgeSequenceSyncAtlas
-            {
-                AtlasName = effectAtlas.AtlasName,
-                ImagePath = effectAtlas.ImagePath,
-                Width = effectAtlas.Width,
-                Height = effectAtlas.Height
-            },
-            SourceImages = layout.FilledFrames
-                .Select((frame, position) => BuildEffectSourceImage(
-                    layout, effectAtlas, frame, position + 1))
-                .ToList()
+            HasStaleAssetSelection = true
         };
-        var sourceIndexByOrdinal = layout.FilledFrames
-            .Select((frame, position) => (frame.OutputOrdinal, Index: position + 1))
-            .ToDictionary(pair => pair.OutputOrdinal, pair => pair.Index);
         action.Frames = layout.Frames
             .Select(frame => new UnrealBridgeSequenceSyncFrame
             {
@@ -458,9 +549,7 @@ internal sealed class UnrealBridgeSequencePublishService
                 // 特效每一输出帧就是一格。
                 DurationFrames = 1,
                 IsBlank = frame.IsEmpty,
-                VoiceFileName = string.Empty,
-                SourceImageIndex = sourceIndexByOrdinal.GetValueOrDefault(frame.OutputOrdinal),
-                SpriteAssetName = frame.SpriteAssetName
+                VoiceFileName = string.Empty
             })
             .ToList();
         plan.Actions.Add(action);

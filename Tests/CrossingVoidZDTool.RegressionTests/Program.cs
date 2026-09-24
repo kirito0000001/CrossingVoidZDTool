@@ -109,7 +109,10 @@ var tests = new (string Name, Action Run)[]
     ("特效层按动作帧率的2倍展开并保留空帧", SequenceEffectSyncLayoutDoublesFpsAndKeepsBlankFrames),
     ("同步计划带上特效层并携带图集矩形", SequencePlanCarriesEffectLayerAction),
     ("特效帧算进动作内容指纹且失败时不记", EffectFramesJoinActionFingerprint),
-    ("MANUAL 底板 PSD 探针", ManualBasePlatePsdProbe),
+    ("底板PSD的图层能原样读回且顺序就是帧序", BasePlatePsdLayersReadBackInOrder),
+    ("特效帧从底板PSD读回时按图层顺序落位", EffectFramesImportFromPsdKeepsLayerOrder),
+    ("PS/画世界重存过的底板PSD照样能读回", PsdReaderToleratesResavedFiles),
+    ("预览叠特效时时间轴按特效帧展开成单格", EffectTimelineExpandsIntoPerEffectFrames),
     ("工具集清单里有创建与拆分图集", AtlasToolCatalogListsBuiltInTools),
     ("拆分图集能把裁剪过的格子贴回原画布", AtlasExtractRestoresTrimmedSprites),
     ("创建图集会生成清单与命令行参数", AtlasFolderPackBuildsManifestAndArguments),
@@ -5331,6 +5334,396 @@ static void SequenceEffectImportMapsFramesByNumber()
 }
 
 /// <summary>
+/// 底板 PSD「读回来那一半」：写出去的层要能原样读回 —— 层数、顺序、名字、矩形、像素。
+///
+/// 这条是给「导入特效帧 → 从底板 PSD 读回」兜底的。顺序错了的表现是**特效整体错位一帧**，
+/// 画的人不一定看得出来，所以钉死。同类风险还有**通道按位置读**：我们写的是 R,G,B,A，
+/// 而 PS 重新存过之后是 A,R,G,B，按位置读会把 alpha 当成红（一声不响地整层变色）。
+/// </summary>
+static void BasePlatePsdLayersReadBackInOrder()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        const int canvas = 24;
+        var first = Path.Combine(root, "0001.png");
+        var second = Path.Combine(root, "0002.png");
+        WriteSolidImage(first, Color.Red, canvas, canvas);
+        WriteSolidImage(second, Color.Blue, canvas, canvas);
+        var psd = Path.Combine(root, "plate.psd");
+        PsdWriter.Write(psd, canvas, canvas, [
+            new PsdLayerSource("0001", first),
+            new PsdLayerSource("0002", second)]);
+
+        var document = PsdReader.Read(psd);
+        AssertEqual(canvas, document.Width);
+        AssertEqual(canvas, document.Height);
+        AssertEqual(2, document.Layers.Count);
+        // 读回来的顺序 = 写出去的顺序 = 帧顺序（第 1 帧在最下面）。
+        AssertEqual("0001", document.Layers[0].Name);
+        AssertEqual("0002", document.Layers[1].Name);
+        AssertEqual(0, document.Layers[0].Left);
+        AssertEqual(0, document.Layers[0].Top);
+        AssertEqual(canvas, document.Layers[0].Width);
+        AssertEqual(canvas, document.Layers[0].Height);
+        // 通道按 ID 取：红 = R255 G0 B0 A255，蓝 = R0 G0 B255 A255。
+        AssertEqual((byte)255, document.Layers[0].Rgba[0]);
+        AssertEqual((byte)0, document.Layers[0].Rgba[1]);
+        AssertEqual((byte)0, document.Layers[0].Rgba[2]);
+        AssertEqual((byte)255, document.Layers[0].Rgba[3]);
+        AssertEqual((byte)0, document.Layers[1].Rgba[0]);
+        AssertEqual((byte)0, document.Layers[1].Rgba[1]);
+        AssertEqual((byte)255, document.Layers[1].Rgba[2]);
+        AssertEqual((byte)255, document.Layers[1].Rgba[3]);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>
+/// 「从底板 PSD 读回特效帧」：**图层顺序就是帧顺序**（图层名是画的时候随手起的，
+/// 靠名字认帧认不出来）；整张透明的层算空帧；图层数和动作帧数对不上就**先停下报数**，
+/// 因为多一层少一层都会让整条特效时序错位，而那种错看起来很像"本来就该这样"。
+/// </summary>
+static void PsdReaderToleratesResavedFiles()
+{
+    // 底板 PSD 一定会经过 PS / 画世界转手一次再回来，而它们会动三处结构：
+    //   ① 把「图层信息」段补齐到 4 字节（实测多 3 个 0）—— 收尾自检必须认这点填充，
+    //      否则每次读都报"图层结构没读齐（差 3 字节）"；
+    //   ② 自加一层底部「背景」—— 它不算一帧；
+    //   ③ 用分组壳层（`lsct`）包起来 —— 那种层没有像素，也不能算一帧。
+    var root = CreateTemporaryTestFolder();
+    const int canvas = 24;
+    try
+    {
+        var red = Path.Combine(root, "red.png");
+        var blue = Path.Combine(root, "blue.png");
+        var white = Path.Combine(root, "white.png");
+        WriteSolidImage(red, Color.Red, canvas, canvas);
+        WriteSolidImage(blue, Color.Blue, canvas, canvas);
+        WriteSolidImage(white, Color.White, canvas, canvas);
+
+        // ① 尾部补 3 个 0 的「图层信息」段照样读得出来。
+        var padded = Path.Combine(root, "padded.psd");
+        PsdWriter.Write(padded, canvas, canvas, [
+            new PsdLayerSource("0001", red),
+            new PsdLayerSource("0002", blue)]);
+        AppendToLayerInfoSection(padded, new byte[3]);
+        var paddedDocument = PsdReader.Read(padded);
+        AssertEqual(2, paddedDocument.Layers.Count);
+        AssertEqual("0001", paddedDocument.Layers[0].Name);
+        AssertEqual((byte)255, paddedDocument.Layers[0].Rgba[0]);
+
+        // ② 底部多一层「背景」：只有"去掉它层数就正好"时才丢，丢完两帧还在。
+        var staged = new SequenceEffectPsdImportService().StageFrames(
+            WritePlate("with-background.psd", [
+                new PsdLayerSource("背景", white),
+                new PsdLayerSource("0001", red),
+                new PsdLayerSource("0002", blue)]),
+            expectedFrameCount: 2,
+            expectedCanvasWidth: canvas,
+            expectedCanvasHeight: canvas,
+            stagingFolder: Path.Combine(root, "staging"));
+        AssertEqual(2, staged.Count);
+        using (var first = new Bitmap(staged[0]))
+        {
+            AssertEqual(Color.Red.ToArgb(), first.GetPixel(1, 1).ToArgb());
+        }
+
+        // ③ 分组壳层（`lsct`）不算帧：给第 1 层挂上一个，两帧仍然对得上。
+        var withGroup = WritePlate("with-group.psd", [
+            new PsdLayerSource("0001", red),
+            new PsdLayerSource("0002", blue)]);
+        AppendLayerBlock(withGroup, layerIndex: 0, "lsct", [0, 0, 0, 3]);
+        var grouped = new SequenceEffectPsdImportService().StageFrames(
+            withGroup,
+            expectedFrameCount: 2,
+            expectedCanvasWidth: canvas,
+            expectedCanvasHeight: canvas,
+            stagingFolder: Path.Combine(root, "staging2"));
+        AssertEqual(2, grouped.Count);
+
+        // 但"多出来的不是背景层"仍然要拦（第 1 帧的层是红的，不是背景）。
+        var refused = false;
+        try
+        {
+            _ = new SequenceEffectPsdImportService().StageFrames(
+                WritePlate("too-many.psd", [
+                    new PsdLayerSource("0001", red),
+                    new PsdLayerSource("0002", blue),
+                    new PsdLayerSource("0003", white)]),
+                expectedFrameCount: 2,
+                expectedCanvasWidth: canvas,
+                expectedCanvasHeight: canvas,
+                stagingFolder: Path.Combine(root, "staging3"));
+        }
+        catch (InvalidOperationException)
+        {
+            refused = true;
+        }
+
+        AssertEqual(true, refused);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+
+    string WritePlate(string fileName, IReadOnlyList<PsdLayerSource> layers)
+    {
+        var path = Path.Combine(root, fileName);
+        PsdWriter.Write(path, canvas, canvas, layers);
+        return path;
+    }
+}
+
+/// <summary>
+/// 往「图层信息」段尾部塞几个字节（模拟 Photoshop 的 4 字节补齐），并同步改两处长度。
+/// 纯字节手术 —— 只有这样才能造出"PS 存过的样子"来试读取器。
+/// </summary>
+static void EffectTimelineExpandsIntoPerEffectFrames()
+{
+    // 「预览叠特效」开着时，时间轴要按**特效帧**展开：每个动作帧摊成"格数 × 倍数"格，
+    // 每格固定 1 格。用户给的原话：原本的 A（1 格）、B（2 格）→ A A B B B B。
+    // 关掉就回到"一格一个动作帧"。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var action = SequenceFrameService.BuildActions(new CharacterSkillsData())
+            .First(item => item.Code == "Click");
+        var framesFolder = SequenceActionFolderLayout.GetFramesFolderPath(character, action);
+        Directory.CreateDirectory(framesFolder);
+        var firstPath = Path.Combine(framesFolder, "1 a.png");
+        var secondPath = Path.Combine(framesFolder, "2 b.png");
+        WriteSolidImage(firstPath, Color.Red, 24, 24);
+        WriteSolidImage(secondPath, Color.Blue, 24, 24);
+        var manifest = SequenceManifestStore.Create(action);
+        manifest.Frames.Add(new SequenceFrameManifestEntry
+        {
+            RelativePath = SequenceActionFolderLayout.NormalizeRelativePath(
+                Path.GetRelativePath(SequenceActionFolderLayout.GetActionFolderPath(character, action), firstPath)),
+            DurationFrames = 1
+        });
+        manifest.Frames.Add(new SequenceFrameManifestEntry
+        {
+            RelativePath = SequenceActionFolderLayout.NormalizeRelativePath(
+                Path.GetRelativePath(SequenceActionFolderLayout.GetActionFolderPath(character, action), secondPath)),
+            DurationFrames = 2
+        });
+        SequenceManifestStore.Save(character, action, manifest);
+
+        var viewModel = new SequenceFramesViewModel(new SequenceFrameService(), new CharacterSkillsService());
+        viewModel.LoadAsync(character).GetAwaiter().GetResult();
+        var section = viewModel.BaseSectionGroups.SelectMany(group => group.Sections)
+            .Single(item => item.Action.Code == "Click");
+        viewModel.SelectSectionForManagement(section);
+        AssertEqual(2, viewModel.SelectedSectionFrames.Count);
+        AssertEqual(3, viewModel.SelectedSectionFrames.Sum(frame => frame.DurationFrames));
+
+        // 关掉：一格一个动作帧（原样）。
+        viewModel.ShowEffectLayer = false;
+        AssertSequence(["1", "2"], viewModel.TimelineFrames.Select(frame => frame.Index.ToString()).ToArray());
+        AssertEqual(true, viewModel.CanReorderTimeline);
+
+        // 开着：A（1 格）→ 两格，B（2 格）→ 四格；每格都是 1 格，且还认得出源自哪一帧。
+        viewModel.ShowEffectLayer = true;
+        AssertSequence(
+            ["1", "1", "2", "2", "2", "2"],
+            viewModel.TimelineFrames.Select(frame => frame.Index.ToString()).ToArray());
+        AssertEqual(
+            true,
+            viewModel.TimelineFrames.All(frame => frame.DurationFrames == 1));
+        AssertSequence(
+            ["0", "1", "0", "1", "2", "3"],
+            viewModel.TimelineFrames.Select(frame => frame.EffectSubIndex.ToString()).ToArray());
+        // 展开格只拿来看：编辑动作要回到真实帧，所以拖动排序必须被禁掉。
+        AssertEqual(false, viewModel.CanReorderTimeline);
+        AssertEqual(
+            true,
+            viewModel.TimelineFrames.All(frame =>
+                ReferenceEquals(frame.SourceFrame, viewModel.SelectedSectionFrames[frame.Index - 1])));
+
+        // 特效层还没导入时照样展开（那些格显示成空帧），能一眼看出"这个动作该画 6 张"。
+        AssertEqual(
+            true,
+            viewModel.TimelineFrames.All(frame => frame.IsBlank && frame.IsEffectSlot));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>
+/// 往「图层信息」段尾部塞几个字节（模拟 Photoshop 的 4 字节补齐），并同步改两处长度。
+/// 纯字节手术 —— 只有这样才能造出"PS 存过的样子"来试读取器。
+/// </summary>
+static void AppendToLayerInfoSection(string path, byte[] extra)
+{
+    var bytes = File.ReadAllBytes(path);
+    var cursor = 26;
+    cursor += 4 + ReadBigEndian(bytes, cursor);          // 颜色模式数据
+    cursor += 4 + ReadBigEndian(bytes, cursor);          // 图像资源
+    var layerAndMaskAt = cursor;
+    var layerInfoLengthAt = cursor + 4;
+    var layerInfoLength = ReadBigEndian(bytes, layerInfoLengthAt);
+    var layerInfoEnd = layerInfoLengthAt + 4 + layerInfoLength;
+
+    var updated = new List<byte>(bytes);
+    updated.InsertRange(layerInfoEnd, extra);
+    var result = updated.ToArray();
+    WriteBigEndian(result, layerInfoLengthAt, layerInfoLength + extra.Length);
+    WriteBigEndian(result, layerAndMaskAt, ReadBigEndian(bytes, layerAndMaskAt) + extra.Length);
+    File.WriteAllBytes(path, result);
+}
+
+/// <summary>给第 <paramref name="layerIndex"/> 层的附加块里加一块（比如 <c>lsct</c>），同步三处长度。</summary>
+static void AppendLayerBlock(string path, int layerIndex, string key, byte[] payload)
+{
+    var bytes = File.ReadAllBytes(path);
+    var cursor = 26;
+    cursor += 4 + ReadBigEndian(bytes, cursor);
+    cursor += 4 + ReadBigEndian(bytes, cursor);
+    var layerAndMaskAt = cursor;
+    var layerInfoLengthAt = cursor + 4;
+    var layerInfoLength = ReadBigEndian(bytes, layerInfoLengthAt);
+    cursor += 8;
+    var recordCount = Math.Abs((short)ReadBigEndian16(bytes, cursor));
+    cursor += 2;
+    var recordEnd = 0;
+    var extraLengthAt = 0;
+    for (var index = 0; index < recordCount; index++)
+    {
+        cursor += 16;
+        var channelCount = ReadBigEndian16(bytes, cursor);
+        cursor += 2 + channelCount * 6 + 12;
+        var extraLength = ReadBigEndian(bytes, cursor);
+        cursor += 4;
+        if (index == layerIndex)
+        {
+            extraLengthAt = cursor - 4;
+            recordEnd = cursor + extraLength;
+        }
+
+        cursor += extraLength;
+    }
+
+    AssertEqual(true, extraLengthAt > 0);
+    var block = new List<byte>();
+    block.AddRange("8BIM"u8.ToArray());
+    block.AddRange(Encoding.ASCII.GetBytes(key));
+    block.AddRange(BitConverter.GetBytes(payload.Length).Reverse());
+    block.AddRange(payload);
+    if (payload.Length % 2 == 1)
+    {
+        block.Add(0);
+    }
+
+    var updated = new List<byte>(bytes);
+    updated.InsertRange(recordEnd, block);
+    var result = updated.ToArray();
+    WriteBigEndian(result, extraLengthAt, ReadBigEndian(bytes, extraLengthAt) + block.Count);
+    WriteBigEndian(result, layerInfoLengthAt, layerInfoLength + block.Count);
+    WriteBigEndian(result, layerAndMaskAt, ReadBigEndian(bytes, layerAndMaskAt) + block.Count);
+    File.WriteAllBytes(path, result);
+}
+
+static int ReadBigEndian(byte[] bytes, int offset) =>
+    (bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3];
+
+static int ReadBigEndian16(byte[] bytes, int offset) => (bytes[offset] << 8) | bytes[offset + 1];
+
+static void WriteBigEndian(byte[] bytes, int offset, int value)
+{
+    bytes[offset] = (byte)(value >> 24);
+    bytes[offset + 1] = (byte)(value >> 16);
+    bytes[offset + 2] = (byte)(value >> 8);
+    bytes[offset + 3] = (byte)value;
+}
+
+/// <summary>
+/// 「从底板 PSD 读回特效帧」：**图层顺序就是帧顺序**（图层名是画的时候随手起的，
+/// 靠名字认帧认不出来）；整张透明的层算空帧；图层数和动作帧数对不上就**先停下报数**，
+/// 因为多一层少一层都会让整条特效时序错位，而那种错看起来很像"本来就该这样"。
+/// </summary>
+static void EffectFramesImportFromPsdKeepsLayerOrder()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var action = SequenceFrameService.BuildActions(new CharacterSkillsData()).First();
+        const int canvas = 24;
+
+        // 三帧：1 有内容、2 整张透明（那几页没画）、3 有内容。
+        var one = Path.Combine(root, "one.png");
+        var two = Path.Combine(root, "two.png");
+        var three = Path.Combine(root, "three.png");
+        WriteSolidImage(one, Color.Red, canvas, canvas);
+        WriteSolidImage(two, Color.Transparent, canvas, canvas);
+        WriteSolidImage(three, Color.Blue, canvas, canvas);
+        var psd = Path.Combine(root, "plate.psd");
+        PsdWriter.Write(psd, canvas, canvas, [
+            new PsdLayerSource("mikoto_dz1_lightning 副本 1", one),
+            new PsdLayerSource("mikoto_dz1_lightning 副本 2", two),
+            new PsdLayerSource("mikoto_dz1_lightning 副本 3", three)]);
+
+        var importer = new SequenceEffectPsdImportService();
+        var staged = importer.StageFrames(
+            psd,
+            expectedFrameCount: 3,
+            expectedCanvasWidth: canvas,
+            expectedCanvasHeight: canvas,
+            stagingFolder: Path.Combine(root, "staging"));
+        AssertEqual(3, staged.Count);
+
+        var service = new SequenceEffectService();
+        var result = service.ImportInOrder(character, action, staged, expectedFrameCount: 3);
+        AssertEqual(2, result.ImportedFrames);
+        AssertEqual(1, result.EmptyFrames);
+
+        var layer = service.Load(character, action, expectedFrameCount: 3);
+        AssertEqual(3, layer.FrameCount);
+        AssertEqual(1, layer.EmptyFrameCount);
+        AssertEqual(1, layer.Frames[0].Ordinal);
+        AssertEqual(3, layer.Frames[1].Ordinal);
+        AssertEqual("Click_Effect_0001.png", layer.Frames[0].FileName);
+        AssertEqual("Click_Effect_0003.png", layer.Frames[1].FileName);
+
+        // 层数对不上（2 层 vs 期望 3）：先停下，一个文件都不落。
+        var mismatch = Path.Combine(root, "mismatch.psd");
+        PsdWriter.Write(mismatch, canvas, canvas, [
+            new PsdLayerSource("a", one),
+            new PsdLayerSource("b", three)]);
+        var threw = false;
+        try
+        {
+            importer.StageFrames(
+                mismatch,
+                expectedFrameCount: 3,
+                expectedCanvasWidth: canvas,
+                expectedCanvasHeight: canvas,
+                stagingFolder: Path.Combine(root, "staging2"));
+        }
+        catch (InvalidOperationException)
+        {
+            threw = true;
+        }
+
+        AssertEqual(true, threw);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>
 /// 特效层和动作帧各住各的：清空特效**不能**碰 ZDMaterial 里的素材帧。
 /// 目录形状也要钉住 —— 它在 <c>ZDMaterial/&lt;动作&gt;/Effects/&lt;层名&gt;/Frames/</c>。
 /// </summary>
@@ -5456,6 +5849,8 @@ static void SequenceEffectSyncLayoutDoublesFpsAndKeepsBlankFrames()
         AssertEqual(true, layout is not null);
         AssertEqual("Click_Effect", layout!.LayerCode);
         AssertEqual("Misaka_Click_Effect", layout.AtlasName);
+        // 布局里还留着 Paper2D 那套名字（留档、不接线），但**计划**不再用它 ——
+        // 「只出特效」之后这一层只产出网格 sheet + 材质实例（见下面的规范产物断言）。
         AssertEqual("Click_Effect_Flipbook", layout.FlipbookAssetName);
         AssertEqual("/Game/GameActor2D/Misaka/Material/Click", layout.MaterialFolderPackagePath);
         // 帧率是**动作的 2 倍**，不是动作自己的帧率。
@@ -5469,22 +5864,29 @@ static void SequenceEffectSyncLayoutDoublesFpsAndKeepsBlankFrames()
             ["Click_Effect_Frame00_Sprite", "Click_Effect_Frame04_Sprite"],
             layout.FilledFrames.Select(frame => frame.SpriteAssetName).ToArray());
         // 这一层的规范资产：Flipbook + 图集贴图 + 两只精灵。清理只认这份名单。
-        AssertEqual(4, layout.CanonicalAssetObjectPaths.Count);
+        // 特效层的规范产物现在有两套口径：Paper2D（图集/精灵/Flipbook）+ Niagara（网格 sheet/
+        // SubUV 材质/面片系统/它带出来的 emitter）。少一个都会被下一轮同步当历史资产删掉。
+        AssertEqual(2, layout.CanonicalAssetObjectPaths.Count);
+        AssertEqual(
+            true,
+            layout.CanonicalAssetObjectPaths.Contains(
+                "/Game/GameActor2D/Misaka/Material/Click/Misaka_Click_Effect_Sheet.Misaka_Click_Effect_Sheet"));
+        AssertEqual(
+            true,
+            layout.CanonicalAssetObjectPaths.Contains(
+                // 每动作只有这一个材质资产是"自己的"：材质实例（母材质和粒子系统在 /ZDBridge/FX，跟着插件走）。
+                "/Game/GameActor2D/Misaka/Material/Click/MI_Click_Effect.MI_Click_Effect"));
+        // 不再有每动作的 Niagara 系统 / emitter：系统与面片、母材质都在插件里共享
+        // （/ZDBridge/FX），动作目录里只有 sheet + MI 两样。
         // 必须是**对象路径**（带 `.资产名`、大小写照写），不能是归一化过的小写包路径：
         // 那份名单原样交给 Python 当清理范围，而清理是拿"刚重建出来的资产路径"去比的，
         // 大小写对不上就会把自己刚建的那批删掉。
         AssertEqual(
             true,
             layout.CanonicalAssetObjectPaths.Contains(
-                "/Game/GameActor2D/Misaka/Material/Click/Click_Effect_Flipbook.Click_Effect_Flipbook"));
-        AssertEqual(
-            true,
-            layout.CanonicalAssetObjectPaths.Contains(
-                "/Game/GameActor2D/Misaka/Material/Click/Misaka_Click_Effect.Misaka_Click_Effect"));
-        AssertEqual(
-            true,
-            layout.CanonicalAssetObjectPaths.Contains(
-                "/Game/GameActor2D/Misaka/Material/Click/Click_Effect_Frame00_Sprite.Click_Effect_Frame00_Sprite"));
+                "/Game/GameActor2D/Misaka/Material/Click/MI_Click_Effect.MI_Click_Effect"));
+        // Paper2D 那张紧凑图集（Misaka_Click_Effect）也**不再产出** —— 特效只出网格 sheet。
+        // 精灵同样不再产出（只出特效：网格 sheet + 材质实例）。
 
         // 还没画特效：这一层不参与同步（不该在工程里留一个空 Flipbook）。
         AssertEqual(true, SequenceEffectSyncService.TryBuildLayout(
@@ -5533,15 +5935,15 @@ static void SequencePlanCarriesEffectLayerAction()
         _ = ImportEffectFrames(character, action, Path.Combine(root, "drawn"), 4, 1, 3);
 
         var change = CreateSequenceDeleteChange("Click", "/Game/GameActor2D/Misaka/Material/Click/Old.Old");
-        var plan = new UnrealBridgeSequencePublishService().BuildSequenceSyncPlan(
+        var plan = new UnrealBridgeSequencePublishService().BuildEffectSyncPlan(
             character,
             @"C:\Unreal\CrossingVoid.uproject",
             [change],
-            WithEffectAtlas(BuildTestAtlas("Click", 2), "Click_Effect", 1, 2));
+            WithEffectAtlas(BuildTestAtlas("Click", 2), "Misaka_Click_Effect_Sheet", 1, 2));
 
-        AssertSequence(["Click", "Click_Effect"], plan.Actions.Select(item => item.ActionCode).ToArray());
-        AssertEqual(false, plan.Actions[0].IsEffectLayer);
-        var effect = plan.Actions[1];
+        // 第七步的计划里**只有特效那一项**（第五步不再掺特效）。
+        AssertSequence(["Click_Effect"], plan.Actions.Select(item => item.ActionCode).ToArray());
+        var effect = plan.Actions[0];
         AssertEqual(true, effect.IsEffectLayer);
         AssertEqual("Click", effect.BaseActionCode);
         // 序列 / AnimMaps / 蓝图三样都不属于特效层。
@@ -5550,34 +5952,33 @@ static void SequencePlanCarriesEffectLayerAction()
         AssertEqual("", effect.BlueprintProperty);
         AssertEqual("", effect.SequenceAssetName);
         AssertEqual("/Game/GameActor2D/Misaka/Material/Click", effect.TargetMaterialFolder);
-        AssertEqual("Click_Effect_Flipbook", effect.FlipbookAssetName);
+        AssertEqual("", effect.FlipbookAssetName);
         // 默认 12fps 的动作 → 特效层 24fps。
         AssertEqual(24, effect.Fps);
         AssertEqual(4, effect.Frames.Count);
         AssertSequence(
             [true, false, true, false],
             effect.Frames.Select(frame => !frame.IsBlank).ToArray());
-        // 空白帧指向图集第 0 格（它在图集里没有图）。
-        AssertSequence([1, 0, 2, 0], effect.Frames.Select(frame => frame.SourceImageIndex).ToArray());
-        AssertEqual(2, effect.SourceImages.Count);
-        AssertEqual(true, effect.SourceImages.All(image => image.CreateSprite));
-        AssertEqual(true, effect.SourceImages.All(image => image.AtlasName == "Misaka_Click_Effect"));
-        AssertEqual(true, effect.SourceImages.All(
-            image => image.AtlasMaterialFolder == "/Game/GameActor2D/Misaka/Material/Click"));
-        AssertEqual(true, effect.SourceImages.All(image => image.Width > 0 && image.Height > 0));
-        AssertEqual(true, effect.SourceImages.All(image => image.SourceImageWidth > 0));
-        AssertSequence(
-            ["Click_Effect_Frame00_Sprite", "Click_Effect_Frame02_Sprite"],
-            effect.SourceImages.Select(image => image.SpriteAssetName).ToArray());
-        // 待删名单就是这一层自己的规范资产（Flipbook + 图集 + 两只精灵），
-        // 不会顺手把角色序列的东西扫进去。
-        AssertEqual(4, effect.StaleAssetObjectPaths.Count);
+        // 「只出特效」：不再有图集/精灵，改成"网格 sheet + 材质实例"两样。
+        AssertEqual("Misaka_Click_Effect_Sheet", effect.EffectSheetName);
+        AssertEqual(true, effect.EffectSheetImagePath.Length > 0);
+        AssertEqual(2, effect.EffectColumns);   // 4 帧 → 列 = ⌈√4⌉ = 2
+        AssertEqual(2, effect.EffectRows);      // 行 = ⌈4/2⌉ = 2
+        AssertEqual("MI_Click_Effect", effect.EffectMaterialName);
+        AssertEqual(24d, effect.EffectFps);
+        // 待删名单就是这一层自己的两样：不会把角色序列，也不会把插件里的共享资产
+        // （面片 / 母材质 / 粒子系统，在 /ZDBridge/FX）列进来。
+        AssertEqual(2, effect.StaleAssetObjectPaths.Count);
+        AssertEqual(true, effect.StaleAssetObjectPaths.Contains(
+            "/Game/GameActor2D/Misaka/Material/Click/Misaka_Click_Effect_Sheet.Misaka_Click_Effect_Sheet"));
+        AssertEqual(true, effect.StaleAssetObjectPaths.Contains(
+            "/Game/GameActor2D/Misaka/Material/Click/MI_Click_Effect.MI_Click_Effect"));
         AssertEqual(true, effect.HasStaleAssetSelection);
 
         // 没有打特效图集时**不加**这一条：宁可不做，也不拿半份计划去同步。
-        var withoutEffectAtlas = new UnrealBridgeSequencePublishService().BuildSequenceSyncPlan(
+        var withoutEffectAtlas = new UnrealBridgeSequencePublishService().BuildEffectSyncPlan(
             character, @"C:\Unreal\CrossingVoid.uproject", [change], BuildTestAtlas("Click", 2));
-        AssertEqual(1, withoutEffectAtlas.Actions.Count);
+        AssertEqual(0, withoutEffectAtlas.Actions.Count);
     }
     finally
     {
@@ -5605,11 +6006,14 @@ static void EffectFramesJoinActionFingerprint()
         _ = ImportEffectFrames(character, action, Path.Combine(root, "drawn"), 4, 1, 3);
 
         var change = CreateSequenceDeleteChange("Click", "/Game/GameActor2D/Misaka/Material/Click/Old.Old");
-        var plan = new UnrealBridgeSequencePublishService().BuildSequenceSyncPlan(
-            character,
-            @"C:\Unreal\CrossingVoid.uproject",
-            [change],
-            WithEffectAtlas(BuildTestAtlas("Click", 2), "Click_Effect", 1, 2));
+        // 第五步（角色序列）与第七步（特效）各出一份计划；指纹要两边都算进去，所以拼起来。
+        var effectAtlases = WithEffectAtlas(BuildTestAtlas("Click", 2), "Misaka_Click_Effect_Sheet", 1, 2);
+        var publishService = new UnrealBridgeSequencePublishService();
+        var plan = new UnrealBridgeSequenceSyncPlan();
+        plan.Actions.AddRange(publishService.BuildSequenceSyncPlan(
+            character, @"C:\Unreal\CrossingVoid.uproject", [change], effectAtlases).Actions);
+        plan.Actions.AddRange(publishService.BuildEffectSyncPlan(
+            character, @"C:\Unreal\CrossingVoid.uproject", [change], effectAtlases).Actions);
         var stableId = SequenceFrameIdentity.BuildActionStableId("Click");
 
         UnrealBridgeSequenceFingerprintService.Save(character, plan.Actions, DateTimeOffset.Now);
@@ -5639,64 +6043,6 @@ static void EffectFramesJoinActionFingerprint()
     {
         Directory.Delete(root, recursive: true);
     }
-}
-
-/// <summary>
-/// 一次性探针（**不入常规回归**，名字带 MANUAL）：导一份 40×30 小样 + 一份真实底板，
-/// 摆到 %TEMP%\zd-psd-test 给画世界验（先试小的）。
-/// </summary>
-static void ManualBasePlatePsdProbe()
-{
-    var keep = Path.Combine(Path.GetTempPath(), "zd-psd-test");
-    Directory.CreateDirectory(keep);
-
-    var root = CreateTemporaryTestFolder();
-    try
-    {
-        var framesFolder = Path.Combine(root, "src");
-        Directory.CreateDirectory(framesFolder);
-        var firstPath = Path.Combine(framesFolder, "1 a.png");
-        var secondPath = Path.Combine(framesFolder, "2 b.png");
-        WriteSolidImage(firstPath, Color.Red, 40, 30);
-        WriteSolidImage(secondPath, Color.Blue, 40, 30);
-        var frames = new List<SequenceFrameItem>
-        {
-            CreateBasePlateTestFrame(firstPath, index: 1, duration: 2, width: 40, height: 30),
-            CreateBasePlateTestFrame(secondPath, index: 2, duration: 1, width: 40, height: 30),
-            CreateBasePlateTestFrame(string.Empty, index: 3, duration: 1, width: 40, height: 30, isBlank: true)
-        };
-        var smallPlan = BasePlateExportPlanner.Build(root, "Misaka", "Sk2", frames, actionFps: 10);
-        var smallResult = new BasePlateExportService()
-            .ExportAsync(smallPlan, root, progress: null, CancellationToken.None)
-            .GetAwaiter()
-            .GetResult();
-        File.Copy(smallResult.PsdFilePath, Path.Combine(keep, "1_小样_8层_40x30.psd"), overwrite: true);
-    }
-    finally
-    {
-        Directory.Delete(root, recursive: true);
-    }
-
-    var settingsPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-        "CrossingVoidZDTool", "settings.json");
-    using var settingsStream = File.OpenRead(settingsPath);
-    using var document = JsonDocument.Parse(settingsStream);
-    var workspace = document.RootElement.GetProperty("ProjectRootPath").GetString() ?? string.Empty;
-    var character = new CharacterWorkspaceService().LoadCharacters(workspace)
-        .Single(card => string.Equals(card.Code, "Misaka", StringComparison.OrdinalIgnoreCase));
-    var section = new SequenceFrameService()
-        .LoadSections(character, new CharacterSkillsService().Load(character))
-        .Single(item => string.Equals(item.Action.Code, "Click", StringComparison.OrdinalIgnoreCase));
-    var plan = BasePlateExportPlanner.Build(
-        workspace, character.Code, "Click", section.Frames,
-        new SequenceFrameService().GetActionFps(character, section.Action));
-    var result = new BasePlateExportService()
-        .ExportAsync(plan, workspace, progress: null, CancellationToken.None)
-        .GetAwaiter()
-        .GetResult();
-    File.Copy(result.PsdFilePath, Path.Combine(keep, "2_真样_16层_928x640.psd"), overwrite: true);
-    Console.WriteLine($"真样 {result.FrameCount} 层 {result.PsdBytes / 1024.0 / 1024.0:0.##} MB，都拷到 {keep}");
 }
 
 /// <summary>
@@ -7805,9 +8151,11 @@ static void WorkflowStateIsIsolatedPerCharacter()
             viewModel.CharacterSources.Single(item =>
                 string.Equals(item.DraftCharacter?.Code, character.Code, StringComparison.OrdinalIgnoreCase));
 
-        // 御坂走到第六步并留下一份检测结果
+        // 御坂走到第六步（蓝图置入）并留下一份检测结果。
+        // 注意写死 6：`UnrealSyncWorkflow.MaxStep` 现在已经是 7（第七步是特效同步），
+        // 拿 MaxStep 当"蓝图那一步"会走到特效步上去。
         viewModel.SelectSource(SourceOf(misaka));
-        viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep);
+        viewModel.ReturnToWorkflowStep(6);
         viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
         {
             Succeeded = true,
@@ -7823,14 +8171,15 @@ static void WorkflowStateIsIsolatedPerCharacter()
             ]
         });
         viewModel.FlushSessionCache();
-        AssertEqual(UnrealSyncWorkflow.MaxStep, viewModel.WorkflowStep);
+        // 这里说的是**第六步（蓝图置入）**，不是最大步：MaxStep 已经是 7（特效同步）。
+        AssertEqual(6, viewModel.WorkflowStep);
         AssertEqual(1, viewModel.BlueprintSetupItems.Count);
 
         // 切到桐人：不能带着御坂的结果过去
         viewModel.SelectSource(SourceOf(kirito));
         AssertEqual(0, viewModel.BlueprintSetupItems.Count);
         AssertEqual(false, viewModel.IsBlueprintSetupLoaded);
-        AssertEqual(false, viewModel.IsWorkflowStepLoaded(UnrealSyncWorkflow.MaxStep));
+        AssertEqual(false, viewModel.IsWorkflowStepLoaded(6));
         // 也不能带着御坂的差异树过去
         AssertEqual(0, viewModel.SelectionTreeRoots.Count);
 
@@ -7865,9 +8214,9 @@ static void WorkflowStateIsIsolatedPerCharacter()
         // 切回御坂：第六步的结果要能从它自己的缓存恢复回来
         viewModel.SelectSource(SourceOf(misaka));
         var restored = new UnrealSyncSessionCacheService()
-            .LoadStep(misaka, projectPath, misaka.Code, UnrealSyncWorkflow.MaxStep);
+            .LoadStep(misaka, projectPath, misaka.Code, 6);
         AssertEqual(UnrealSyncSessionCacheLoadStatus.Loaded, restored.Status);
-        AssertEqual(UnrealSyncWorkflow.MaxStep, restored.Cache!.WorkflowStep);
+        AssertEqual(6, restored.Cache!.WorkflowStep);
         AssertEqual(true, restored.Cache.IsBlueprintSetupLoaded);
         AssertSequence(["bp.anti"], restored.Cache.BlueprintSetupItems.Select(item => item.StableId).ToArray());
 
@@ -7889,13 +8238,15 @@ static void WorkflowStepIsNotClampedBelowLastStep()
     // 步号上限以前散落着写死成 5：接上第六步之后点「下一步」会被静默夹回第五步，
     // 界面停在原地却已经跑起了虚幻检测，看着就像按钮直接执行了操作。
     // 加新步骤时只该改 UnrealSyncWorkflow.MaxStep 一处。
-    AssertEqual(6, UnrealSyncWorkflow.MaxStep);
+    // 第七步「特效同步」接上之后，上限跟着到 7（这条用例就是盯着"加步骤别忘了抬上限"）。
+    AssertEqual(7, UnrealSyncWorkflow.MaxStep);
 
     var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
     // 流程步骤只存在于「工具箱 -> 虚幻」方向，默认方向是反过来的。
     viewModel.IsEngineToToolbox = false;
-    viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep);
-    AssertEqual(UnrealSyncWorkflow.MaxStep, viewModel.WorkflowStep);
+    // 蓝图置入是**第六步**，不是最大步 —— 最大步已经是 7「特效同步」。
+    viewModel.ReturnToWorkflowStep(6);
+    AssertEqual(6, viewModel.WorkflowStep);
     AssertEqual(true, viewModel.IsBlueprintSetupWorkspace);
     // 越界的步号才应该被夹住。
     viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep + 1);
@@ -7920,21 +8271,22 @@ static void WorkflowStepIsNotClampedBelowLastStep()
         AssertEqual(UnrealSyncWorkflow.MinStep, sync.WorkflowStep);
         AssertEqual(0, host.DetectedSteps.Count);
 
-        // 已经有数据的步骤不重复检测：进第六步只该记一条复用日志
-        controller.EnterStepAsync(UnrealSyncWorkflow.MaxStep).GetAwaiter().GetResult();
-        AssertSequence([UnrealSyncWorkflow.MaxStep], host.DetectedSteps.ToArray());
+        // 已经有数据的步骤不重复检测：进**第六步（蓝图置入）**只该记一条复用日志。
+        // 这里写死 6：最大步已经是 7「特效同步」，而那一步没有"蓝图结果"这种缓存可复用。
+        controller.EnterStepAsync(6).GetAwaiter().GetResult();
+        AssertSequence([6], host.DetectedSteps.ToArray());
         sync.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
         {
             Succeeded = true, CharacterCode = "Misaka", Items = []
         });
-        controller.EnterStepAsync(UnrealSyncWorkflow.MaxStep).GetAwaiter().GetResult();
-        AssertSequence([UnrealSyncWorkflow.MaxStep], host.DetectedSteps.ToArray());
+        controller.EnterStepAsync(6).GetAwaiter().GetResult();
+        AssertSequence([6], host.DetectedSteps.ToArray());
         AssertEqual(1, host.Logs.Count(log => log.Contains("复用本步缓存", StringComparison.Ordinal)));
 
         // 「重新加载」是明确要求重查，有缓存也得真跑
         controller.ReloadCurrentStepAsync().GetAwaiter().GetResult();
         AssertSequence(
-            [UnrealSyncWorkflow.MaxStep, UnrealSyncWorkflow.MaxStep],
+            [6, 6],
             host.DetectedSteps.ToArray());
     }
     finally
@@ -15333,4 +15685,3 @@ sealed class SingleThreadTestSynchronizationContext : SynchronizationContext, ID
         _queue.Dispose();
     }
 }
-

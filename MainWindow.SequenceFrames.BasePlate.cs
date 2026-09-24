@@ -45,14 +45,7 @@ namespace CrossingVoidZDTool
                 return;
             }
 
-            var formIndex = section.Action.FormIndex > 1 ? section.Action.FormIndex : parsedForm;
-            var variantCode = SequenceActionCatalog.GetVariantCode(definition, formIndex);
-            var plan = BasePlateExportPlanner.Build(
-                Settings.ProjectRootPath,
-                character.Code,
-                variantCode,
-                section.Frames,
-                _applicationViewModel.SequenceFrames.PreviewFps);
+            var plan = BuildBasePlatePlan(character, section, definition, parsedForm);
 
             ShowGlobalProgress("导出底板", $"{plan.FileNamePrefix} · {plan.Frames.Count} 张");
             BasePlateExportResult result;
@@ -112,6 +105,29 @@ namespace CrossingVoidZDTool
             {
                 AppendLog(LogKind.Warning, "底板已导出，但没能自动打开导出目录。", ex);
             }
+        }
+
+        /// <summary>
+        /// 当前动作的底板计划 —— **「导出底板」和「从底板 PSD 读回」共用这一处**。
+        ///
+        /// 它决定底板落哪个目录、PSD 叫什么名字，读回时全靠这两个值反查那份 PSD。
+        /// 两处各算一次的话，哪天动作代号的解析规则一动，就会出现"导出没问题、读回找不到"，
+        /// 所以这里只留一条路径。前置条件（有没有帧、代号认不认得）由调用方先查——
+        /// 两个入口要提示的文案不一样。
+        /// </summary>
+        private BasePlateExportPlan BuildBasePlatePlan(
+            CharacterCard character,
+            SequenceFrameSection section,
+            SequenceActionDefinition definition,
+            int parsedForm)
+        {
+            var formIndex = section.Action.FormIndex > 1 ? section.Action.FormIndex : parsedForm;
+            return BasePlateExportPlanner.Build(
+                Settings.ProjectRootPath,
+                character.Code,
+                SequenceActionCatalog.GetVariantCode(definition, formIndex),
+                section.Frames,
+                _applicationViewModel.SequenceFrames.PreviewFps);
         }
 
         /// <summary>

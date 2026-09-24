@@ -72,11 +72,12 @@ internal sealed class SequenceAtlasPackService
 
             var variantCode = SequenceActionCatalog.GetVariantCode(definition, formIndex);
 
-            // 特效层先打，而且**不看**下面那条「一张自己的图都没有」的捷径：
-            // 角色那条序列整条都借用别人的素材时，它自己没有图集，
-            // 但它自己的特效仍然是一张独立图集 —— 顺手跳过就等于特效永远同步不上去。
-            await PackEffectAtlasAsync(
-                packer,
+            // 特效只打**网格 sheet**（Niagara 面片用）。
+            //
+            // 以前这里还打一张 Paper2D 口径的紧凑图集（pack + trim，配精灵和 `_Effect_Flipbook`）；
+            // 「只出特效」之后那条线整个不做了 —— 特效只用 sheet + 材质实例两样。
+            // `PackEffectAtlasAsync` 的实现留着（不接线），万一将来又要 Paper2D 口径可以直接接回来。
+            await PackEffectSheetAsync(
                 character,
                 section,
                 definition,
@@ -221,6 +222,171 @@ internal sealed class SequenceAtlasPackService
                 Height = atlasSize.Height,
                 FramesByOrdinal = AtlasSequenceManifestReader.IndexByOrdinal(manifest),
             };
+    }
+
+    /// <summary>
+    /// **只打特效网格 sheet**，不需要"勾选的变化"。
+    ///
+    /// 第七步「特效同步」专用：特效该有几张、网格几×几全部来自工作区的特效帧目录，
+    /// 所以这一步不必先把整条序列的帧从 Unreal 导出一遍（用户明确要求省掉那一步）。
+    /// 有特效层的动作才打得出 sheet；一张特效图都没有的动作会被 `TryBuildLayout` 跳过。
+    /// </summary>
+    public async Task<IReadOnlyDictionary<string, UnrealBridgeSequenceAtlasInput>> PackEffectSheetsAsync(
+        CharacterCard character,
+        string? configuredPythonPath = null,
+        IProgress<AtlasPackProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(character);
+        var result = new Dictionary<string, UnrealBridgeSequenceAtlasInput>(StringComparer.OrdinalIgnoreCase);
+        var sections = new SequenceFrameService()
+            .LoadSections(character, new CharacterSkillsService().Load(character));
+        foreach (var section in sections)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (Resolve(section.Action.Code) is not { } resolved)
+            {
+                continue;
+            }
+
+            await PackEffectSheetAsync(
+                character,
+                section,
+                resolved.Definition,
+                resolved.FormIndex,
+                configuredPythonPath,
+                progress,
+                cancellationToken,
+                result)
+                .ConfigureAwait(false);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// 打 Niagara 用的**网格 sheet**：一个输出帧一格，空帧用全透明图占位。
+    ///
+    /// 和 Paper2D 那张图集分开打（那张是 pack + trim，每格矩形不同），因为 Sub UV 只认等分网格。
+    /// **空帧必须占格**：跳过一格，后面所有帧的 SubUV 索引就整体错位，而且错得很像"本来就该这样"。
+    /// </summary>
+    private static async Task PackEffectSheetAsync(
+        CharacterCard character,
+        SequenceFrameSection section,
+        SequenceActionDefinition definition,
+        int formIndex,
+        string? configuredPythonPath,
+        IProgress<AtlasPackProgress>? progress,
+        CancellationToken cancellationToken,
+        Dictionary<string, UnrealBridgeSequenceAtlasInput> result)
+    {
+        var layer = new SequenceEffectService().Load(character, section.Action);
+        var layout = SequenceEffectSyncService.TryBuildLayout(
+            character,
+            section,
+            definition,
+            formIndex,
+            layer,
+            new SequenceFrameService().GetActionFps(character, section.Action));
+        if (layout is null || layout.Frames.Count == 0)
+        {
+            return;
+        }
+
+        var reference = layout.Frames.FirstOrDefault(frame => !frame.IsEmpty);
+        if (reference is null)
+        {
+            return; // 整层都是空帧：没有可画的东西，也就不需要 sheet
+        }
+
+        var referenceSize = AtlasFolderPackService.ReadPngSize(reference.FilePath);
+        var temporaryRoot = Path.Combine(Path.GetTempPath(), "zd-effect-sheet-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var sourceImages = new List<string>(layout.Frames.Count);
+            foreach (var frame in layout.Frames)
+            {
+                if (!frame.IsEmpty)
+                {
+                    sourceImages.Add(frame.FilePath);
+                    continue;
+                }
+
+                Directory.CreateDirectory(temporaryRoot);
+                var placeholder = Path.Combine(temporaryRoot, $"Cell{frame.OutputOrdinal:0000}.png");
+                WriteTransparentPng(placeholder, referenceSize.Width, referenceSize.Height);
+                sourceImages.Add(placeholder);
+            }
+
+            var outputDirectory = AtlasPackService.ResolveOutputDirectory(
+                AtlasDestination.Cache,
+                projectRootPath: string.Empty,
+                character.FolderPath,
+                character.Code,
+                layout.LayerCode);
+            var packedAt = DateTime.UtcNow;
+            var packed = await new AtlasFolderPackService()
+                .PackAsync(
+                    new AtlasCreateRequest(
+                        Directory.Exists(temporaryRoot)
+                            ? temporaryRoot
+                            : Path.GetDirectoryName(reference.FilePath) ?? string.Empty,
+                        outputDirectory,
+                        layout.SheetName,
+                        AtlasFolderPackService.GridMode,
+                        Columns: layout.Columns,
+                        // 网格要能被行列数整除：**不加 padding、不裁边**，否则 Sub UV 切出来会偏。
+                        Padding: 0,
+                        Trim: false,
+                        MaxSize: ResolveMaxSize(sourceImages.Count)),
+                    configuredPythonPath,
+                    progress,
+                    cancellationToken,
+                    spriteNameForIndex: position =>
+                        string.IsNullOrWhiteSpace(layout.Frames[position - 1].SpriteAssetName)
+                            ? $"{layout.SheetName}_Cell{position - 1:00}"
+                            : layout.Frames[position - 1].SpriteAssetName,
+                    sourceImages: sourceImages)
+                .ConfigureAwait(false);
+
+            var manifest = AtlasSequenceManifestReader.Read(
+                AtlasSequenceManifestReader.GetManifestPath(packed.OutputDirectory, layout.SheetName),
+                packedAt);
+            var sheetSize = AtlasFolderPackService.ReadPngSize(packed.AtlasImagePath);
+            result[UnrealBridgeSequencePublishService.AtlasKey(layout.SheetName, formIndex)] =
+                new UnrealBridgeSequenceAtlasInput
+                {
+                    AtlasName = layout.SheetName,
+                    ImagePath = packed.AtlasImagePath,
+                    Width = sheetSize.Width,
+                    Height = sheetSize.Height,
+                    FramesByOrdinal = AtlasSequenceManifestReader.IndexByOrdinal(manifest)
+                };
+        }
+        finally
+        {
+            if (Directory.Exists(temporaryRoot))
+            {
+                try
+                {
+                    Directory.Delete(temporaryRoot, recursive: true);
+                }
+                catch (IOException)
+                {
+                    // 临时目录删不掉不影响这一轮结果，系统清理会收走。
+                }
+            }
+        }
+    }
+
+    /// <summary>写一张全透明 PNG（空帧占位用）。</summary>
+    private static void WriteTransparentPng(string path, int width, int height)
+    {
+        using var bitmap = new System.Drawing.Bitmap(
+            Math.Max(1, width),
+            Math.Max(1, height),
+            System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+        bitmap.Save(path, System.Drawing.Imaging.ImageFormat.Png);
     }
 
     /// <summary>

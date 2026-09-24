@@ -28,21 +28,8 @@ internal static class AtomicFileWriter
     /// 原子写入文本。先落到带 GUID 的临时文件，再整体替换目标；
     /// 中途失败会清掉临时文件，不在用户的角色目录里留垃圾。
     /// </summary>
-    public static void WriteAllText(string path, string text, Encoding? encoding = null)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
-        try
-        {
-            File.WriteAllText(temporaryPath, text, encoding ?? Utf8NoBom);
-            Replace(temporaryPath, path);
-        }
-        catch
-        {
-            TryDelete(temporaryPath);
-            throw;
-        }
-    }
+    public static void WriteAllText(string path, string text, Encoding? encoding = null) =>
+        WriteAtomic(path, temporary => File.WriteAllText(temporary, text, encoding ?? Utf8NoBom));
 
     /// <summary>
     /// 原子写入二进制（PSD 这类）。和 <see cref="WriteAllText"/> 同一条路：
@@ -51,14 +38,26 @@ internal static class AtomicFileWriter
     /// 实现上先在内存里拼完整份字节再落盘：这类产物（底板 PSD）最多几 MB，
     /// 而"边算边写"会让失败时留下一份半截文件——那比多占几 MB 内存糟得多。
     /// </summary>
-    public static void WriteAllBytes(string path, byte[] bytes)
+    public static void WriteAllBytes(string path, byte[] bytes) =>
+        WriteAtomic(path, temporary =>
+        {
+            ArgumentNullException.ThrowIfNull(bytes);
+            File.WriteAllBytes(temporary, bytes);
+        });
+
+    /// <summary>
+    /// 两条原子写共用的那一半：**临时文件 + 整体替换 + 失败清理**只写在这里。
+    /// 以前文本一份、二进制一份，逻辑一样、裸 catch 也各来一个（棘轮按行数算，
+    /// 于是"加一个重载"顺手就把指标顶上去了一格）。
+    /// </summary>
+    private static void WriteAtomic(string path, Action<string> write)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
-        ArgumentNullException.ThrowIfNull(bytes);
+        ArgumentNullException.ThrowIfNull(write);
         var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
         try
         {
-            File.WriteAllBytes(temporaryPath, bytes);
+            write(temporaryPath);
             Replace(temporaryPath, path);
         }
         catch

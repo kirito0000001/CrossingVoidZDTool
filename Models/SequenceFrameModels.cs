@@ -112,8 +112,61 @@ internal sealed record SequenceFrameItem(
     string ReusePositionsText = "",
     int ReuseColorIndex = -1,
     SequenceVoiceSyncResult? VoiceSyncResult = null,
-    string SyncId = "")
+    string SyncId = "",
+    // ── 下面是「按特效帧展开」用的（见 SequenceFramesViewModel.RebuildTimelineFrames）──
+    /// <summary>
+    /// 这一格是从哪个真实动作帧展开出来的；**没展开时是 null**。
+    ///
+    /// 展开出来的格是"只读的一小格"：它借用了原帧的身份（序号、语音、复用标记），
+    /// 但图片换成对应的那张特效帧、时长固定 1 格。所有**编辑**动作都要先回到
+    /// <see cref="SourceFrame"/> 上再执行 —— 不然会去改一个不存在于清单里的假帧。
+    /// </summary>
+    SequenceFrameItem? ExpandedFrom = null,
+    /// <summary>展开时：这是本帧内的第几张（0 起）。没展开时是 0。</summary>
+    int EffectSubIndex = 0)
 {
+    /// <summary>真实动作帧（没展开就是自己）。</summary>
+    public SequenceFrameItem SourceFrame => ExpandedFrom ?? this;
+
+    /// <summary>这一格是不是"按特效帧展开"出来的小格。</summary>
+    public bool IsEffectSlot => ExpandedFrom is not null;
+
+    /// <summary>
+    /// 时间轴卡片上的缩略图。
+    ///
+    /// 不走 URI 绑定（<see cref="FileUri"/> 那种）而是自己造一张带
+    /// <c>IgnoreImageCache</c> 的缩略图，是因为**特效帧的文件名是固定的**
+    /// （<c>&lt;动作&gt;_Effect_0001.png</c>）：重新导入后内容变了、路径没变，
+    /// 走 URI 会把上一次的图缓存着不更新 —— 而"导入完逐张核对"正是这个开关的用途。
+    /// 解码宽度限到 192，横向排几十张也不吃内存。
+    /// </summary>
+    public Microsoft.UI.Xaml.Media.ImageSource? TimelineThumbnailSource => BuildTimelineThumbnail();
+
+    private Microsoft.UI.Xaml.Media.ImageSource? BuildTimelineThumbnail()
+    {
+        if (IsBlank || string.IsNullOrWhiteSpace(FilePath))
+        {
+            return null;
+        }
+
+        try
+        {
+            var bitmap = new Microsoft.UI.Xaml.Media.Imaging.BitmapImage
+            {
+                DecodePixelWidth = 192,
+                CreateOptions = Microsoft.UI.Xaml.Media.Imaging.BitmapCreateOptions.IgnoreImageCache
+            };
+            bitmap.UriSource = new Uri(FilePath);
+            return bitmap;
+        }
+        catch (Exception)
+        {
+            // 图读不出来不是这里的错（文件缺失/损坏），预览那边会记日志；
+            // 缩略图空着就行，别把时间轴整条带崩。
+            return null;
+        }
+    }
+
     public string DisplayName => IsBlank ? "空白帧" : FileName;
 
     public string PlainFileName => IsBlank

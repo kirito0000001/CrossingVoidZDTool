@@ -81,6 +81,10 @@ internal static class UiSmokeRunner
 
             // 1) 角色台上的角色卡按钮（在 DataTemplate 里）必须点得动，
             //    而且点完之后「当前角色」要真的被选上——这正是 C6b 要动的那处接线。
+            //    先切回角色台：程序记得上次停在哪一页，卡片在别的页面上根本没被渲染
+            //    （列表虚拟化），于是"在哪一页"决定了这一段跑得成跑不成。
+            window.UiSmokeShowCharacterDeskPage();
+            await WaitAsync(TimeSpan.FromSeconds(2));
             var candidates = FindAll<Button>(root)
                 .Where(button => button.IsHitTestVisible && button.IsEnabled)
                 .ToArray();
@@ -92,7 +96,23 @@ internal static class UiSmokeRunner
                 .Where(button => button.CommandParameter is CharacterCard)
                 .Select(button => (Button: button, Card: (CharacterCard)button.CommandParameter!))
                 .ToArray();
-            Check("找到角色卡按钮", cards.Length > 0, $"共 {cards.Length} 张：{string.Join(",", cards.Select(item => item.Card.Code))}");
+            // 台面上有没有卡片，要看**已完成角色**本来有几个（卡片只列已完成角色）：
+            // 一个都没有时空着的台面是正常状态（角色全在草稿里做），不该报失败。
+            // 但已完成角色在、卡片却没渲染出来，那就是真回归 —— 这两种要分得开，
+            // 所以拿窗口暴露的数量当基准，而不是"看到 0 张就跳过"。
+            var completedCount = window.CharacterDeskCompletedCount;
+            var expectCards = cards.Length > 0 || completedCount > 0;
+            if (expectCards)
+            {
+                Check(
+                    "找到角色卡按钮",
+                    cards.Length > 0,
+                    $"共 {cards.Length} 张（已完成角色 {completedCount} 个）：{string.Join(",", cards.Select(item => item.Card.Code))}");
+            }
+            else
+            {
+                lines.Add("SKIP 找到角色卡按钮（本来就没有已完成角色）");
+            }
 
             // 让下一步能直接挑控件，而不是靠文案猜：把具名按钮倒出来。
             lines.Add(
@@ -102,86 +122,98 @@ internal static class UiSmokeRunner
                         .Select(button => button.Name)
                         .Distinct(StringComparer.Ordinal)));
 
-            // **点另一张卡**再断言角色换了——上一版点的是「当前已经是」的那张，
-            // 点击前后都是同一个代号，等于没验出接线。
-            var currentCode = window.CharacterDeskCurrentCode;
-            var target = cards.FirstOrDefault(item =>
-                !string.Equals(item.Card.Code, currentCode, StringComparison.OrdinalIgnoreCase));
-            if (target.Button is not null)
+            // 角色台上一张卡都没有（手上的角色全在"已完成"里，草稿区是空的）时，
+            // 下面这一整段没有验的东西 —— 记一条 SKIP 接着往后走。
+            // 以前这里直接拿 cards[0]，于是"没草稿角色"这种正常状态会让整个冒烟崩掉，
+            // 后面那些真正要看接线的段落（导出菜单、特效层、工具集）一条都跑不到。
+            if (cards.Length == 0)
             {
-                Invoke(target.Button);
-                await WaitAsync(TimeSpan.FromSeconds(3));
-                var after = window.CharacterDeskCurrentCode;
-                Check(
-                    "点另一张角色卡之后当前角色真的换了",
-                    string.Equals(after, target.Card.Code, StringComparison.OrdinalIgnoreCase),
-                    $"点击前={currentCode ?? "<null>"} 目标={target.Card.Code} 点击后={after ?? "<null>"}");
+                lines.Add("SKIP 角色卡与详情弹窗这一段（台面上没有卡片可点）");
             }
             else
             {
-                // 台面上只有当前这一张卡时，验同一个按钮的真实效果。
-                // 实测（runtime.log 里那行「[操作] 打开角色详情」）：卡片点击打开的是
-                // 角色详情弹窗，不是草稿——所以断言按事实写，不按我以为的写。
-                var card = cards[0];
-                var logMark = CountLines(runtimeLog);
-                Invoke(card.Button);
-                await WaitAsync(TimeSpan.FromSeconds(3));
-                Check(
-                    "点角色卡之后打开角色详情",
-                    window.IsCharacterDetailOpen,
-                    $"卡={card.Card.Code} 详情打开={window.IsCharacterDetailOpen}");
-                // 「点了没反应」要能说出理由：把这次点击期间程序自己写的日志带出来。
-                foreach (var line in ReadLinesSince(runtimeLog, logMark).Take(20))
+                // **点另一张卡**再断言角色换了——上一版点的是「当前已经是」的那张，
+                // 点击前后都是同一个代号，等于没验出接线。
+                var currentCode = window.CharacterDeskCurrentCode;
+                var target = cards.FirstOrDefault(item =>
+                    !string.Equals(item.Card.Code, currentCode, StringComparison.OrdinalIgnoreCase));
+                if (target.Button is not null)
                 {
-                    lines.Add("INFO 日志 " + line);
+                    Invoke(target.Button);
+                    await WaitAsync(TimeSpan.FromSeconds(3));
+                    var after = window.CharacterDeskCurrentCode;
+                    Check(
+                        "点另一张角色卡之后当前角色真的换了",
+                        string.Equals(after, target.Card.Code, StringComparison.OrdinalIgnoreCase),
+                        $"点击前={currentCode ?? "<null>"} 目标={target.Card.Code} 点击后={after ?? "<null>"}");
                 }
-            }
+                else
+                {
+                    // 台面上只有当前这一张卡时，验同一个按钮的真实效果。
+                    // 实测（runtime.log 里那行「[操作] 打开角色详情」）：卡片点击打开的是
+                    // 角色详情弹窗，不是草稿——所以断言按事实写，不按我以为的写。
+                    var card = cards[0];
+                    var logMark = CountLines(runtimeLog);
+                    Invoke(card.Button);
+                    await WaitAsync(TimeSpan.FromSeconds(3));
+                    Check(
+                        "点角色卡之后打开角色详情",
+                        window.IsCharacterDetailOpen,
+                        $"卡={card.Card.Code} 详情打开={window.IsCharacterDetailOpen}");
+                    // 「点了没反应」要能说出理由：把这次点击期间程序自己写的日志带出来。
+                    foreach (var line in ReadLinesSince(runtimeLog, logMark).Take(20))
+                    {
+                        lines.Add("INFO 日志 " + line);
+                    }
+                }
 
-            // 2) 详情弹窗开合：详情刚被点开，所以关闭按钮这次应该真的在树上。
-            //    它是详情模板里的按钮——C6b 另一个高风险点。
-            var detailHost = FindFirstByName(root, "CharacterDetailHost");
-            // 关闭按钮在 XAML 里没有 x:Name，只有文案。**在详情宿主的子树里找**，
-            // 范围锁死，免得又点错别的浮层的关闭。
-            var detailButtons = detailHost is null ? [] : FindAll<Button>(detailHost).ToArray();
-            lines.Add(
-                "INFO 详情内按钮=" + string.Join(",", detailButtons.Select(DescribeLabel).Distinct(StringComparer.Ordinal)));
+                // 2) 详情弹窗开合：详情刚被点开，所以关闭按钮这次应该真的在树上。
+                //    它是详情模板里的按钮——C6b 另一个高风险点。
+                var detailHost = FindFirstByName(root, "CharacterDetailHost");
+                // 关闭按钮在 XAML 里没有 x:Name，只有文案。**在详情宿主的子树里找**，
+                // 范围锁死，免得又点错别的浮层的关闭。
+                var detailButtons = detailHost is null ? [] : FindAll<Button>(detailHost).ToArray();
+                lines.Add(
+                    "INFO 详情内按钮=" + string.Join(",", detailButtons.Select(DescribeLabel).Distinct(StringComparer.Ordinal)));
 
-            // 详情里这五个按钮就是 C6b 要下移接线的对象：先把「它们在、而且可点」钉住，
-            // 改接线时若哪一条断了（点了没反应/按钮消失），这里当场红。
-            foreach (var expected in new[] { "继续编辑", "导出角色", "打开角色目录", "前往虚幻同步台", "查看角色" })
-            {
-                var match = detailButtons.FirstOrDefault(button =>
-                    DescribeLabel(button).Contains(expected, StringComparison.Ordinal));
-                Check(
-                    $"详情按钮「{expected}」存在且可点",
-                    match is not null && match.IsEnabled && match.IsHitTestVisible);
-                // 接线翻成命令之后，「按钮在、点不动、不报错」这种形态就是命令为 null。
-                // 光看 IsEnabled 抓不到它，所以这里多钉一条：命令必须挂上了。
-                Check(
-                    $"详情按钮「{expected}」已绑命令",
-                    match?.Command is not null);
-            }
+                // 详情里这五个按钮就是 C6b 要下移接线的对象：先把「它们在、而且可点」钉住，
+                // 改接线时若哪一条断了（点了没反应/按钮消失），这里当场红。
+                foreach (var expected in new[] { "继续编辑", "导出角色", "打开角色目录", "前往虚幻同步台", "查看角色" })
+                {
+                    var match = detailButtons.FirstOrDefault(button =>
+                        DescribeLabel(button).Contains(expected, StringComparison.Ordinal));
+                    Check(
+                        $"详情按钮「{expected}」存在且可点",
+                        match is not null && match.IsEnabled && match.IsHitTestVisible);
+                    // 接线翻成命令之后，「按钮在、点不动、不报错」这种形态就是命令为 null。
+                    // 光看 IsEnabled 抓不到它，所以这里多钉一条：命令必须挂上了。
+                    Check(
+                        $"详情按钮「{expected}」已绑命令",
+                        match?.Command is not null);
+                }
 
-            // 这个按钮是纯图标（没 x:Name、没文字），所以给它补了 AutomationProperties.Name
-            // ——冒烟能认出来，辅助功能也顺手有了名字。
-            var closeButton = detailButtons
-                .FirstOrDefault(button => DescribeLabel(button).Contains("关闭", StringComparison.Ordinal));
-            if (closeButton is not null)
-            {
-                Check(
-                    "详情弹窗已展开",
-                    detailHost is not null && detailHost.Visibility == Visibility.Visible);
-                Invoke(closeButton);
-                await WaitAsync(TimeSpan.FromSeconds(2));
-                Check(
-                    "点关闭之后详情弹窗收起",
-                    detailHost is not null && detailHost.Visibility != Visibility.Visible);
-            }
-            else
-            {
-                // 详情里没有带「关闭」字样的按钮（大概是图标按钮，或只能点浮层外关闭）。
-                // 这不是失败，是场景还没覆盖到那一种关法——证据留在上面那行 INFO 里。
-                lines.Add("SKIP 详情弹窗关闭（详情内没有可识别的关闭按钮，见上面 INFO）");
+                // 这个按钮是纯图标（没 x:Name、没文字），所以给它补了 AutomationProperties.Name
+                // ——冒烟能认出来，辅助功能也顺手有了名字。
+                var closeButton = detailButtons
+                    .FirstOrDefault(button => DescribeLabel(button).Contains("关闭", StringComparison.Ordinal));
+                if (closeButton is not null)
+                {
+                    Check(
+                        "详情弹窗已展开",
+                        detailHost is not null && detailHost.Visibility == Visibility.Visible);
+                    Invoke(closeButton);
+                    await WaitAsync(TimeSpan.FromSeconds(2));
+                    Check(
+                        "点关闭之后详情弹窗收起",
+                        detailHost is not null && detailHost.Visibility != Visibility.Visible);
+                }
+                else
+                {
+                    // 详情里没有带「关闭」字样的按钮（大概是图标按钮，或只能点浮层外关闭）。
+                    // 这不是失败，是场景还没覆盖到那一种关法——证据留在上面那行 INFO 里。
+                    lines.Add("SKIP 详情弹窗关闭（详情内没有可识别的关闭按钮，见上面 INFO）");
+                }
+
             }
 
             // 3) St5 序列帧：进页面 → 点动作卡上的「管理」（**命令绑定**）→ 断言浮层打开
@@ -272,6 +304,39 @@ internal static class UiSmokeRunner
                             "时间轴项上的菜单命令都挂上了",
                             resolved.All(pair => pair.Value is not null));
                     }
+
+                    // 播放时"当前格"必须跟着走（用户报过：绿条杵在原地不动）。
+                    // 根因是选中同步按**引用**认帧，而预览推进用的是另一批帧实例 ——
+                    // 目标不在时间轴里，SelectedItem 等于赋了个不存在的项。
+                    // 这里就按"点播放 → 采样几轮 → 再点一次暂停"来验。
+                    if (managerHost is not null &&
+                        FindFirstByName(managerHost, "SequenceEditorPlayButton") is Button playButton)
+                    {
+                        lines.Add("INFO 播放前=" + window.UiSmokeDescribeSequencePlaybackState());
+                        Invoke(playButton);
+                        var samples = new List<object?>();
+                        for (var sample = 0; sample < 10; sample++)
+                        {
+                            await WaitAsync(TimeSpan.FromMilliseconds(140));
+                            samples.Add(timeline.SelectedItem);
+                        }
+
+                        Invoke(playButton); // 再点一次 = 暂停
+                        await WaitAsync(TimeSpan.FromMilliseconds(300));
+                        lines.Add(
+                            "INFO 播放中采样=" + string.Join(",", samples.Select(DescribeTimelineItem)));
+                        lines.Add("INFO 播放后=" + window.UiSmokeDescribeSequencePlaybackState());
+                        Check(
+                            "播放时时间轴的选中跟着走",
+                            samples
+                                .Where(item => item is not null)
+                                .Distinct(ReferenceEqualityComparer.Instance)
+                                .Count() > 1);
+                    }
+                    else
+                    {
+                        lines.Add("SKIP 时间轴跟随播放（这次没找到编辑器播放按钮）");
+                    }
                 }
 
                 // 编辑器那四个按钮（新建帧 / 左插入 / 右插入 / 复制）必须真的绑上命令。
@@ -316,8 +381,10 @@ internal static class UiSmokeRunner
                     lines.Add("SKIP 导出菜单（这次没找到「导出」按钮）");
                 }
 
-                // 特效层：两层预览的呈现器都在树上 + 三个入口都绑了命令。
-                // 呈现器"没装上"的表现是"特效永远不显示"，而命令为 null 是"点了没反应"。
+                // 特效层：两层预览的呈现器都在树上 + 三个入口都接上了东西。
+                // 呈现器"没装上"的表现是"特效永远不显示"；入口没接上的表现是"点了没反应"——
+                // 但「导入特效帧」现在是个**菜单按钮**（命令挂在菜单项上，自己不带 Command），
+                // 所以它看的是"菜单装没装上"，另两个才看 Command。
                 var effectPresenterNames = new[]
                 {
                     "SequencePreviewEffectPresenter",
@@ -339,11 +406,15 @@ internal static class UiSmokeRunner
                     : FindAll<Button>(managerHost)
                         .Where(button => button.Visibility == Visibility.Visible)
                         .Select(button => (Label: DescribeLabel(button), Button: button))
-                        .Where(pair => pair.Label is "导入特效帧" or "打开特效目录" or "清空特效层")
+                        .Where(pair => pair.Label.StartsWith("导入特效帧", StringComparison.Ordinal)
+                            || pair.Label is "打开特效目录" or "清空特效层")
                         .ToArray();
                 foreach (var (label, button) in effectButtons)
                 {
-                    Check($"特效层「{label}」已绑定命令", button.Command is not null);
+                    var wired = label.StartsWith("导入特效帧", StringComparison.Ordinal)
+                        ? button.Flyout is MenuFlyout menu && menu.Items.Count > 0
+                        : button.Command is not null;
+                    Check($"特效层「{label}」已接上", wired);
                 }
 
                 if (effectButtons.Length == 0)
@@ -484,6 +555,10 @@ internal static class UiSmokeRunner
         AutomationProperties.GetName(button) ??
         button.Name ??
         "<无标签>";
+
+    /// <summary>时间轴项写成"帧号/第几张"，采样日志里看的就是这串。</summary>
+    private static string DescribeTimelineItem(object? item) =>
+        item is SequenceFrameItem frame ? $"{frame.Index}/{frame.EffectSubIndex}" : "-";
 
     private static IEnumerable<T> FindAll<T>(DependencyObject root)
         where T : DependencyObject

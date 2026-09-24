@@ -162,7 +162,9 @@ namespace CrossingVoidZDTool
                 else
                     _applicationViewModel.UnrealProjectSync.ValidatePublishCharacterFolders(character.Code);
                 ShowGlobalProgress("检测同步差异", character.Code);
-                var detectionExportScope = _applicationViewModel.UnrealProjectSync.WorkflowStep == 5 || _workflowStepAfterPublishDetection == 5
+                // 第七步和第五步共用同一个导出范围（都要序列帧那一套数据），只是计划不同。
+                var detectionExportScope = _applicationViewModel.UnrealProjectSync.WorkflowStep is 5 or 7
+                    || _workflowStepAfterPublishDetection is 5 or 7
                     ? UnrealProjectSyncExportScope.CharacterSequences
                     : UnrealProjectSyncExportScope.CharacterMaterials;
                 var detectionExportRun = await _applicationViewModel.UnrealProjectSync.ExportProjectCharactersAsync(
@@ -215,6 +217,15 @@ namespace CrossingVoidZDTool
                         _applicationViewModel.UnrealProjectSync.PublishStages.First(stage =>
                             stage.Stage == UnrealBridgePublishStage.ZdAnimationTracks);
                 }
+                else if (_workflowStepAfterPublishDetection == 3)
+                {
+                    // 第三步是"素材"那一路：把阶段拨回角色素材。
+                    // 不拨的话，会话里残留的"序列动画轨道"会让 FilterPublishChanges 把素材变更整批丢掉 ——
+                    // 界面就变成"共检查 0 项、无差异 0 项"（2026-09-24 实测）。
+                    _applicationViewModel.UnrealProjectSync.SelectedPublishStage =
+                        _applicationViewModel.UnrealProjectSync.PublishStages.First(stage =>
+                            stage.Stage == UnrealBridgePublishStage.CharacterMaterials);
+                }
                 changes = _applicationViewModel.UnrealProjectSync.FilterPublishChanges(changes).ToArray();
                 AppendLog(LogKind.Info, $"[Step5 Detection] character={character.Code} changes={changes.Length} stepAfterPublishDetection={_workflowStepAfterPublishDetection} selectPendingByDefault={_workflowStepAfterPublishDetection != 5}");
                 LogSequenceChanges("[Step5 Detection Item]", changes);
@@ -251,8 +262,13 @@ namespace CrossingVoidZDTool
                 _workflowStepAfterPublishDetection = 0;
                 // 记下这棵差异树属于哪一步：第三步和第五步共用同一棵树、范围不同，
                 // 不区分的话回到另一步会误以为已经检测过而直接复用。
+                //
+                // **不属于 3/5/7 的检测必须把归属清成 0，绝不能默认写成 3** ——
+                // 以前这里写的是"不是 3/5 就记成 3"，于是第四步的预检跑完，第三步会误以为
+                // "我有缓存"，直接复用一个跟它无关（常常是空）的树，界面显示成
+                // "共检查 0 项、无差异 0 项"，把真正该报的新增（幻形立绘 #2 / 失败语音 #1）吞掉。
                 _applicationViewModel.UnrealProjectSync.SetLoadedPublishStep(
-                    targetWorkflowStep is 3 or 5 ? targetWorkflowStep : 3);
+                    targetWorkflowStep is 3 or 5 or 7 ? targetWorkflowStep : 0);
                 if (targetWorkflowStep == 2)
                 {
                     _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(1);
@@ -265,6 +281,12 @@ namespace CrossingVoidZDTool
                 else if (targetWorkflowStep == 5)
                 {
                     _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(5);
+                }
+                else if (targetWorkflowStep == 7)
+                {
+                    // 第七步「特效同步」：和第五步共用这套检测/发布链路，只是计划来自
+                    // BuildEffectSyncPlan（只含特效项）。步骤上限见 UnrealSyncWorkflow.MaxStep。
+                    _applicationViewModel.UnrealProjectSync.ReturnToWorkflowStep(7);
                 }
                 else
                 {

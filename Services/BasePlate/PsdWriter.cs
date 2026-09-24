@@ -158,8 +158,9 @@ internal static class PsdWriter
         writer.Write((byte)0);                   // 填充
 
         // 附加数据 = 图层蒙版(空) + 混合范围(40 字节) + 图层名（Pascal 串，补齐到 4 字节）+ 附加块。
-        // 名字按 ASCII 写、**带一个结尾 0**（画世界导出的文件就是这样；我们的名字是 `0001`）。
-        var name = Encoding.ASCII.GetBytes(layer.Name + "\0");
+        // 名字**带一个结尾 0**（画世界导出的文件就是这样）；中文名按 GBK 写
+        // —— 按 ASCII 写会变成 `??`，信息直接丢掉（读回来也认不出"背景"这种层）。
+        var name = PsdLayerNameEncoding.Encode(layer.Name + "\0");
         var nameFieldLength = (name.Length + 1 + 3) / 4 * 4;
         const int rangesLength = 40;
         var blocks = BuildLayerBlocks(layer.Name);

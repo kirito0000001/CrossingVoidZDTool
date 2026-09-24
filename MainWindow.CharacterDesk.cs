@@ -31,6 +31,19 @@ namespace CrossingVoidZDTool
         /// <summary>UI 冒烟用：当前选中的角色代号（没选就是 null）。</summary>
         internal string? CharacterDeskCurrentCode => CharacterDesk.CurrentCharacter?.Code;
 
+        /// <summary>
+        /// 角色台上**已完成**角色的个数（卡片的来源就是它）。冒烟用它区分两种
+        /// "台面上没卡片"：本来就没有已完成角色（正常，跳过）和角色在、卡片却没渲染出来（回归）。
+        /// </summary>
+        internal int CharacterDeskCompletedCount => CharacterDesk.CompletedCharacters.Count;
+
+        /// <summary>
+        /// 冒烟用：把界面切回角色台。程序会记住上次停留的页面，冒烟跑在什么页面上
+        /// 取决于上一次使用 —— 先切回角色台，卡片才会被真正渲染出来（列表是虚拟化的，
+        /// 页面没显示时容器根本不存在），这一段的断言也才可复现。
+        /// </summary>
+        internal void UiSmokeShowCharacterDeskPage() => ShowCharacterDeskPage();
+
         /// <summary>UI 冒烟用：角色详情弹窗是不是开着。</summary>
         internal bool IsCharacterDetailOpen => _characterDetailCharacter is not null;
 

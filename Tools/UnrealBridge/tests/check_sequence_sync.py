@@ -273,6 +273,9 @@ class _EffectEngine(object):
         self.flipbook_requests = []
         self.purged = []
         self.imported_files = []
+        # 新口径（只出特效）：共享三样 + 每动作一个材质实例，不再有精灵 / Flipbook。
+        self.niagara_calls = []
+        self.material_instance_requests = []
         self.bridge = self
 
     # ---- 资产登记 / 加载
@@ -289,6 +292,12 @@ class _EffectEngine(object):
         if not is_asset_path(path):
             # 文件夹不是资产。真的引擎在这里就是返回 None。
             self.folder_loads.append(path)
+            return None
+        # 插件里的共享资产（/ZDBridge/…）**没有就是没有**：真引擎对不存在的资产返回 None，
+        # 桩要是照旧"随便造一个"，`ensure_effect_*` 那三个助手永远不会被调用，
+        # "共享资产在不在插件里"这条就永远测不到。
+        if package_of(path).lower().startswith("/zdbridge/") and \
+                package_of(path).lower() not in self.assets:
             return None
         key = package_of(path).lower()
         return self.assets.get(key) or _FakeAsset(path)
@@ -315,6 +324,35 @@ class _EffectEngine(object):
             self.assets.pop(package_of(path).lower(), None)
             items.append({"objectPath": path, "deleted": True, "assetClass": "PaperSprite"})
         return json.dumps({"items": items})
+
+    # ---- ZDBridgeLibrary 的四个特效助手（共享三样 + 每动作 MI）
+
+    def ensure_effect_plane_mesh(self, source, folder, name):
+        self.niagara_calls.append(("plane", folder, name))
+        path = "%s/%s.%s" % (folder, name, name)
+        if package_of(path).lower() not in self.assets:
+            self.seed(path)
+        return json.dumps({"ok": True, "action": "created", "meshPath": path})
+
+    def ensure_effect_sheet_material(self, folder, name, additive):
+        self.niagara_calls.append(("material", folder, name))
+        path = "%s/%s.%s" % (folder, name, name)
+        self.seed(path)
+        return json.dumps({"ok": True, "action": "created", "materialPath": path})
+
+    def ensure_effect_niagara_template(self, folder, name, plane, material, scale):
+        self.niagara_calls.append(("template", folder, name))
+        path = "%s/%s.%s" % (folder, name, name)
+        self.seed(path)
+        return json.dumps({"ok": True, "action": "created", "systemPath": path})
+
+    def create_effect_sheet_material_instance(self, folder, name, sheet, columns, rows, frames):
+        self.material_instance_requests.append({
+            "name": name, "folder": folder, "columns": columns, "rows": rows, "frames": frames,
+        })
+        path = "%s/%s.%s" % (folder, name, name)
+        self.seed(path)
+        return json.dumps({"ok": True, "action": "created", "materialInstancePath": path})
 
     # ---- 装 / 卸
 
@@ -498,6 +536,13 @@ def effect_plan_action(atlas_image_path, blank_ordinals=()):
         "isEffectLayer": True,
         "hasStaleAssetSelection": True,
         "staleAssetObjectPaths": [STALE_EFFECT_SPRITE, STALE_EFFECT_FLIPBOOK_LOWER],
+        # 「只出特效」之后的计划字段：网格 sheet + 每动作一个材质实例。
+        "effectSheetName": "Misaka_Sk2_Effect_Sheet",
+        "effectSheetImagePath": atlas_image_path,
+        "effectColumns": 2,
+        "effectRows": 2,
+        "effectMaterialName": "MI_Sk2_Effect",
+        "effectFps": 24,
         "frames": frames,
         "sourceImages": source_images,
     }
@@ -512,6 +557,8 @@ try:
 
     engine = _EffectEngine().install()
     engine.seed(STALE_EFFECT_SPRITE)
+    # 旧口径留下的 Flipbook 也要登记进桩：只出特效之后它不再是产物，必须被清掉。
+    engine.seed(STALE_EFFECT_FLIPBOOK_LOWER)
     result, raised = run_sync(
         [], [], engine.bridge, None,
         actions=[effect_plan_action(atlas_image, blank_ordinals=(2,))])
@@ -520,26 +567,34 @@ try:
     # 计划项是动作：C# 才会把它算进「这一轮执行过的动作」，特效能进基线。
     check("条目算作动作", "action", field(result, "itemKind", 0))
     message = field(result, "message", 0)
+    if "effect layer synchronized" not in message:
+        # 桩把 log_error 吞掉了，失败原因只能从这里看。
+        print("DEBUG 特效动作的 message=%r" % message)
     check("消息里认得出是特效层", True, "effect layer synchronized" in message)
     check("帧数照实报", True, "frames=4" in message)
     # 这两个是这条路上最容易被漏掉的：文件夹被当资产 load、矩形没带。
     check("没把材质文件夹当资产加载", [], engine.folder_loads)
-    check("图集贴图导进来了", [atlas_image], engine.imported_files)
-    check("精灵按**输出帧编号**建，空帧不建",
-          ["Sk2_Effect_Frame00_Sprite", "Sk2_Effect_Frame02_Sprite", "Sk2_Effect_Frame03_Sprite"],
-          engine.sprite_requests)
-    check("Flipbook 只建一次", 1, len(engine.flipbook_requests))
-    flipbook = engine.flipbook_requests[0] if engine.flipbook_requests else {}
-    check("空帧传成 None（时间照占、什么都不画）",
-          [True, False, True, True],
-          [sprite is not None for sprite in flipbook.get("sprites", [])])
-    check("每输出帧占一格", [1, 1, 1, 1], flipbook.get("frameRuns"))
-    check("帧率用计划里的（动作帧率 × 2）", 24.0, flipbook.get("fps"))
-    check("这一层自己的旧资产清掉了", [STALE_EFFECT_SPRITE], engine.purged)
-    # 大小写不敏感这条：待删名单里那条小写 Flipbook 路径指的就是刚建的这只，
-    # 清理必须认出来（否则会连自己一起删，然后读它就报"实例为空"）。
-    check("没把刚重建的 Flipbook 当旧资产删掉", True,
-          ("%s/Sk2_Effect_Flipbook" % EFFECT_FOLDER).lower() in engine.assets)
+    check("网格 sheet 导进来了", [atlas_image], engine.imported_files)
+    # 共享三样（面片 / 母材质 / 粒子系统）只在缺的时候建，都在插件目录 /ZDBridge/FX 下。
+    check("共享面片 / 母材质 / 粒子系统都确保过",
+          ["material", "plane", "template"],
+          sorted(kind for kind, _, _ in engine.niagara_calls))
+    check("共享资产落在 /ZDBridge/FX",
+          ["/ZDBridge/FX", "/ZDBridge/FX", "/ZDBridge/FX"],
+          [folder for _, folder, _ in engine.niagara_calls])
+    # 这个动作自己只有一样：材质实例（带网格参数）。
+    check("只建了这一个动作的材质实例", ["MI_Sk2_Effect"],
+          [item["name"] for item in engine.material_instance_requests])
+    instance = engine.material_instance_requests[0] if engine.material_instance_requests else {}
+    check("材质实例带上了网格参数", {"columns": 2, "rows": 2, "frames": 4},
+          {key: instance.get(key) for key in ("columns", "rows", "frames")})
+    # 新口径**不再**建精灵 / Flipbook：建了就是退回了 Paper2D 那套。
+    check("不再建精灵", [], engine.sprite_requests)
+    check("不再建 Flipbook", 0, len(engine.flipbook_requests))
+    # 旧口径留下的那两样（精灵 + Flipbook）**都**该被清掉 —— 它们不再是这一层的产物。
+    check("旧口径的特效资产清掉了",
+          sorted([STALE_EFFECT_SPRITE, STALE_EFFECT_FLIPBOOK_LOWER]),
+          sorted(engine.purged))
 finally:
     shutil.rmtree(effect_root, ignore_errors=True)
     unreal.load_asset = lambda path: object() if is_asset_path(path) else None

@@ -95,6 +95,7 @@ internal sealed class SequenceEffectService
     /// <summary>
     /// 把画好的特效帧导进来。
     /// <paramref name="expectedFrameCount"/> 由调用方按动作算（总格数 × 倍数）。
+    /// 帧号取**文件名里最后一段数字** —— 导出底板那批 PNG 和这套编号同名，画完不用改名。
     /// </summary>
     public SequenceEffectImportResult Import(
         CharacterCard character,
@@ -104,9 +105,51 @@ internal sealed class SequenceEffectService
         int multiplier = BasePlateExportPlanner.Multiplier,
         string layerName = DefaultLayerName)
     {
+        ArgumentNullException.ThrowIfNull(sourceFiles);
+        return ImportResolved(
+            character,
+            action,
+            ResolveSourceOrdinals(sourceFiles),
+            expectedFrameCount,
+            multiplier,
+            layerName);
+    }
+
+    /// <summary>
+    /// 同上，但帧号**按数组顺序**给（第 1 个文件就是第 1 帧），不看文件名。
+    ///
+    /// 这条给"从底板 PSD 读回"用：那份 PSD 的图层顺序就是帧顺序，而图层名是画的时候
+    /// 随手起的（PS 自己会起 <c>xxx 副本 5</c> 这种），从名字里根本读不出帧号。
+    /// 文件名和帧号解耦之后，中间那批暂存 PNG 就可以随便命名。
+    /// </summary>
+    public SequenceEffectImportResult ImportInOrder(
+        CharacterCard character,
+        SequenceFrameAction action,
+        IReadOnlyList<string> orderedSourceFiles,
+        int expectedFrameCount,
+        int multiplier = BasePlateExportPlanner.Multiplier,
+        string layerName = DefaultLayerName)
+    {
+        ArgumentNullException.ThrowIfNull(orderedSourceFiles);
+        return ImportResolved(
+            character,
+            action,
+            orderedSourceFiles.Select((file, index) => (File: file, Ordinal: index + 1)),
+            expectedFrameCount,
+            multiplier,
+            layerName);
+    }
+
+    private SequenceEffectImportResult ImportResolved(
+        CharacterCard character,
+        SequenceFrameAction action,
+        IEnumerable<(string File, int Ordinal)> resolvedSources,
+        int expectedFrameCount,
+        int multiplier,
+        string layerName)
+    {
         ArgumentNullException.ThrowIfNull(character);
         ArgumentNullException.ThrowIfNull(action);
-        ArgumentNullException.ThrowIfNull(sourceFiles);
         if (expectedFrameCount <= 0)
         {
             throw new InvalidOperationException("这个动作没有帧，算不出特效该有多少张。");
@@ -119,7 +162,7 @@ internal sealed class SequenceEffectService
 
         var imported = 0;
         var ignored = 0;
-        foreach (var (file, ordinal) in ResolveSourceOrdinals(sourceFiles))
+        foreach (var (file, ordinal) in resolvedSources)
         {
             if (ordinal > expectedFrameCount)
             {

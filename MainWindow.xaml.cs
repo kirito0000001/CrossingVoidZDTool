@@ -130,6 +130,9 @@ namespace CrossingVoidZDTool
             // 工具条那排放不下更多按钮了：导出收成一个「导出 ▾」，菜单内容由
             // `SequenceExportMenu` 这份清单决定（加新导出不用动 XAML）。
             BuildSequenceExportMenu();
+            // 「导入特效帧」同理收成一个带 ▾ 的按钮：第一条是「从底板 PSD 读回」，
+            // 第二条是老的"选文件夹"。菜单在壳里按 `SequenceEffectImportMenu` 这份清单建。
+            BuildSequenceEffectImportMenu();
             // 工具集：选目录/选文件/起进程由壳提供，流程在 AtlasToolViewModel 里。
             _applicationViewModel.AtlasTools.AttachHost(this);
             // C6b：角色详情那五个按钮的命令。流程在 CharacterDetailActionController 里，
@@ -175,6 +178,8 @@ namespace CrossingVoidZDTool
             {
                 MarkLastEditedModule(ToolboxModuleKey.SequenceFrames);
                 PersistCurrentCharacterSelection();
+                // 帧清单变了（增删 / 替换 / 改帧率）→ 特效层该有多少张、每格对应哪一张也跟着变。
+                RefreshSequenceEffectLayerIfEditorOpen();
             };
             _applicationViewModel.Buffs.BuffsEdited += (_, _) => ScheduleBuffsSave();
             Settings.AuxiliaryDisplayChanged += (_, _) => UpdateAuxiliaryDisplayVisibility();

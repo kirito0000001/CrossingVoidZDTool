@@ -60,7 +60,8 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         OnPropertyChanged(nameof(PickEditorFrameFromCollectionCommand));
         OnPropertyChanged(nameof(ExportAtlasCommand));
         OnPropertyChanged(nameof(ExportBasePlatesCommand));
-        OnPropertyChanged(nameof(ImportEffectFramesCommand));
+        OnPropertyChanged(nameof(ImportEffectFramesFromPsdCommand));
+        OnPropertyChanged(nameof(ImportEffectFramesFromFolderCommand));
         OnPropertyChanged(nameof(OpenEffectFolderCommand));
         OnPropertyChanged(nameof(ClearEffectLayerCommand));
         OnPropertyChanged(nameof(ConfirmDuplicateResolutionCommand));
@@ -183,9 +184,19 @@ internal sealed class SequenceFramesViewModel : ObservableObject
     public IReadOnlyList<(SequenceExportMenuItem Item, System.Windows.Input.ICommand Command)> ExportMenuActions =>
         _commands?.ExportMenuActions ?? [];
 
+    /// <summary>
+    /// 「导入特效帧」按钮的菜单内容（第一条 = 从底板 PSD 读回，第二条 = 选文件夹）。
+    /// 和导出菜单同一套：清单是纯函数，命令在这里配一次，壳把这份数据变成菜单项 ——
+    /// **菜单本体也在壳里建**，因为 `MainWindow.xaml` 的行数顶在棘轮上限上了。
+    /// </summary>
+    public IReadOnlyList<(SequenceEffectImportMenuItem Item, System.Windows.Input.ICommand Command)> EffectImportMenuActions =>
+        _commands?.EffectImportMenuActions ?? [];
+
     // ── 特效层 ────────────────────────────────────────────────────────────
     // 命令之外还有一份**状态**（当前动作的特效层），壳在打开编辑器 / 导入 / 清空后往里塞。
-    public AsyncRelayCommand? ImportEffectFramesCommand => _commands?.ImportEffectFramesCommand;
+    public AsyncRelayCommand? ImportEffectFramesFromPsdCommand => _commands?.ImportEffectFramesFromPsdCommand;
+
+    public AsyncRelayCommand? ImportEffectFramesFromFolderCommand => _commands?.ImportEffectFramesFromFolderCommand;
 
     public RelayCommand? OpenEffectFolderCommand => _commands?.OpenEffectFolderCommand;
 
@@ -217,11 +228,27 @@ internal sealed class SequenceFramesViewModel : ObservableObject
     public bool ShowEffectLayer
     {
         get => _showEffectLayer;
-        set => SetProperty(ref _showEffectLayer, value);
+        set
+        {
+            if (SetProperty(ref _showEffectLayer, value))
+            {
+                // 这个开关现在管两件事：预览要不要叠特效，以及**时间轴要不要按特效帧展开**
+                // （展开后每格 = 一张特效帧，点哪一张就停在那一张）。
+                // 所以切换之后要重建时间轴，并把"能不能拖动排序"一起改掉。
+                RebuildTimelineFrames();
+                OnPropertyChanged(nameof(CanReorderTimeline));
+                OnPropertyChanged(nameof(TimelineHintText));
+            }
+        }
     }
 
     /// <summary>壳在打开编辑器 / 导入 / 清空之后调用；传 null 表示这一层现在是空的。</summary>
-    public void SetEffectLayer(SequenceEffectLayer? layer) => EffectLayer = layer;
+    public void SetEffectLayer(SequenceEffectLayer? layer)
+    {
+        EffectLayer = layer;
+        // 特效层换了（导入 / 清空 / 换动作），展开出来的那批小格也要跟着换图。
+        RebuildTimelineFrames();
+    }
 
     public AsyncRelayCommand? ConfirmDuplicateResolutionCommand => _commands?.ConfirmDuplicateResolutionCommand;
 
@@ -315,6 +342,77 @@ internal sealed class SequenceFramesViewModel : ObservableObject
     public ObservableCollection<SequenceFrameItem> PreviewFrames { get; } = [];
 
     public ObservableCollection<SequenceFrameItem> SelectedSectionFrames { get; } = [];
+
+    /// <summary>
+    /// 时间轴真正绑定的那一份列表。
+    ///
+    /// 「预览叠特效」关着时它就是 <see cref="SelectedSectionFrames"/>（一格 = 一个动作帧）；
+    /// 开着时**按特效帧展开**：每个动作帧摊成"格数 × 倍数"格，每格固定 1 格、图是那一张特效帧
+    /// （A 一格 → A A；B 两格 → B B B B，和导出底板的张数一一对应）。
+    /// 展开出来的格只拿来看：拖动排序会被禁掉，编辑动作由壳层换算回真实帧再执行。
+    /// </summary>
+    public ObservableCollection<SequenceFrameItem> TimelineFrames { get; } = [];
+
+    /// <summary>时间轴还能不能拖动排序（展开成特效帧时不能 —— 那些格子不对应清单里的帧）。</summary>
+    public bool CanReorderTimeline => !_showEffectLayer;
+
+    public string TimelineHintText => _showEffectLayer
+        ? "按特效帧展开（点一张看那一张）"
+        : "拖动帧块排序";
+
+    /// <summary>
+    /// 按当前开关重建时间轴列表。特效层没导入时照样展开 —— 展开出来的会是"空帧"格，
+    /// 正好让人看见"这个动作该画多少张、还差哪几张"。
+    ///
+    /// **多轨道的接缝就在这里**：现在只有角色帧和特效层两条来源，往后加音效/伤害这些轨道，
+    /// 就是往这条时间轴上再并一份"一格一份"的列表（每条轨道各自决定一格多宽、一张什么图），
+    /// 播放头统一按时间推进 —— 别把新轨道的格子直接塞进 <see cref="SelectedSectionFrames"/>。
+    /// </summary>
+    public void RebuildTimelineFrames()
+    {
+        TimelineFrames.Clear();
+        if (!_showEffectLayer)
+        {
+            foreach (var frame in SelectedSectionFrames)
+            {
+                TimelineFrames.Add(frame);
+            }
+
+            return;
+        }
+
+        var multiplier = Math.Max(1, EffectLayer?.Multiplier ?? BasePlateExportPlanner.Multiplier);
+        var ordinal = 0;
+        foreach (var frame in SelectedSectionFrames)
+        {
+            var slots = Math.Max(1, frame.DurationFrames) * multiplier;
+            for (var sub = 0; sub < slots; sub++)
+            {
+                ordinal++;
+                TimelineFrames.Add(BuildEffectSlot(frame, sub, ordinal));
+            }
+        }
+    }
+
+    /// <summary>
+    /// 造一格"特效帧展开格"：身份借原帧、图换成那一张特效帧、时长固定 1 格。
+    /// 那一张还没画（或整张透明）就是空帧 —— 界面上显示"空白帧"，同步到虚幻是空关键帧。
+    /// </summary>
+    private SequenceFrameItem BuildEffectSlot(SequenceFrameItem frame, int subIndex, int ordinal)
+    {
+        var effectFrame = EffectLayer?.Frames.FirstOrDefault(item => item.Ordinal == ordinal);
+        var isBlank = effectFrame is null || effectFrame.IsEmpty;
+        return frame with
+        {
+            FilePath = isBlank ? string.Empty : effectFrame!.FilePath,
+            FileUri = isBlank ? string.Empty : new Uri(effectFrame!.FilePath).AbsoluteUri,
+            FileName = isBlank ? "（空帧）" : effectFrame!.FileName,
+            DurationFrames = 1,
+            IsBlank = isBlank,
+            ExpandedFrom = frame,
+            EffectSubIndex = subIndex
+        };
+    }
 
     public ObservableCollection<SequenceFrameCollectionItem> CollectionItems { get; } = [];
 
@@ -869,6 +967,7 @@ internal sealed class SequenceFramesViewModel : ObservableObject
             SelectedSectionFrames.Add(frame);
         }
 
+        RebuildTimelineFrames();
         SelectedEditorFrame = SelectedSectionFrames.FirstOrDefault();
         RefreshAvailableVoices();
         OnPropertyChanged(nameof(EditorSequenceSummary));
@@ -1435,6 +1534,10 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         SelectedSection = updatedSection;
         SynchronizeFrameCollection(PreviewFrames, orderedFrames);
         SynchronizeFrameCollection(SelectedSectionFrames, orderedFrames);
+        // 展开模式下时间轴不是 SelectedSectionFrames 本身，而是按特效帧摊开的另一份列表：
+        // 增删/替换/改帧率都会让"每帧占几格"变掉，所以这里必须跟着重建一次，
+        // 否则时间轴上留着的还是改动前那批格子（张数、对应的特效图全对不上）。
+        RebuildTimelineFrames();
         _previewIndex = orderedFrames.Count == 0
             ? 0
             : Math.Clamp(selectedIndex - 1, 0, orderedFrames.Count - 1);

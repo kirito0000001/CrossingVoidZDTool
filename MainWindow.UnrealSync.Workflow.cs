@@ -50,6 +50,12 @@ namespace CrossingVoidZDTool
                 case 6:
                     await ReloadUnrealBlueprintSetupStepAsync(sync);
                     break;
+                case 7:
+                    // 第七步「特效同步」：**只做工具箱侧的事** —— 打网格 sheet + 建特效计划。
+                    // 它不需要 Unreal 的全量导出：特效该有几张、网格几×几都来自工作区的特效帧目录，
+                    // 所以这一步**不会**像第五步那样把整条序列的帧全打开一遍（用户明确要求省掉那一步）。
+                    await ReloadUnrealEffectSyncStepAsync(sync);
+                    break;
             }
         }
 

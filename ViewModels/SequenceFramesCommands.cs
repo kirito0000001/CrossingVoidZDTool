@@ -103,8 +103,11 @@ internal interface ISequenceFramesCommandHost
     Task ExportBasePlatesAsync();
 
     // 特效层（和动作走同一条链路：导入 → 两层预览 → 并进第五步同步）。
-    /// <summary>「导入特效帧」：把画好的特效帧导进当前动作的特效层（选文件在壳里）。</summary>
-    Task ImportEffectFramesAsync();
+    /// <summary>「导入特效帧 → 从底板 PSD 读回」：读导出底板那份多图层 PSD，按图层顺序当帧。</summary>
+    Task ImportEffectFramesFromPsdAsync();
+
+    /// <summary>「导入特效帧 → 选择文件夹」：挑一个装满 PNG 的目录，帧号取文件名末尾数字。</summary>
+    Task ImportEffectFramesFromFolderAsync();
 
     /// <summary>「打开特效目录」：用资源管理器打开当前动作的特效层目录。</summary>
     void OpenEffectFolder();
@@ -251,29 +254,31 @@ internal sealed class SequenceFramesCommands(ISequenceFramesCommandHost host)
     {
         if (parameter is SequenceFrameItem frame)
         {
-            host.SelectReuseGroup(frame);
+            // 时间轴上右键的可能是"按特效帧展开出来的格"——编辑动作一律回到真实帧上，
+            // 不然会去操作一个不在清单里的假帧（展开格的 FilePath 指向的是特效图）。
+            host.SelectReuseGroup(frame.SourceFrame);
         }
     });
 
     // S1 收尾：时间轴右键菜单 + 帧合集右键菜单。
     public AsyncRelayCommand ReplaceFrameMenuItemCommand { get; } = new(parameter =>
-        parameter is SequenceFrameItem frame ? host.ReplaceFrameFromMenuAsync(frame) : Task.CompletedTask);
+        parameter is SequenceFrameItem frame ? host.ReplaceFrameFromMenuAsync(frame.SourceFrame) : Task.CompletedTask);
 
     public AsyncRelayCommand CopyFrameMenuItemCommand { get; } = new(parameter =>
-        parameter is SequenceFrameItem frame ? host.CopyFrameFromMenuAsync(frame) : Task.CompletedTask);
+        parameter is SequenceFrameItem frame ? host.CopyFrameFromMenuAsync(frame.SourceFrame) : Task.CompletedTask);
 
     public AsyncRelayCommand InsertBlankBeforeMenuItemCommand { get; } = new(parameter =>
         parameter is SequenceFrameItem frame
-            ? host.InsertBlankFrameAtFrameAsync(frame, before: true)
+            ? host.InsertBlankFrameAtFrameAsync(frame.SourceFrame, before: true)
             : Task.CompletedTask);
 
     public AsyncRelayCommand InsertBlankAfterMenuItemCommand { get; } = new(parameter =>
         parameter is SequenceFrameItem frame
-            ? host.InsertBlankFrameAtFrameAsync(frame, before: false)
+            ? host.InsertBlankFrameAtFrameAsync(frame.SourceFrame, before: false)
             : Task.CompletedTask);
 
     public AsyncRelayCommand DeleteFrameMenuItemCommand { get; } = new(parameter =>
-        parameter is SequenceFrameItem frame ? host.DeleteFrameFromMenuAsync(frame) : Task.CompletedTask);
+        parameter is SequenceFrameItem frame ? host.DeleteFrameFromMenuAsync(frame.SourceFrame) : Task.CompletedTask);
 
     public RelayCommand ResolveDuplicatesMenuItemCommand { get; } = new(parameter =>
     {
@@ -306,7 +311,11 @@ internal sealed class SequenceFramesCommands(ISequenceFramesCommandHost host)
 
     public AsyncRelayCommand ExportBasePlatesCommand { get; } = new((object? _) => host.ExportBasePlatesAsync());
 
-    public AsyncRelayCommand ImportEffectFramesCommand { get; } = new((object? _) => host.ImportEffectFramesAsync());
+    public AsyncRelayCommand ImportEffectFramesFromPsdCommand { get; } =
+        new((object? _) => host.ImportEffectFramesFromPsdAsync());
+
+    public AsyncRelayCommand ImportEffectFramesFromFolderCommand { get; } =
+        new((object? _) => host.ImportEffectFramesFromFolderAsync());
 
     public RelayCommand OpenEffectFolderCommand { get; } = new(_ => host.OpenEffectFolder());
 
@@ -330,6 +339,29 @@ internal sealed class SequenceFramesCommands(ISequenceFramesCommandHost host)
                         nameof(item),
                         item.Action,
                         "导出菜单里出现没有配命令的项。")
+                }))
+            .ToArray();
+
+    /// <summary>
+    /// 「导入特效帧」按钮的菜单内容：清单来自 <see cref="SequenceEffectImportMenu.Build"/>（纯函数），
+    /// 命令在这里配一次。壳只负责把这份数据变成 <c>MenuFlyoutItem</c> —— 菜单本体也是在壳里按
+    /// 这份清单建的，所以**加一条特效来源不用动 XAML**（`MainWindow.xaml` 顶在行数棘轮上了）。
+    ///
+    /// 加来源的第三处就在这个 switch 里 —— 清单加一条、这里加一个分支。
+    /// </summary>
+    public IReadOnlyList<(SequenceEffectImportMenuItem Item, System.Windows.Input.ICommand Command)> EffectImportMenuActions =>
+        SequenceEffectImportMenu.Build()
+            .Select(item => (
+                item,
+                item.Source switch
+                {
+                    SequenceEffectImportSource.BasePlatePsd =>
+                        (System.Windows.Input.ICommand)ImportEffectFramesFromPsdCommand,
+                    SequenceEffectImportSource.Folder => ImportEffectFramesFromFolderCommand,
+                    _ => throw new ArgumentOutOfRangeException(
+                        nameof(item),
+                        item.Source,
+                        "导入特效帧菜单里出现没有配命令的项。")
                 }))
             .ToArray();
 

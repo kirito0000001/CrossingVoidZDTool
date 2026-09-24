@@ -390,6 +390,20 @@ namespace CrossingVoidZDTool
         /// <summary>UI 冒烟用：切到 St5 序列帧页（走壳自己的导航，不模拟点菜单）。</summary>
         internal void UiSmokeShowSt5Page() => ShowSt5SequenceFramesPage();
 
+        /// <summary>
+        /// 冒烟用：把"播放推进到哪一帧 / 时间轴选中哪一格"倒成一行。
+        /// 用户报过"播放时绿条不动"，这一行就是当时缺的那份证据。
+        /// </summary>
+        internal string UiSmokeDescribeSequencePlaybackState()
+        {
+            var frames = _applicationViewModel.SequenceFrames;
+            var current = frames.CurrentPreviewFrame;
+            var selected = SequenceFrameTimelineListView.SelectedItem as SequenceFrameItem;
+            return $"playing={frames.IsPreviewing};当前帧={current?.Index.ToString() ?? "-"};" +
+                   $"时间轴项={frames.TimelineFrames.Count};选中={selected?.Index.ToString() ?? "-"}/第{selected?.EffectSubIndex.ToString() ?? "-"}张;" +
+                   $"编辑器播放={_isSequenceEditorPreviewPlayback}";
+        }
+
         void ISequenceFramesCommandHost.ShowSequenceFrameManager(SequenceFrameSection section) =>
             ShowSequenceFrameManager(section);
 
@@ -596,6 +610,8 @@ namespace CrossingVoidZDTool
 
                 UpdateSequencePreviewInterval();
                 PlayCurrentSequenceFrameVoice();
+                // 播放交给特效层的定时器：把"点住某一格"的固定放开，否则画面会卡在那一张。
+                _sequenceEffectPinnedSlot = null;
                 _sequencePreviewTimer.Start();
                 // 特效层比角色层快"倍数"倍，所以在它自己的节拍上推进。
                 StartSequenceEffectSubFrameTimer();
@@ -1253,6 +1269,9 @@ namespace CrossingVoidZDTool
             {
                 StopSequencePreview();
                 _applicationViewModel.SequenceFrames.SelectEditorFrame(frameToView);
+                // 点的是"展开出来的特效帧格"时，把这张**固定住**：预览停在那一张上，
+                // 而不是回到这一格的第一张（不然展开成两倍也看不全）。
+                PinSequenceEffectSlot(frameToView);
                 SynchronizeSequenceFrameVoiceSelection();
                 TryUpdateSequencePreviewImageSource();
                 UpdateSequencePreviewInterval();
@@ -1266,8 +1285,19 @@ namespace CrossingVoidZDTool
         {
             if (_isSelectingSequenceFrameCopyTarget && e.ClickedItem is SequenceFrameItem afterFrame)
             {
-                await DuplicatePendingSequenceFramesAfterAsync(afterFrame);
+                await DuplicatePendingSequenceFramesAfterAsync(afterFrame.SourceFrame);
             }
+        }
+
+        /// <summary>
+        /// 把时间轴上点中的那格（可能是"展开出来的特效帧格"）换算成真实帧，
+        /// 并记下"要固定看这一格的第几张特效帧"。
+        /// </summary>
+        private void PinSequenceEffectSlot(SequenceFrameItem clicked)
+        {
+            _sequenceEffectPinnedSlot = clicked.IsEffectSlot
+                ? (clicked.SourceFrame.Index, clicked.EffectSubIndex)
+                : null;
         }
 
         private void SynchronizeSequenceTimelineSelectionToCurrentFrame()
@@ -1286,8 +1316,14 @@ namespace CrossingVoidZDTool
                 _isSynchronizingSequenceFrameSelection = true;
                 try
                 {
-                    SequenceFrameTimelineListView.SelectedItem = currentFrame;
-                    SequenceFrameTimelineListView.ScrollIntoView(currentFrame);
+                    // 展开模式下时间轴里没有"真实帧"这一项，只有一堆展开格 ——
+                    // 所以按（帧序号 + 现在该看第几张）找回对应的那一格；没展开时就是它自己。
+                    // 第几张和预览显示的那一张**同一个来源**：播放时高亮会跟着特效层一格一格走。
+                    var target = ResolveTimelineItem(
+                        currentFrame,
+                        ResolveSequenceEffectSubFrameOfCurrentFrame(currentFrame));
+                    SequenceFrameTimelineListView.SelectedItem = target;
+                    SequenceFrameTimelineListView.ScrollIntoView(target);
                 }
                 finally
                 {
@@ -1324,8 +1360,37 @@ namespace CrossingVoidZDTool
         {
             return SequenceFrameTimelineListView.SelectedItems
                 .OfType<SequenceFrameItem>()
+                // 「预览叠特效」开着时时间轴是按特效帧展开的：一个动作帧占好几格。
+                // 编辑动作（删除/复制/插入）只认真实帧，所以这里先换算回去再去重。
+                .Select(item => item.SourceFrame)
+                .Distinct()
                 .OrderBy(frame => frame.Index)
                 .ToList();
+        }
+
+        /// <summary>
+        /// 真实帧 → 时间轴里对应的**那一项**：没展开时就是它自己；展开时是"这一帧 + 看第几张"
+        /// 对应的那一格。
+        ///
+        /// **按帧序号认，不按引用认。** 预览用的那批帧和清单里的那批帧是两套实例
+        /// （<see cref="SequenceFramesViewModel.SelectSectionForManagement"/> 里的语音同步分析会
+        /// 用 `with` 造一份新的，两个集合各拿一份），认引用的话：播放推进时算出来的目标根本不在
+        /// 时间轴里，`SelectedItem` 等于赋了一个不存在的项 —— 选中永远不动，而**点击**却正常
+        /// （点的那一项本来就是时间轴里的实例）。这就是"绿条不跟着播放走"的根因。
+        /// </summary>
+        /// <param name="effectSubIndex">
+        /// 展开模式下要看这一帧的第几张；不传就按"钉住的那张、否则第一张"。
+        /// </param>
+        private SequenceFrameItem ResolveTimelineItem(SequenceFrameItem frame, int? effectSubIndex = null)
+        {
+            var slots = _applicationViewModel.SequenceFrames.TimelineFrames;
+            var subIndex = effectSubIndex
+                ?? (_sequenceEffectPinnedSlot is { } pinned && pinned.FrameIndex == frame.Index
+                    ? pinned.SubIndex
+                    : 0);
+            return slots.FirstOrDefault(item => item.Index == frame.Index && item.EffectSubIndex == subIndex)
+                   ?? slots.FirstOrDefault(item => item.Index == frame.Index)
+                   ?? frame;
         }
 
         private void SelectSequenceTimelineFrames(IEnumerable<int> frameIndexes)
@@ -1341,7 +1406,8 @@ namespace CrossingVoidZDTool
                 SequenceFrameTimelineListView.SelectedItems.Clear();
                 foreach (var frame in frames)
                 {
-                    SequenceFrameTimelineListView.SelectedItems.Add(frame);
+                    // 展开模式下时间轴里装的是展开格，不是真实帧 —— 换算一下再选。
+                    SequenceFrameTimelineListView.SelectedItems.Add(ResolveTimelineItem(frame));
                 }
             }
             finally
