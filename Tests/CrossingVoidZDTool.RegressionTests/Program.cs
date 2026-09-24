@@ -8205,11 +8205,18 @@ static void WorkflowStateIsIsolatedPerCharacter()
         var kiritoCache = UnrealSyncSessionCacheService.GetCacheFolderPath(kirito);
         AssertEqual(true, Directory.Exists(misakaCache));
         AssertEqual(true, Directory.Exists(kiritoCache));
-        AssertEqual(true, Directory.GetFiles(misakaCache, "*step6*.json").Length == 1);
-        AssertEqual(true, Directory.GetFiles(kiritoCache, "*step4*.json").Length == 1);
+        // 角色目录下有**两类**分步文件，别用 `*step4*.json` 一把捞：
+        //   1) 同步台的分步进度缓存：sync-<项目键>-step<N>.json
+        //   2) 各步自己的小缓存：    step1-foundation.json / step4-light-configuration.json …
+        // 这条用例验的是(1)不串台，所以按 `sync-` 前缀取；(2) 单独在下面验。
+        AssertEqual(true, Directory.GetFiles(misakaCache, "sync-*step6*.json").Length == 1);
+        AssertEqual(true, Directory.GetFiles(kiritoCache, "sync-*step4*.json").Length == 1);
         // 御坂的目录里不该出现桐人那一步的文件，反之亦然
-        AssertEqual(0, Directory.GetFiles(misakaCache, "*step4*.json").Length);
-        AssertEqual(0, Directory.GetFiles(kiritoCache, "*step6*.json").Length);
+        AssertEqual(0, Directory.GetFiles(misakaCache, "sync-*step4*.json").Length);
+        AssertEqual(0, Directory.GetFiles(kiritoCache, "sync-*step6*.json").Length);
+        // 各步自己的小缓存同样只落在跑过那一步的角色目录里
+        AssertEqual(1, Directory.GetFiles(kiritoCache, "step4-light-configuration.json").Length);
+        AssertEqual(0, Directory.GetFiles(misakaCache, "step4-light-configuration.json").Length);
 
         // 切回御坂：第六步的结果要能从它自己的缓存恢复回来
         viewModel.SelectSource(SourceOf(misaka));

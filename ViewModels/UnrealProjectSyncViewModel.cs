@@ -43,7 +43,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     private bool _canSync;
     private string _sourceSearchText = string.Empty;
     private UnrealSyncSourceItem? _selectedSource;
-    private UnrealSyncPublishStageItem? _selectedPublishStage;
     /// <summary>
     /// 第二步有没有可用数据。
     ///
@@ -162,25 +161,8 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     private int _detectionRenamedCount;
     private int _detectionConflictCount;
     private int _detectionDeletedCount;
-    private List<UnrealLightConfigurationResultItem> _lastLightConfigurationItems = [];
-    public bool IsLightConfigurationLoaded
-    {
-        get => _stepLoads.IsLoaded(4);
-        private set
-        {
-            if (!_stepLoads.SetLoaded(4, value))
-            {
-                return;
-            }
-
-            OnPropertyChanged(nameof(IsLightConfigurationLoaded));
-            NotifyDerived(UnrealSyncDerivedNotifications.LightConfigurationLoaded);
-            NotifyWorkspaceStateChanged();
-        }
-    }
-    private bool _isApplyingLightConfiguration;
-    private string _lightConfigurationResultMessage = string.Empty;
-    private string _publishFilter = "全部";
+    // ── 第四步「基础配置」的状态搬到了 UnrealProjectSyncViewModel.Step4LightConfiguration.cs ──
+    // ── 第三步「同步素材」的发布过滤器（PublishFilter / ApplyPublishFilter）搬到了 Step3PublishSelection.cs ──
     /// <summary>
     /// 当前步号。
     ///
@@ -235,62 +217,18 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
 
     public ObservableCollection<UnrealSyncSourceItem> CharacterSources { get; } = [];
 
-    public ObservableCollection<UnrealSyncPublishStageItem> PublishStages { get; } =
-    [
-        new(UnrealBridgePublishStage.CharacterMaterials, "1. 导入素材", "角色目录内的图片和声音", true),
-        new(UnrealBridgePublishStage.ItemData, "2. 同步 Item 数据", "更新 Item 蓝图中的工具箱管理字段", false),
-        new(UnrealBridgePublishStage.ZdAnimationTracks, "3. 同步 ZD 动画轨道", "合并基础序列、AnimMaps 引用和保留通知", false),
-        new(UnrealBridgePublishStage.Buffs, "4. 同步 BUFF", "更新 BUFF 数据和个人 BUFF 素材", false),
-        new(UnrealBridgePublishStage.CharacterBlueprint, "5. 同步 Character 蓝图数据", "更新 Character 蓝图白名单字段", false)
-    ];
-
-    public ObservableCollection<UnrealSyncSelectionTreeItem> SelectionTreeRoots { get; } = [];
-    public ObservableCollection<UnrealLightConfigurationViewItem> LightConfigurationItems { get; } = [];
+    // ── 第四步的 LightConfigurationItems 也搬到了 Step4LightConfiguration.cs ──
     // ── 第一步「底层检测」的状态与逻辑都搬到了 UnrealProjectSyncViewModel.Step1Foundation.cs ──
-    public ObservableCollection<string> PublishFilterOptions { get; } = ["全部", "待重定向", "可同步", "冲突"];
-
-    public string PublishFilter
-    {
-        get => _publishFilter;
-        set
-        {
-            if (SetProperty(ref _publishFilter, value))
-            {
-                ApplyPublishFilter();
-            }
-        }
-    }
-
-    public int PendingRedirectCount => SelectionTreeRoots.SelectMany(root => root.Children)
-        .Count(item => item.IsChecked == true && item.Change is not null &&
-            item.Change.Kind != UnrealBridgeChangeKind.Conflict && !CanExecutePublishChange(item.Change));
-
-    public int PublishConflictCount => SelectionTreeRoots.SelectMany(root => root.Children)
-        .Count(item => item.IsChecked == true && item.Change?.Kind == UnrealBridgeChangeKind.Conflict);
-
-    public int ReadyPublishCount => SelectionTreeRoots.SelectMany(root => root.Children)
-        .Count(item => item.IsChecked == true && item.Change is not null && CanExecutePublishChange(item.Change));
-
-    public string ReadyPublishText => $"可同步：{ReadyPublishCount}";
-    public string PendingRedirectText => $"待重定向：{PendingRedirectCount}";
-    public string PublishConflictText => $"冲突：{PublishConflictCount}";
+    // ── 第三步「同步素材」的发布阶段 / 差异树 / 计数搬到了 Step3PublishSelection.cs ──
 
     // ── 第二步「规整素材」的状态搬到了 UnrealProjectSyncViewModel.Step2Normalization.cs ──
     public bool IsDetectionWorkspace => !IsNormalizationWorkspace;
-    public bool IsLightConfigurationWorkspace => !IsEngineToToolbox && WorkflowStep == 4;
     /// <summary>
     /// 第五步「序列同步」和第七步「特效同步」共用同一块工作区（差异列表 / 同步按钮同构），
     /// 区别只在计划来源（`BuildSequenceSyncPlan` vs `BuildEffectSyncPlan`）。
     /// </summary>
     public bool IsSequenceSynchronizationWorkspace =>
         !IsEngineToToolbox && WorkflowStep is 5 or 7;
-    public Visibility LightConfigurationWorkspaceVisibility =>
-        IsLightConfigurationWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-    public Visibility LightConfigurationDetailsVisibility => IsLightConfigurationWorkspace
-        ? Visibility.Visible
-        : Visibility.Collapsed;
     public Visibility SequenceSynchronizationDetailsVisibility => IsSequenceSynchronizationWorkspace
         ? Visibility.Visible
         : Visibility.Collapsed;
@@ -317,26 +255,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             _ => "查看最近一次同步执行结果。"
         };
 
-    public int LightConfigurationPendingCount => _lastLightConfigurationItems.Count(item =>
-        item.Status == UnrealLightConfigurationStatus.Pending);
-    public int LightConfigurationErrorCount => _lastLightConfigurationItems.Count(item =>
-        item.Status == UnrealLightConfigurationStatus.Error);
-    public int LightConfigurationUnchangedCount => _lastLightConfigurationItems.Count(item =>
-        item.Status == UnrealLightConfigurationStatus.Unchanged);
-    public int LightConfigurationSelectedCount => LightConfigurationItems.Count(item => item.IsSelected);
-    public string LightConfigurationSummaryText => !IsLightConfigurationLoaded
-        ? "尚未检测基础配置"
-        : $"共检查 {_lastLightConfigurationItems.Count} 项：无差异 {LightConfigurationUnchangedCount}，待设置 {LightConfigurationPendingCount}，错误 {LightConfigurationErrorCount}";
-    public string LightConfigurationEmptyTitle => LightConfigurationErrorCount > 0
-        ? "基础配置存在错误"
-        : "基础配置没有改动";
-    public string LightConfigurationSelectionText => $"已选择 {LightConfigurationSelectedCount} / {LightConfigurationPendingCount} 项";
-    public string LightConfigurationResultMessage => _lightConfigurationResultMessage;
-    public bool CanApplyLightConfiguration => IsLightConfigurationWorkspace &&
-        IsLightConfigurationLoaded &&
-        LightConfigurationSelectedCount > 0 &&
-        !_isApplyingLightConfiguration &&
-        IsWorkflowOperationIdle;
+    // ── 第四步「基础配置」的计数 / 文案 / 可用性也都搬到了 Step4LightConfiguration.cs ──
 
     public bool CanAdvanceWorkflow => WorkflowStep switch
     {
@@ -355,17 +274,9 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     };
 
     public bool HasPublishSelection => !IsEngineToToolbox && _importSelectedCount > 0;
-    public bool HasNoPublishChanges => !IsEngineToToolbox && WorkflowStep is 3 or 5 &&
-        HasImportDetection &&
-        _lastPublishChanges.All(change => change.Kind == UnrealBridgeChangeKind.Unchanged);
+    // ── HasNoPublishChanges / PublishActionText 搬到了 Step3PublishSelection.cs ──
     public bool CanStartPublish => HasPublishSelection &&
         !IsPublishRunning && IsWorkflowOperationIdle;
-    public string PublishActionText => WorkflowStep switch
-    {
-        5 => "同步序列到虚幻",
-        7 => "同步特效到虚幻",
-        _ => "同步到虚幻"
-    };
 
     public bool IsWorkflowOperationIdle => !IsWorkflowOperationRunning;
 
@@ -554,7 +465,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         _ => "重新加载同步结果"
     };
 
-    public Visibility WorkflowConfirmationVisibility => WorkflowStep is 3 or 5 ? Visibility.Visible : Visibility.Collapsed;
+    // ── 发布确认栏 / 选择栏的可见性见 Step3PublishSelection.cs（WorkflowNextButtonVisibility 由流程表决定，仍留这里）──
     public Visibility WorkflowNextButtonVisibility => Visibility.Visible;
     public bool WorkflowNextButtonEnabled => WorkflowStep switch
     {
@@ -568,45 +479,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         _ => WorkflowStep < 3 && CanAdvanceWorkflow && IsWorkflowOperationIdle
     };
 
-    public bool IsPublishSelectionReady
-    {
-        get
-        {
-            if (IsEngineToToolbox || !HasImportDetection)
-            {
-                return CanImportSelection;
-            }
-
-            var selected = SelectionTreeRoots.SelectMany(root => root.Children)
-                .Where(item => item.IsChecked == true && item.Change is not null)
-                .Select(item => item.Change!)
-                .ToArray();
-            if (selected.Length == 0)
-            {
-                return false;
-            }
-
-            return selected.All(change =>
-                UnrealBridgePublishSupportPolicy.CanExecute(change) ||
-                change.Kind == UnrealBridgeChangeKind.DeleteCandidate &&
-                NormalizationItems.Any(item =>
-                    item.Decision == UnrealAssetNormalizationDecision.Redirect &&
-                    string.Equals(item.UnrealObjectPath, change.UnrealItem?.SourceObjectPath, StringComparison.OrdinalIgnoreCase)));
-        }
-    }
-
-    public bool CanExecutePublishChange(UnrealBridgeChange change)
-    {
-        if (UnrealBridgePublishSupportPolicy.CanExecute(change))
-        {
-            return true;
-        }
-
-        return change.Kind == UnrealBridgeChangeKind.DeleteCandidate &&
-            NormalizationItems.Any(item =>
-                item.Decision == UnrealAssetNormalizationDecision.Redirect &&
-                string.Equals(item.UnrealObjectPath, change.UnrealItem?.SourceObjectPath, StringComparison.OrdinalIgnoreCase));
-    }
+    // ── IsPublishSelectionReady / CanExecutePublishChange 搬到了 Step3PublishSelection.cs ──
 
     public string EnginePath
     {
@@ -843,11 +716,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         private set => SetProperty(ref _canImportSelection, value);
     }
 
-    public Visibility SelectionContentVisibility =>
-        !IsNormalizationWorkspace && !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
-        !IsBlueprintSetupWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
-            ? Visibility.Visible
-            : Visibility.Collapsed;
+    // ── SelectionContentVisibility 搬到了 Step3PublishSelection.cs ──
 
     public string SourceGroupTitle => IsEngineToToolbox ? "Unreal 角色" : "已完成角色";
 
@@ -880,28 +749,6 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     public bool CanDetectSelectedSource => IsWorkflowOperationIdle && CanSync &&
         (IsEngineToToolbox || SelectedPublishStage?.IsAvailable == true) &&
         SelectedSource is { IsSharedMaterial: false };
-
-    public UnrealSyncPublishStageItem? SelectedPublishStage
-    {
-        get => _selectedPublishStage;
-        set
-        {
-            if (SetProperty(ref _selectedPublishStage, value))
-            {
-                HasImportDetection = false;
-                _loadedPublishStep = 0;
-                OnPropertyChanged(nameof(HasContentDetection));
-                OnPropertyChanged(nameof(WorkflowStep5StatusText));
-        OnPropertyChanged(nameof(WorkflowStep6StatusText));
-                SetSelectionTree([]);
-                ResetImportOperation();
-                OnPropertyChanged(nameof(PublishStageDescription));
-                SaveSessionCache();
-            }
-        }
-    }
-
-    public string PublishStageDescription => SelectedPublishStage?.DetailText ?? "请选择要执行的同步阶段。";
 
     public InfoBarSeverity StatusSeverity
     {
@@ -1327,19 +1174,29 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 return;
             }
 
-            if (step == 4 && cache.IsLightConfigurationLoaded)
+            if (step == 4)
             {
-                SetLightConfigurationResult(
-                    new UnrealLightConfigurationResult
-                    {
-                        Succeeded = true,
-                        CharacterCode = cache.SelectedCharacterCode,
-                        Items = cache.LightConfigurationItems,
-                        ErrorMessage = cache.LightConfigurationResultMessage
-                    },
-                    cache.SelectedLightConfigurationIds,
-                    selectPendingByDefault: false);
-                return;
+                // 第 4 步先读自己的小缓存（`step4-light-configuration.json`），
+                // 整体缓存只在没有小缓存时兜底（兼容搬之前留下的旧进度）。
+                if (TryApplyLightConfigurationCache(SelectedSource?.DraftCharacter))
+                {
+                    return;
+                }
+
+                if (cache.IsLightConfigurationLoaded)
+                {
+                    SetLightConfigurationResult(
+                        new UnrealLightConfigurationResult
+                        {
+                            Succeeded = true,
+                            CharacterCode = cache.SelectedCharacterCode,
+                            Items = cache.LightConfigurationItems,
+                            ErrorMessage = cache.LightConfigurationResultMessage
+                        },
+                        cache.SelectedLightConfigurationIds,
+                        selectPendingByDefault: false);
+                    return;
+                }
             }
 
             if (step is 3 or 5 && cache.IsPublishDetection)
@@ -1435,34 +1292,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         return true;
     }
 
-    public void SetSelectionTree(IEnumerable<UnrealSyncSelectionTreeItem> roots)
-    {
-        foreach (var root in SelectionTreeRoots)
-        {
-            root.GroupSelectionChanged -= SelectionGroup_GroupSelectionChanged;
-        }
-        foreach (var child in SelectionTreeRoots.SelectMany(root => root.Children))
-        {
-            child.PropertyChanged -= ImportSelectionItem_PropertyChanged;
-        }
-
-        SelectionTreeRoots.Clear();
-        _selectionParents.Clear();
-        foreach (var root in roots)
-        {
-            SelectionTreeRoots.Add(root);
-            root.GroupSelectionChanged += SelectionGroup_GroupSelectionChanged;
-            foreach (var child in root.Children)
-            {
-                _selectionParents[child] = root;
-                child.PropertyChanged += ImportSelectionItem_PropertyChanged;
-            }
-        }
-
-        OnPropertyChanged(nameof(SelectionContentVisibility));
-        UpdateImportSelectionSummary();
-        ApplyPublishFilter();
-    }
+    // ── SetSelectionTree 搬到了 Step3PublishSelection.cs（导入方向也走它）──
 
     public void SetImportSelectionTree(
         IEnumerable<UnrealSyncSelectionTreeItem> roots,
@@ -1512,90 +1342,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         ImportResultVisibility = Visibility.Visible;
     }
 
-    public void SetPublishSelectionTree(
-        IEnumerable<UnrealSyncSelectionTreeItem> roots,
-        IReadOnlyCollection<UnrealBridgeChange>? changes = null)
-    {
-        _existingImportStableIds.Clear();
-        HasImportDetection = true;
-        // 默认按当前步骤认领这棵树。检测流程会在建完树、切到目标步骤之前
-        // 用 SetLoadedPublishStep 覆盖成真正的目标步骤；这里只是保证
-        // 视图模型单独使用时也是自洽的，不会出现「有树但没人认领」。
-        if (WorkflowStep is 3 or 5)
-        {
-            _loadedPublishStep = WorkflowStep;
-        }
-        ClearWorkspaceFailure();
-        OnPropertyChanged(nameof(HasContentDetection));
-        OnPropertyChanged(nameof(WorkflowStep5StatusText));
-        OnPropertyChanged(nameof(WorkflowStep6StatusText));
-        ImportOperationTitle = "差异检测完成";
-        ImportOperationMessage = "展开中间分类并确认本次需要同步的内容。";
-        ImportDetailVisibility = Visibility.Visible;
-        ImportResultVisibility = Visibility.Collapsed;
-        ImportResultMessage = string.Empty;
-        var rootList = roots.ToArray();
-        if (changes is not null)
-        {
-            SetPublishDetectionSummary(changes);
-        }
-        ApplyPublishDisplay(rootList);
-        SetSelectionTree(rootList);
-        _lastPublishChanges = changes?.ToList() ?? SelectionTreeRoots.SelectMany(root => root.Children)
-            .Where(item => item.Change is not null)
-            .Select(item => item.Change!)
-            .ToList();
-        OnPropertyChanged(nameof(HasNoPublishChanges));
-        OnPropertyChanged(nameof(WorkflowNextButtonEnabled));
-        OnPropertyChanged(nameof(CanStartPublish));
-        OnPropertyChanged(nameof(PublishActionText));
-        _lastContentDetectionAt = DateTimeOffset.Now;
-        OnPropertyChanged(nameof(ContentDetectionStatusText));
-        SaveSessionCache();
-    }
-
-    public async Task SetPublishSelectionTreeAsync(
-        IReadOnlyCollection<UnrealBridgeChange> changes,
-        Func<UnrealBridgeChange, bool>? canExecute = null,
-        CancellationToken cancellationToken = default,
-        bool selectPendingByDefault = true)
-    {
-        var roots = await Task.Run(
-            () => WorkflowStep == 5 || SelectedPublishStage?.Stage == UnrealBridgePublishStage.ZdAnimationTracks
-                ? UnrealSyncSelectionTreeBuilder.FromSequenceChanges(changes, canExecute, selectPendingByDefault)
-                : UnrealSyncSelectionTreeBuilder.FromChanges(changes, canExecute, selectPendingByDefault),
-            cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        SetPublishSelectionTree(roots, changes);
-    }
-
-    public IReadOnlyList<UnrealBridgeChange> FilterPublishChanges(IReadOnlyList<UnrealBridgeChange> changes)
-    {
-        // **先按当前步骤判，再按（从会话缓存恢复的）发布阶段判。**
-        //
-        // 顺序颠倒过一次，后果是：第五步跑过之后 SelectedPublishStage 停在 ZdAnimationTracks 并被持久化，
-        // 回到第三步时上面那个 `||` 立刻成立 —— 素材变更被当成序列变更过滤，整批丢掉，
-        // 界面显示"共检查 0 项 · 无差异 0 项"，真该报的新增（幻形立绘 #2 / 失败语音 #1）全被吞掉。
-        // （2026-09-24 实测，用户看到的正是这个。）
-        // 序列那一路：第五/七步，**或者**阶段明确停在"序列动画轨道"（会话缓存恢复时步骤可能还没落定，只有阶段可信）。
-        // 但**第三步除外**：那一步要的是素材，残留的序列阶段不能在这里生效。
-        if (WorkflowStep is 5 or 7 ||
-            (WorkflowStep != 3 &&
-             SelectedPublishStage?.Stage == UnrealBridgePublishStage.ZdAnimationTracks))
-        {
-            return changes.Where(change => change.Module == UnrealBridgeModule.SequenceFrames).ToArray();
-        }
-
-        if (WorkflowStep == 3 || SelectedPublishStage?.Stage == UnrealBridgePublishStage.CharacterMaterials)
-        {
-            return changes
-                .Where(change => change.Module is UnrealBridgeModule.BaseMaterials or UnrealBridgeModule.Voices)
-                .ToArray();
-        }
-
-        // 其它阶段（ItemData / Buffs / 角色蓝图…）各有自己的界面，这棵素材树不由它们过滤。
-        return [];
-    }
+    // ── SetPublishSelectionTree / SetPublishSelectionTreeAsync / FilterPublishChanges 搬到了 Step3PublishSelection.cs ──
 
     public bool MatchesCurrentPublishChanges(IReadOnlyList<UnrealBridgeChange> latestChanges)
     {
@@ -1801,118 +1548,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         ImportResultVisibility = Visibility.Visible;
     }
 
-    public void SetLightConfigurationResult(
-        UnrealLightConfigurationResult result,
-        IReadOnlySet<string>? selectedStableIds = null,
-        bool selectPendingByDefault = true)
-    {
-        ArgumentNullException.ThrowIfNull(result);
-        foreach (var item in LightConfigurationItems)
-        {
-            item.SelectionChanged -= LightConfigurationItem_SelectionChanged;
-        }
-
-        LightConfigurationItems.Clear();
-        _lastLightConfigurationItems = result.Items.Count == 0 && !result.Succeeded
-            ?
-            [
-                new UnrealLightConfigurationResultItem
-                {
-                    StableId = "configuration.execution",
-                    GroupName = "基础配置",
-                    DisplayName = "无法读取基础配置",
-                    TargetField = "Unreal Python 执行结果",
-                    SourceSummary = "第四步配置协议",
-                    Status = UnrealLightConfigurationStatus.Error,
-                    ErrorMessage = result.ErrorMessage
-                }
-            ]
-            : result.Items.ToList();
-        foreach (var source in _lastLightConfigurationItems.Where(item => item.Status != UnrealLightConfigurationStatus.Unchanged))
-        {
-            var isSelected = source.Status == UnrealLightConfigurationStatus.Pending &&
-                (selectedStableIds?.Contains(source.StableId) ?? selectPendingByDefault);
-            var item = new UnrealLightConfigurationViewItem(source, isSelected);
-            item.SelectionChanged += LightConfigurationItem_SelectionChanged;
-            LightConfigurationItems.Add(item);
-        }
-
-        IsLightConfigurationLoaded = true;
-        _lightConfigurationResultMessage = result.Succeeded
-            ? result.AppliedStableIds.Count > 0
-                ? $"已应用并验证 {result.AppliedStableIds.Count} 项配置。"
-                : "基础配置检测完成。"
-            : string.IsNullOrWhiteSpace(result.ErrorMessage)
-                ? "基础配置存在未完成项目。"
-                : result.ErrorMessage;
-        ClearWorkspaceFailure();
-        NotifyLightConfigurationChanged();
-        SaveSessionCache();
-    }
-
-    public IReadOnlySet<string> GetSelectedLightConfigurationIds() =>
-        LightConfigurationItems
-            .Where(item => item.IsSelected && item.IsSelectable)
-            .Select(item => item.StableId)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-    public void SetApplyingLightConfiguration(bool value)
-    {
-        if (_isApplyingLightConfiguration == value)
-        {
-            return;
-        }
-
-        _isApplyingLightConfiguration = value;
-        OnPropertyChanged(nameof(CanApplyLightConfiguration));
-    }
-
-    public void FailLightConfiguration(string message)
-    {
-        _lightConfigurationResultMessage = message;
-        OnPropertyChanged(nameof(LightConfigurationResultMessage));
-        SetWorkspaceFailure(message);
-    }
-
-    private void LightConfigurationItem_SelectionChanged(object? sender, EventArgs e)
-    {
-        NotifyStepSelectionChanged();
-        NotifyLightConfigurationChanged();
-        SaveSessionCache();
-    }
-
-    private void ClearLightConfigurationState()
-    {
-        foreach (var item in LightConfigurationItems)
-        {
-            item.SelectionChanged -= LightConfigurationItem_SelectionChanged;
-        }
-
-        LightConfigurationItems.Clear();
-        _lastLightConfigurationItems.Clear();
-        IsLightConfigurationLoaded = false;
-        _isApplyingLightConfiguration = false;
-        _lightConfigurationResultMessage = string.Empty;
-        NotifyLightConfigurationChanged();
-    }
-
-    private void NotifyLightConfigurationChanged()
-    {
-        OnPropertyChanged(nameof(IsLightConfigurationLoaded));
-        OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
-        OnPropertyChanged(nameof(LightConfigurationSummaryText));
-        OnPropertyChanged(nameof(LightConfigurationEmptyTitle));
-        OnPropertyChanged(nameof(LightConfigurationSelectionText));
-        OnPropertyChanged(nameof(LightConfigurationResultMessage));
-        OnPropertyChanged(nameof(LightConfigurationPendingCount));
-        OnPropertyChanged(nameof(LightConfigurationErrorCount));
-        OnPropertyChanged(nameof(LightConfigurationUnchangedCount));
-        OnPropertyChanged(nameof(LightConfigurationSelectedCount));
-        OnPropertyChanged(nameof(CanApplyLightConfiguration));
-        OnPropertyChanged(nameof(CanAdvanceWorkflow));
-        OnPropertyChanged(nameof(WorkflowStep4StatusText));
-        NotifyWorkspaceStateChanged();
-    }
+    // ── 第四步「基础配置」的检测结果落库 / 勾选 / 换步清理也都搬到了 Step4LightConfiguration.cs ──
 
     public void FailPublishOperation(string message)
     {
@@ -1941,11 +1577,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         ImportOperationMessage = message;
     }
 
-    public IReadOnlySet<string> GetSelectedStableIds() =>
-        UnrealSyncSelectionTreeBuilder.SelectedStableIds(SelectionTreeRoots);
-
-    public IReadOnlySet<string> GetSelectedGroupAndLeafStableIds() =>
-        UnrealSyncSelectionTreeBuilder.SelectedGroupAndLeafStableIds(SelectionTreeRoots);
+    // ── GetSelectedStableIds / GetSelectedGroupAndLeafStableIds 搬到了 Step3PublishSelection.cs ──
 
     private void ImportSelectionItem_PropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -2033,17 +1665,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         }
     }
 
-    /// <summary>按上一次的勾选恢复整棵树，全程只做一次汇总与写盘。</summary>
-    public void RestoreSelectionState(IReadOnlySet<string> selectedStableIds)
-    {
-        using var scope = BeginBulkSelectionUpdate();
-        foreach (var root in SelectionTreeRoots)
-        {
-            root.RestoreCheckedState(selectedStableIds);
-        }
-
-        _bulkSelectionUpdatePending = true;
-    }
+    // ── RestoreSelectionState 搬到了 Step3PublishSelection.cs ──
 
     private void SelectionGroup_GroupSelectionChanged(object? sender, EventArgs e)
     {
@@ -2169,7 +1791,9 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                     selectPendingByDefault: false);
             }
 
-            if (cache.IsLightConfigurationLoaded)
+            // 第 4 步先读自己的小缓存，整体缓存只在没有小缓存时兜底。
+            if (!TryApplyLightConfigurationCache(SelectedSource?.DraftCharacter) &&
+                cache.IsLightConfigurationLoaded)
             {
                 SetLightConfigurationResult(
                     new UnrealLightConfigurationResult
@@ -2535,15 +2159,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         }
     }
 
-    /// <summary>
-    /// 勾选状态变化后重新写一次会话缓存。SetPublishSelectionTree 保存的是重建后的默认态，
-    /// 调用方恢复用户勾选之后需要再存一次，缓存里才是真实勾选。
-    /// </summary>
-    public void SaveSelectionStateToSessionCache()
-    {
-        SaveSessionCache();
-        FlushSessionCache();
-    }
+    // ── SaveSelectionStateToSessionCache 搬到了 Step3PublishSelection.cs（FlushSessionCache 仍在这里）──
 
     public void FlushSessionCache()
     {
@@ -2628,21 +2244,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         OnPropertyChanged(nameof(PublishConflictText));
     }
 
-    private void ApplyPublishFilter()
-    {
-        foreach (var root in SelectionTreeRoots)
-        {
-            root.SetVisibleChildren(root.Children.Where(ShouldShowPublishChild));
-        }
-    }
-
-    private bool ShouldShowPublishChild(UnrealSyncSelectionTreeItem item)
-    {
-        if (IsEngineToToolbox || PublishFilter == "全部") return true;
-        if (PublishFilter == "待重定向") return item.Change is not null && item.Change.Kind != UnrealBridgeChangeKind.Conflict && !CanExecutePublishChange(item.Change);
-        if (PublishFilter == "冲突") return item.Change?.Kind == UnrealBridgeChangeKind.Conflict;
-        return item.Change is not null && CanExecutePublishChange(item.Change);
-    }
+    // ── ApplyPublishFilter / ShouldShowPublishChild 搬到了 Step3PublishSelection.cs ──
 
     private void ResetImportOperation()
     {
