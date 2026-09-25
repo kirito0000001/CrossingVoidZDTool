@@ -54,6 +54,21 @@ internal static class AtomicFileWriter
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(write);
+
+        // 目标目录不存在就先补出来。
+        //
+        // 这条以前不管：目录由各家调用方自己 `Directory.CreateDirectory`。
+        // 2026-09-24 拆同步台缓存时，那份"所有步骤共用"的会话缓存服务（它自己建目录）
+        // 被删掉，换上来的一批小缓存保存方法都只 catch 一下就 return false ——
+        // 于是**角色目录里还没有 `UnrealSync` 文件夹时，八个缓存文件一个都写不出去，
+        // 而且日志里一个字都没有**（回归里撞出来的就是 DirectoryNotFoundException）。
+        // 让写入者自己保证目录在，这类"新调用方忘了建目录"就不会再复发。
+        var folder = Path.GetDirectoryName(path);
+        if (!string.IsNullOrWhiteSpace(folder))
+        {
+            Directory.CreateDirectory(folder);
+        }
+
         var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
         try
         {

@@ -164,7 +164,8 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     public Visibility SelectionContentVisibility =>
         !IsFoundationWorkspace && !IsLightConfigurationWorkspace &&
-        !IsBlueprintSetupWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
+        !IsBlueprintSetupWorkspace && !IsEffectSyncWorkspace &&
+        WorkspaceState == UnrealSyncWorkspaceState.HasContent
             ? Visibility.Visible
             : Visibility.Collapsed;
 

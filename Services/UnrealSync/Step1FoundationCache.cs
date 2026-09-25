@@ -71,9 +71,11 @@ internal static class Step1FoundationCache
                     AppJsonSerializerContext.Default.Step1FoundationCacheDocument));
             return true;
         }
-        catch (Exception)
+        catch (Exception error)
         {
-            // 缓存写不进去不是错误：下次刷新会再写一遍。
+            // 写不进去不是错误：下次刷新会再写一遍。但**不能一声不吭** ——
+            // 这里曾经吞掉过"目录不存在"，表现是缓存一个都没落盘、日志里一个字都没有。
+            ToolboxLog.Warn($"[UnrealSync] 第 1 步缓存写入失败：{path}", error);
             return false;
         }
     }

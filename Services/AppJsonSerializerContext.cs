@@ -49,6 +49,8 @@ namespace CrossingVoidZDTool.Services;
 [JsonSerializable(typeof(Step4SequenceSyncCacheDocument))]
 // 第五步「蓝图置入」自己的小缓存（扫描出来的字段 + 勾选）。
 [JsonSerializable(typeof(Step5BlueprintSetupCacheDocument))]
+// 第六步「特效同步」自己的小缓存（特效动作清单 + 上次同步时间）。
+[JsonSerializable(typeof(Step6EffectSyncCacheDocument))]
 
 // 全局现场（引擎/工程路径、方向、角色、上次检测时间、显示开关）。
 [JsonSerializable(typeof(SessionStateCacheDocument))]

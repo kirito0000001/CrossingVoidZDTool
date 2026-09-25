@@ -1,6 +1,8 @@
+using System;
 using System.Threading.Tasks;
 using CrossingVoidZDTool.Services;
 using CrossingVoidZDTool.Services.Atlas;
+using CrossingVoidZDTool.ViewModels;
 using Microsoft.UI.Xaml.Controls;
 
 namespace CrossingVoidZDTool
@@ -17,43 +19,93 @@ namespace CrossingVoidZDTool
     /// </summary>
     public sealed partial class MainWindow
     {
-        private async Task ReloadUnrealEffectSyncStepAsync(ViewModels.UnrealProjectSyncViewModel sync)
+        /// <summary>打 sheet 这一段的进度窗口：一个动作一张图，逐张推进。</summary>
+        private const double EffectSheetProgressFloor = 6;
+        private const double EffectSheetProgressCeiling = 92;
+
+        private async Task ReloadUnrealEffectSyncStepAsync(UnrealProjectSyncViewModel sync)
         {
             var character = sync.SelectedSource?.DraftCharacter;
             if (character is null)
             {
+                ShowFloatingTip(InfoBarSeverity.Warning, "未选择已完成角色", "请先在左侧选择一个已完成角色。");
+                return;
+            }
+            if (!TryBeginUnrealWorkflowOperation())
+            {
                 return;
             }
 
-            // 1) 本地打网格 sheet：每个有特效层的动作一张（空帧用全透明图占格）。
-            var atlases = await new SequenceAtlasPackService().PackEffectSheetsAsync(
-                character,
-                Settings.AtlasPythonPath,
-                null,
-                GetGlobalProgressCancellationToken());
-
-            // 2) 本地建计划：凡是有特效层的动作都算一条（不看 Unreal 的差异树）。
-            var plan = new UnrealBridgeSequencePublishService()
-                .BuildEffectSyncPlanForAll(character, Settings.UnrealProjectPath, atlases);
-
-            foreach (var action in plan.Actions)
+            ShowGlobalProgress("检测特效同步", character.Code);
+            try
             {
-                var sheetState = string.IsNullOrEmpty(action.EffectSheetImagePath)
-                    ? "sheet 没打出来（会被跳过）"
-                    : "sheet 已就绪";
-                AppendLog(
-                    LogKind.Info,
-                    $"[St7] 特效同步 · {action.DisplayName}：{action.Frames.Count} 帧 · "
-                    + $"网格 {action.EffectColumns}×{action.EffectRows} · {sheetState} · "
-                    + $"MI={action.EffectMaterialName}");
-            }
+                sync.ReturnToWorkflowStep(6);
 
-            ShowFloatingTip(
-                InfoBarSeverity.Informational,
-                "特效同步已检测（本地）",
-                plan.Actions.Count == 0
-                    ? "这个角色没有任何动作带特效层，没有要同步的东西。"
-                    : $"{plan.Actions.Count} 个动作有特效：网格 sheet 已打好，未跑 Unreal 导出。");
+                // 阶段 1/2：本地打网格 sheet。每个有特效层的动作一张，空帧用全透明图占格。
+                //
+                // 这一段以前**一条进度都不报**（`PackEffectSheetsAsync` 明明收 `IProgress`，
+                // 调用处传的是 null）—— 打十几张 sheet 的几十秒里进度条一动不动。
+                UpdateGlobalProgress(
+                    "阶段 1/2 · 正在打包特效网格",
+                    EffectSheetProgressFloor,
+                    $"角色：{character.Code}",
+                    true);
+                var atlases = await new SequenceAtlasPackService().PackEffectSheetsAsync(
+                    character,
+                    Settings.AtlasPythonPath,
+                    new Progress<AtlasPackProgress>(state => UpdateGlobalProgress(
+                        "阶段 1/2 · 正在打包特效网格",
+                        EffectSheetProgressFloor
+                            + (EffectSheetProgressCeiling - EffectSheetProgressFloor)
+                            * (state.Stage switch
+                            {
+                                AtlasPackStage.Preparing => 0.2,
+                                AtlasPackStage.Packing => 0.6,
+                                _ => 1.0
+                            }),
+                        state.Message,
+                        true)),
+                    GetGlobalProgressCancellationToken());
+
+                // 阶段 2/2：本地建计划。凡是有特效层的动作都算一条（不看 Unreal 的差异树）。
+                UpdateGlobalProgress(
+                    "阶段 2/2 · 正在生成特效清单",
+                    EffectSheetProgressCeiling,
+                    $"已打 {atlases.Count} 张网格 sheet",
+                    true);
+                var plan = new UnrealBridgeSequencePublishService()
+                    .BuildEffectSyncPlanForAll(character, Settings.UnrealProjectPath, atlases);
+                sync.SetEffectSyncPlan(plan);
+
+                foreach (var item in sync.EffectSyncItems)
+                {
+                    AppendLog(
+                        LogKind.Info,
+                        $"[St6] 特效同步 · {item.DisplayName}：{item.FrameCount} 帧 · "
+                        + $"网格 {item.GridText} · {item.StatusText} · MI={item.MaterialName}");
+                }
+
+                CompleteGlobalProgress("特效检测完成", sync.EffectSyncSummaryText);
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            catch (OperationCanceledException ex)
+            {
+                CompleteGlobalProgress("特效检测已取消", character.Code);
+                AppendLog(LogKind.Warning, "检测特效同步已取消。", ex);
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            catch (Exception ex)
+            {
+                sync.FailEffectSync(ex.Message);
+                CompleteGlobalProgress("特效检测失败", ex.Message);
+                ShowFloatingTip(InfoBarSeverity.Error, "特效检测失败", ex.Message);
+                AppendLog(LogKind.Error, "检测特效同步失败。", ex);
+                await HideGlobalProgressAfterDelayAsync();
+            }
+            finally
+            {
+                EndUnrealWorkflowOperation();
+            }
         }
     }
 }

@@ -591,6 +591,8 @@ namespace CrossingVoidZDTool
             try
             {
                 await PreloadSequencePreviewBitmapsAsync();
+                // 特效层也要提前解码好 —— 它比角色层快"倍数"倍，现用现解会一闪一闪（见方法上的注释）。
+                await PreloadSequenceEffectBitmapsAsync();
                 _isSequenceEditorPreviewPlayback = isEditorPlayback;
                 if (isEditorPlayback)
                 {
@@ -1744,6 +1746,9 @@ namespace CrossingVoidZDTool
             if (!_applicationViewModel.SequenceFrames.IsPreviewing)
             {
                 sender.Stop();
+                // 特效层有**自己那只**定时器，角色层停下来它也得停 ——
+                // 否则角色画面停在最后一帧、特效还在自顾自地闪。
+                StopSequenceEffectSubFrameTimer();
             }
         }
 

@@ -2528,6 +2528,60 @@
                                     </ScrollViewer>
                                     <ScrollViewer
                                         Grid.Row="1"
+                                        Padding="0,0,6,0"
+                                        HorizontalScrollBarVisibility="Disabled"
+                                        VerticalScrollBarVisibility="Auto"
+                                        Visibility="{Binding UnrealProjectSync.EffectSyncWorkspaceVisibility, Mode=OneWay}">
+                                        <StackPanel Spacing="10">
+                                            <Grid ColumnSpacing="8">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="Auto" />
+                                                </Grid.ColumnDefinitions>
+                                                <TextBlock
+                                                    FontSize="15"
+                                                    FontWeight="SemiBold"
+                                                    Text="{Binding UnrealProjectSync.EffectSyncSummaryText, Mode=OneWay}"
+                                                    TextWrapping="Wrap" />
+                                                <TextBlock
+                                                    Grid.Column="1"
+                                                    VerticalAlignment="Center"
+                                                    Style="{StaticResource SubtleTextStyle}"
+                                                    Text="{Binding UnrealProjectSync.EffectSyncAppliedText, Mode=OneWay}" />
+                                            </Grid>
+                                            <ItemsControl ItemsSource="{Binding UnrealProjectSync.EffectSyncItems, Mode=OneWay}">
+                                                <ItemsControl.ItemTemplate>
+                                                    <DataTemplate>
+                                                        <Border
+                                                            Margin="0,0,0,10"
+                                                            Padding="10"
+                                                            Background="{ThemeResource LayerFillColorDefaultBrush}"
+                                                            BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                                                            BorderThickness="1"
+                                                            CornerRadius="6">
+                                                            <StackPanel Spacing="3">
+                                                                <TextBlock
+                                                                    FontSize="15"
+                                                                    FontWeight="SemiBold"
+                                                                    Text="{Binding DisplayName}"
+                                                                    TextWrapping="Wrap" />
+                                                                <TextBlock
+                                                                    Style="{StaticResource SubtleTextStyle}"
+                                                                    Text="{Binding DetailText}"
+                                                                    TextWrapping="Wrap" />
+                                                                <TextBlock
+                                                                    Style="{StaticResource SubtleTextStyle}"
+                                                                    Text="{Binding TargetText}"
+                                                                    TextWrapping="Wrap" />
+                                                            </StackPanel>
+                                                        </Border>
+                                                    </DataTemplate>
+                                                </ItemsControl.ItemTemplate>
+                                            </ItemsControl>
+                                        </StackPanel>
+                                    </ScrollViewer>
+                                    <ScrollViewer
+                                        Grid.Row="1"
                                         HorizontalScrollBarVisibility="Disabled"
                                         VerticalScrollBarVisibility="Auto"
                                         Visibility="{Binding UnrealProjectSync.FoundationWorkspaceVisibility, Mode=OneWay}">

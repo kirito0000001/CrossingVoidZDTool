@@ -265,7 +265,16 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         _ => true
     };
 
-    public bool HasPublishSelection => !IsEngineToToolbox && _importSelectedCount > 0;
+    /// <summary>
+    /// 「同步」按钮的闸门：**这一步有没有东西可同步**。
+    ///
+    /// 前五步看的是勾选树里的条数；第六步「特效同步」**没有勾选树**
+    /// （凡是有特效层的动作都要同步），它以前也问这个计数，于是恒为 0 ——
+    /// **按钮永远是灰的，特效根本同步不出去**（2026-09-24 发现）。
+    /// 第六步改问它自己的清单条数。
+    /// </summary>
+    public bool HasPublishSelection => !IsEngineToToolbox &&
+        (WorkflowStep == 6 ? EffectSyncItems.Count > 0 : _importSelectedCount > 0);
     // ── HasNoPublishChanges / PublishActionText 搬到了 Step2MaterialSync.cs ──
     public bool CanStartPublish => HasPublishSelection &&
         !IsPublishRunning && IsWorkflowOperationIdle;
@@ -629,6 +638,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                 NotifyDetectionSummaryChanged();
                 ClearLightConfigurationState();
                 ClearBlueprintSetupState();
+                ClearEffectSyncState();
                 SetSelectionTree([]);
                 SelectedSource = null;
                 ResetImportOperation();
@@ -799,6 +809,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             ResetDetectionSummary();
             ClearLightConfigurationState();
             ClearBlueprintSetupState();
+            ClearEffectSyncState();
             IsNormalizationStepLoaded = false;
             NormalizationItems.Clear();
             VisibleNormalizationItems = [];
@@ -967,6 +978,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             ResetImportOperation();
             ClearLightConfigurationState();
             ClearBlueprintSetupState();
+            ClearEffectSyncState();
             SetNormalizationStepLoaded(false);
             NormalizationItems.Clear();
             VisibleNormalizationItems = [];
@@ -1116,6 +1128,11 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
                     break;
                 case 5:
                     TryApplyBlueprintSetupCache(SelectedSource?.DraftCharacter);
+                    break;
+                case 6:
+                    // 第六步「特效同步」：清单是本地算出来的，直接从自己的小文件回来，
+                    // 重进这一步不必再等一次打 sheet。
+                    TryApplyEffectSyncCache(SelectedSource?.DraftCharacter);
                     break;
             }
         }
@@ -1600,22 +1617,42 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
             return new SessionRestoreOutcome(false, "同步进度属于另一个 Unreal 工程，已忽略。");
         }
 
-        var source = CharacterSources.FirstOrDefault(item =>
-            string.Equals(
-                item.UnrealCandidate?.Code ?? item.DraftCharacter?.Code,
-                state.CharacterCode,
-                StringComparison.OrdinalIgnoreCase));
-        if (!string.IsNullOrWhiteSpace(state.CharacterCode) && source is null)
-        {
-            return new SessionRestoreOutcome(false, $"同步进度中的角色 {state.CharacterCode} 已不在当前来源列表中。");
-        }
-
         _isRestoringSession = true;
         try
         {
+            // ⚠️ **方向必须先落定，再去找来源** —— 来源列表是**按方向**重建的
+            // （`RebuildSourceLists`）：导入方向看的是「Unreal 候选」（要跑过扫描才有），
+            // 发布方向看的才是工具箱里的已完成角色。
+            //
+            // 以前是先查来源、后落方向，而 `_isEngineToToolbox` 的字段默认值恰好是 true
+            // （导入方向）—— 于是冷启动时 `CharacterSources` 还是**空的**（一次扫描都没跑过），
+            // 每次都报「同步进度中的角色 X 已不在当前来源列表中」，而且**整段恢复被直接跳过**：
+            // 方向、角色、上次检测时间、导入快照一个都没回来。
+            // 晓桀 2026-09-25 报的「每次打开都显示这个，像全局缓存没删干净」就是它
+            // —— 不是缓存脏，是恢复的顺序反了。
+            IsEngineToToolbox = state.ImportDirection;
+
+            var source = CharacterSources.FirstOrDefault(item =>
+                string.Equals(
+                    item.UnrealCandidate?.Code ?? item.DraftCharacter?.Code,
+                    state.CharacterCode,
+                    StringComparison.OrdinalIgnoreCase));
+
+            // 「找不到这个角色」只有在**这一侧确实有候选可查**时才算数：
+            // 列表非空还是找不到，说明它真的没了（删角色 / 换了角色目录），这时给一句提示是对的。
+            // 列表本身是空的（冷启动还没扫过 / 一个完成角色都没有）只说明"现在还不知道"，
+            // 不该把方向、时间、导入快照一起丢掉。
+            if (source is null &&
+                CharacterSources.Count > 0 &&
+                !string.IsNullOrWhiteSpace(state.CharacterCode))
+            {
+                return new SessionRestoreOutcome(
+                    false,
+                    $"同步进度中的角色 {state.CharacterCode} 已不在当前来源列表中。");
+            }
+
             HideCompletedFoundationChecks = state.HideCompletedFoundationChecks;
             HideResolvedNormalizationItems = state.HideResolvedNormalizationItems;
-            IsEngineToToolbox = state.ImportDirection;
             if (source is not null)
             {
                 SelectedSource = source;
@@ -1782,6 +1819,7 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
         SaveLightConfigurationCache(character);
         SaveSequenceSyncCache(character);
         SaveBlueprintSetupCache(character);
+        SaveEffectSyncCache(character);
         SessionStateCache.Save(character, new SessionStateCacheDocument
         {
             CharacterCode = character.Code,

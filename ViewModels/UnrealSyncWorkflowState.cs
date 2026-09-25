@@ -23,6 +23,8 @@ internal readonly record struct UnrealSyncWorkflowInputs(
     bool Step3Loaded,
     bool Step4Loaded,
     int SharedTreeItemCount,
+    /// <summary>第四步那棵树里**还需要处理**的差异条数（Unchanged 不算）。</summary>
+    int Step4PendingCount,
     int Step3ItemCount,
     int Step3ErrorCount,
     int Step3PendingCount,
@@ -30,6 +32,8 @@ internal readonly record struct UnrealSyncWorkflowInputs(
     int Step5ItemCount,
     int Step5ErrorCount,
     int Step5PendingCount,
+    bool Step6Loaded,
+    int Step6ItemCount,
     bool HasDetectionRun);
 
 /// <summary>
@@ -53,6 +57,9 @@ internal static class UnrealSyncWorkflowState
         3 => inputs.Step3Loaded,
         4 => inputs.Step4Loaded,
         5 => inputs.Step5Loaded,
+        // 第 6 步「特效同步」不看 Unreal，所以它的"加载过没有"就是自己的标志
+        // （步加载表里 2/4/6 才是独立标志的步；1 看内容、3/5 看各自的检测结果）。
+        6 => inputs.Step6Loaded,
         _ => false,
     };
 
@@ -71,12 +78,19 @@ internal static class UnrealSyncWorkflowState
                     : inputs.Step3PendingCount > 0
                         ? "待设置"
                         : "已完成",
-        // 第 4 步「序列同步」
+        // 第 4 步「序列同步」：进过这一步要检测，检测完要看**还剩几条差异**。
+        //
+        // 🔴 这里以前是"检测过就恒报进行中"，少了最后那一档 —— 于是序列已经
+        // 「共检查 173 项 · 无差异 173 项」了，徽标还挂着「进行中」，
+        // 走到下一步回头看也是「进行中」（晓桀 2026-09-25 截图报的就是这个）。
+        // 判据和第 2 步那条 `HasNoPublishChanges` 用同一个：**全是 Unchanged 才算完**。
         4 => inputs.CurrentStep < 4
             ? "待处理"
             : !inputs.HasDetectionRun
                 ? "待检测"
-                : "进行中",
+                : inputs.Step4PendingCount > 0
+                    ? "进行中"
+                    : "已完成",
         // 第 5 步「蓝图置入」
         5 => inputs.CurrentStep < 5
             ? "待处理"
@@ -87,6 +101,15 @@ internal static class UnrealSyncWorkflowState
                     : inputs.Step5PendingCount > 0
                         ? "进行中"
                         : "已完成",
+        // 第 6 步「特效同步」：检测是本地且便宜的，所以徽标说清"查过没有 / 有几个动作"。
+        // 不说"已完成" —— 那要等真正写进 Unreal 才算，而这一步没有逐项勾选可看。
+        6 => inputs.CurrentStep < 6
+            ? "待处理"
+            : !inputs.Step6Loaded
+                ? "待检测"
+                : inputs.Step6ItemCount > 0
+                    ? "待同步"
+                    : "无特效",
         _ => "待处理",
     };
 
@@ -139,6 +162,8 @@ internal static class UnrealSyncWorkflowState
             4 => inputs.SharedTreeItemCount,
             3 => inputs.Step3ItemCount,
             5 => inputs.Step5ItemCount,
+            // 第 6 步的内容就是它自己的动作清单（没有共用树、没有勾选）。
+            6 => inputs.Step6ItemCount,
             _ => 0,
         };
 

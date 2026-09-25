@@ -36,13 +36,15 @@ internal sealed class UnrealSyncStepLoadStore
     /// <summary>这棵树归第几步；0 表示还没有归属（没检测过，或只用于导入方向）。</summary>
     public int PublishTreeOwnerStep => _publishTreeOwnerStep;
 
-    /// <summary>第二步 / 第三步 / 第五步的加载标志。返回是否真的变了。</summary>
+    /// <summary>第二步 / 第三步 / 第五步 / 第六步的加载标志。返回是否真的变了。</summary>
     public bool SetLoaded(int step, bool value)
     {
-        if (step is not (2 or 3 or 5))
+        // 第六步「特效同步」也算：它既不共用差异树、也不看第 1 步的内容表，
+        // 自己的清单就是自己的标志（2026-09-24 给它补上真正的第 6 格）。
+        if (step is not (2 or 3 or 5 or 6))
         {
             throw new ArgumentOutOfRangeException(
-                nameof(step), step, "只有第二、三、五步有独立加载标志（第一步看内容、第四步看差异树）。");
+                nameof(step), step, "只有第二、三、五、六步有独立加载标志（第一步看内容、第四步看差异树）。");
         }
 
         if (_loaded[step] == value)

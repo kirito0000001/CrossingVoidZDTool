@@ -437,6 +437,51 @@ namespace CrossingVoidZDTool
             SequenceEditorPreviewEffectPresenter.Show(source);
         }
 
+        /// <summary>
+        /// 特效层**先解码好再播** —— 和角色层那条 `PreloadSequencePreviewBitmapsAsync` 同一个道理。
+        ///
+        /// 以前只有角色层预加载，特效层是**播放中现用现解**（`UpdateSequenceEffectLayerSource()`
+        /// 在 UI 线程的定时器回调里同步 `LoadFile`）。特效层比角色层快"倍数"倍、每帧都要换图，
+        /// 于是播放一闪一闪、卡到看不清（晓桀 2026-09-25 报的）。
+        /// 现在开播前把所有非空的特效帧一口气解完，播放路径只查缓存。
+        ///
+        /// 空帧不进预加载（它本来就没有文件）；解不出来的给一条提示 + 一行日志，
+        /// 和角色层保持一致 —— 不静默。
+        /// </summary>
+        private async Task PreloadSequenceEffectBitmapsAsync()
+        {
+            var layer = _applicationViewModel.SequenceFrames.EffectLayer;
+            if (layer is null || !layer.HasFrames)
+            {
+                return;
+            }
+
+            var failures = await _sequenceEffectPreviewCache.PreloadPathsAsync(
+                layer.Frames
+                    .Where(frame => !frame.IsEmpty && !string.IsNullOrWhiteSpace(frame.FilePath))
+                    .Select(frame => (frame.FilePath, frame.FileName)));
+            if (failures.Count == 0)
+            {
+                return;
+            }
+
+            ShowFloatingTip(
+                InfoBarSeverity.Warning,
+                "部分特效帧读取失败",
+                failures.Count == 1
+                    ? failures[0].FileName
+                    : $"{failures[0].FileName} 等 {failures.Count} 张特效帧无法读取。");
+            AppendLog(
+                LogKind.Warning,
+                "St5 特效层预加载部分失败：" + string.Join(
+                    Environment.NewLine,
+                    failures
+                        .Take(8)
+                        .Select(failure =>
+                            $"{failure.FileName} | {failure.ExceptionType ?? "LoadError"} | {failure.Message} | {failure.FilePath}"))
+                    + (failures.Count > 8 ? $"{Environment.NewLine}... 还有 {failures.Count - 8} 张失败。" : string.Empty));
+        }
+
         /// <summary>特效层自己的节拍（比角色层快"倍数"倍）；跟着预览的播放/暂停一起开关。</summary>
         private void StartSequenceEffectSubFrameTimer()
         {
@@ -454,6 +499,13 @@ namespace CrossingVoidZDTool
             {
                 _sequenceEffectSubFrame++;
                 UpdateSequenceEffectLayerSource();
+                // **高亮必须跟着特效层一起走。**
+                //
+                // 时间轴展开之后，一个动作帧占"格数 × 倍数"格；真正一格一格往前的是特效层
+                // （它有自己的、快"倍数"倍的节拍）。以前高亮只挂在**角色层**那次 tick 上，
+                // 于是它永远停在每帧的第一格，中间那些展开出来的特效帧格在时间轴上
+                // **一次都不会亮** —— 看着就像"还在按原来的帧格播"（晓桀 2026-09-25 报的）。
+                SynchronizeSequenceTimelineSelectionToCurrentFrame();
             };
             return timer;
         }

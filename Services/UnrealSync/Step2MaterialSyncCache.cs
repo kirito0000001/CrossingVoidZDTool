@@ -69,9 +69,10 @@ internal static class Step2MaterialSyncCache
                     AppJsonSerializerContext.Default.Step2MaterialSyncCacheDocument));
             return true;
         }
-        catch (Exception)
+        catch (Exception error)
         {
-            // 写不进去不是错误：下次检测会再写一遍。
+            // 写不进去不是错误：下次检测会再写一遍。但**不能一声不吭**（同第 1 步）。
+            ToolboxLog.Warn($"[UnrealSync] 第 2 步素材差异写入失败：{path}", error);
             return false;
         }
     }

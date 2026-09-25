@@ -51,9 +51,10 @@ internal static class Step2NormalizationCache
                     AppJsonSerializerContext.Default.Step2NormalizationCacheDocument));
             return true;
         }
-        catch (Exception)
+        catch (Exception error)
         {
-            // 写不进去不是错误：下次做决策时会再写一遍。
+            // 写不进去不是错误：下次做决策时会再写一遍。但**不能一声不吭**（同第 1 步）。
+            ToolboxLog.Warn($"[UnrealSync] 第 2 步规整决策写入失败：{path}", error);
             return false;
         }
     }

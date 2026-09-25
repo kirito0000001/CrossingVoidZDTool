@@ -47,11 +47,27 @@ internal sealed class UnrealSyncPublishController(
         var atlases = await new SequenceAtlasPackService().PackEffectSheetsAsync(
             character,
             _host.Settings.AtlasPythonPath,
-            null,
+            // 这一段以前传的是 null —— 打十几张 sheet 的几十秒里进度条一动不动。
+            new Progress<AtlasPackProgress>(state => _host.UpdateGlobalProgress(
+                "阶段 1/3 · 正在打包特效网格",
+                20 + 25 * (state.Stage switch
+                {
+                    AtlasPackStage.Preparing => 0.2,
+                    AtlasPackStage.Packing => 0.6,
+                    _ => 1.0
+                }),
+                state.Message,
+                true)),
             _host.GetGlobalProgressCancellationToken());
 
         var publishService = new UnrealBridgeSequencePublishService();
         var plan = publishService.BuildEffectSyncPlanForAll(character, projectPath, atlases);
+        // **把这次真正要同步的清单推回中栏**（而不是只更新面板上那份旧列表）。
+        //
+        // 同步这条路会自己重新建一次计划：用户画完新的特效、没点「重新加载」就直接点同步时，
+        // 真正写进 Unreal 的是**这份新计划**。界面与它自己的小缓存如果还停在旧清单上，
+        // 就会出现"缓存里说 1 个动作、实际同步了 2 个"（`smoke --effect-sync` 里实测到过）。
+        _sync.SetEffectSyncPlan(plan);
         _host.AppendLog(LogKind.User, $"[Effect Plan] character={character.Code} actions={plan.Actions.Count}");
         if (plan.Actions.Count == 0)
         {
@@ -104,7 +120,13 @@ internal sealed class UnrealSyncPublishController(
                 $"阶段 2/3 · 执行特效动作：{value.Message}",
                 progressPlan[WorkflowProgressPlan.BridgeExecute].At(
                     value.CompletedCount * 100d / Math.Max(1, value.TotalCount)),
-                $"动作进度：{value.CompletedCount}/{value.TotalCount} · {value.StableId}")),
+                // 脚本把"动作内部"的阶段点（准备目录 → 导入图集并切精灵(N 格) → 建 Flipbook(N 帧)
+                // → 写 AnimMaps → 清理旧资产）写进 `detail`。这一步以前**只拼了 Message**，
+                // 于是那几句话写进了进度文件、界面上一句都看不到。第四步是用的（见下面那条），
+                // 这里对齐：有 detail 就用 detail，没有才退回"第 N/M 个动作"。
+                string.IsNullOrWhiteSpace(value.Detail)
+                    ? $"动作进度：{value.CompletedCount}/{value.TotalCount} · {value.StableId}"
+                    : $"{value.Detail}（{value.CompletedCount}/{value.TotalCount}）")),
             _host.GetGlobalProgressCancellationToken());
 
         _host.AppendLog(
@@ -125,6 +147,9 @@ internal sealed class UnrealSyncPublishController(
         }
 
         // 特效同步完不跑复扫导出：这一步不产出角色序列资产，也就没有"还剩多少序列差异"要重算。
+        _host.UpdateGlobalProgress("阶段 3/3 · 正在收尾", 98, character.Code, true);
+        // 记一笔"这批特效已经写进去了"，界面上的徽标与最后一行据此说话。
+        _sync.MarkEffectSyncApplied();
         _host.CompleteGlobalProgress("特效同步完成", $"{plan.Actions.Count} 个动作的特效已写入 Unreal。");
         await _host.HideGlobalProgressAfterDelayAsync();
     }

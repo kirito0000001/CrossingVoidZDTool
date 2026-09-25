@@ -1220,7 +1220,19 @@ def main():
     try:
         # 只校验 AnimMaps：第四步同步的是序列、帧素材、AnimMaps 映射和语音轨道，
         # 角色蓝图的绑定交给下一步，这里不该因为蓝图状态而失败。
-        _require(plan['AnimMapsPath'], 'AnimMaps')
+        #
+        # ⚠️ **只有"角色序列"那一类动作才要 AnimMaps**。第六步「特效同步」的计划是纯特效的
+        # （每条都带 `isEffectLayer`），C# 侧根本不填 `animMapsPath` —— 而这一条以前是
+        # **无条件**校验的，于是特效同步每次都在这里当场失败，一条都同步不出去：
+        #
+        #   [Effect Execution] character=Misaka succeeded=False items=0
+        #     error=AnimMaps: asset not found:
+        #
+        # （2026-09-25 拿真实工程跑 `smoke --effect-sync` 才暴露出来：计划建得出来、
+        #   sheet 也打得出来，就是走不到 Unreal 那一步。）
+        # 判据用"这份计划里有没有需要写 AnimMaps 的动作"，不是"这份计划叫什么"。
+        if any(not _is_effect_layer(action) for action in actions):
+            _require(plan['AnimMapsPath'], 'AnimMaps')
         detach_paths = plan.get('DetachSequenceObjectPaths') or []
         if detach_paths:
             detached, failed = _detach_orphan_sequences(detach_paths)

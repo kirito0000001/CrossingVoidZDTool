@@ -19,16 +19,26 @@ namespace CrossingVoidZDTool.ViewModels;
 ///    散在壳侧的检测与发布两条长方法里，改一处口径要翻两个文件；
 /// 3. 它自己的小缓存 `step4-sequence-sync.json`（序列差异 + 勾选）。
 ///
-/// **第四步和第六步的关系**：第六步「特效同步」复用第四步这块界面，也要
-/// "序列帧那一套"导出（只是计划换成 `BuildEffectSyncPlan`）。所以下面凡是
-/// "要序列数据"的判断都写成 <c>4 or 6</c>，而"这就是第四步"写成 <c>== 4</c>，
-/// 两者不要混。
+/// **第四步和第六步的关系**（2026-09-24 改过一次，别按旧的看）：
+///
+/// - **发布链路共用**：第六步仍走同一条桥接脚本与发布管线（`isEffectLayer` 那条只出
+///   sheet + 材质实例），所以"要序列帧那一套数据"的判断继续写成 <c>4 or 6</c>，
+///   而"这就是第四步"写成 <c>== 4</c>，两者不要混。
+/// - **界面不再共用**：第六步现在有自己的一块中栏（`Step6EffectSync.cs` + 自己那段 XAML）。
+///   以前它借第四步的差异树面板，而那棵树对第六步永远是空的 —— 特效清单根本没地方显示。
 /// </summary>
 internal sealed partial class UnrealProjectSyncViewModel
 {
     // ── 工作区（第四步和第六步共用同一块界面）──────────────────────────────
 
-    public bool IsSequenceSynchronizationWorkspace => !IsEngineToToolbox && WorkflowStep is 4 or 6;
+    /// <summary>
+    /// 第四步「序列同步」的工作区。
+    ///
+    /// ⚠️ 这里**只认第 4 步**。2026-09-24 之前它是 `4 or 6`（当时特效还挂在序列那一步的界面上），
+    /// 于是第六步的中栏显示的是**第四步那棵空差异树** —— 特效自己的清单没有地方显示。
+    /// 现在第六步有自己的一块（见 <see cref="IsEffectSyncWorkspace"/>）。
+    /// </summary>
+    public bool IsSequenceSynchronizationWorkspace => !IsEngineToToolbox && WorkflowStep == 4;
 
     public Visibility SequenceSynchronizationDetailsVisibility => IsSequenceSynchronizationWorkspace
         ? Visibility.Visible

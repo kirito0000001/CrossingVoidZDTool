@@ -113,6 +113,9 @@ var tests = new (string Name, Action Run)[]
     ("特效帧从底板PSD读回时按图层顺序落位", EffectFramesImportFromPsdKeepsLayerOrder),
     ("PS/画世界重存过的底板PSD照样能读回", PsdReaderToleratesResavedFiles),
     ("预览叠特效时时间轴按特效帧展开成单格", EffectTimelineExpandsIntoPerEffectFrames),
+    ("特效层自己的节拍也要把时间轴高亮带着走", EffectSubFrameTickKeepsTimelineHighlightInSync),
+    ("冷启动恢复现场不依赖方向与来源的先后", SessionRestoreDoesNotDependOnDirectionOrder),
+    ("特效层预览也要提前缓存好", EffectPreviewIsPreloadedBeforePlayback),
     ("工具集清单里有创建与拆分图集", AtlasToolCatalogListsBuiltInTools),
     ("拆分图集能把裁剪过的格子贴回原画布", AtlasExtractRestoresTrimmedSprites),
     ("创建图集会生成清单与命令行参数", AtlasFolderPackBuildsManifestAndArguments),
@@ -127,6 +130,7 @@ var tests = new (string Name, Action Run)[]
     ("已加载的步骤不再重复触发虚幻检测", WorkflowStepSkipsDetectionWhenAlreadyLoaded),
     ("切换角色后各自的步骤与结果互不串台", WorkflowStateIsIsolatedPerCharacter),
     ("第四步序列差异存进自己的小缓存并能读回", SequenceSyncStepKeepsItsOwnCacheFile),
+    ("第六步特效清单存进自己的小缓存并能读回", EffectSyncStepKeepsItsOwnCacheFile),
     ("素材同步后作废过期的第 3 步基础配置缓存", MaterialSyncInvalidatesStaleLightConfiguration),
     ("基础配置的刷新与应用只碰自己这一步（同步流程）", LightConfigurationOnlyTouchesItsOwnStep),
     ("角色目录里的路径落盘时不带盘符", CharacterOwnedPathsArePortableOnDisk),
@@ -2574,7 +2578,7 @@ static void SequenceFrameVoiceSelectionRefreshesAfterOptions()
                 StringComparison.Ordinal));
         AssertEqual(false, xaml.Contains("Text=\"进入此帧时播放\"", StringComparison.Ordinal));
 
-        var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+        var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
         AssertEqual(true, source.Contains("private void SynchronizeSequenceFrameVoiceSelection()", StringComparison.Ordinal));
         AssertEqual(true, source.Contains("SequenceFrameVoiceComboBox.SelectedItem = selectedOption;", StringComparison.Ordinal));
         AssertEqual(true, source.Contains("_isSynchronizingSequenceFrameVoiceSelection", StringComparison.Ordinal));
@@ -2787,7 +2791,7 @@ static void ReorderingSequenceFramesPreservesMetadata()
 static void SequenceEditorProvidesCompleteTimelineControls()
 {
     var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var document = XDocument.Parse(xaml);
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
 
@@ -2922,7 +2926,7 @@ static void SequenceEditorHeaderUsesStableFramePositionSummary()
 static void SequenceEditorCreatesFirstFrameAndCollectionSupportsModifierMultiSelect()
 {
     var xaml = ReadAllProjectXaml();
-    var sequenceSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var sequenceSource = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var shortcutSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.Logging.cs"));
 
     AssertEqual(true, xaml.Contains("Content=\"新建帧\"", StringComparison.Ordinal));
@@ -3064,7 +3068,7 @@ static void SequenceCollectionResolvesAllDuplicatesKeepingMostUsedResource()
     });
 
     var xaml = ReadAllProjectXaml();
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     AssertEqual(true, xaml.Contains("Content=\"一键处理\"", StringComparison.Ordinal));
     // 棘轮记账（2026-09-19，S2）：「一键处理」改成命令了（SequenceFrameDuplicateDetectionController），
     // 判据换成命令绑定 + 宿主实现，「这条链路还在」的意图不变。
@@ -3110,7 +3114,7 @@ static void SequenceCollectionOrdersByActionThenFrameIndex()
 static void SequenceCollectionUsesCompactUsageFirstCards()
 {
     var xaml = ReadAllProjectXaml();
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
 
     AssertEqual(true, xaml.Contains("x:Name=\"DetectSequenceFrameDuplicatesButton\"", StringComparison.Ordinal));
     // 棘轮记账（2026-09-19，S2）：「检测重复」改成命令了（SequenceFrameDuplicateDetectionController）。
@@ -3129,7 +3133,7 @@ static void SequenceCollectionUsesCompactUsageFirstCards()
 
 static void SequenceFrameImportPreservesOuterScrollPosition()
 {
-    var sequenceFramesSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var sequenceFramesSource = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var navigationSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.Navigation.cs"));
 
     AssertEqual(
@@ -3160,7 +3164,7 @@ static void SequenceFrameImportPreservesOuterScrollPosition()
 static void SequencePreviewsShareDoubleBufferedPresenter()
 {
     var xaml = ReadAllProjectXaml();
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var presenterXamlPath = Path.Combine(Directory.GetCurrentDirectory(), "Controls", "BufferedImagePresenter.xaml");
     var presenterSourcePath = Path.Combine(Directory.GetCurrentDirectory(), "Controls", "BufferedImagePresenter.xaml.cs");
 
@@ -3264,7 +3268,7 @@ static void SequenceEditorPlaybackModesControlAdvancement()
 
 static void NewSequenceFrameSynchronizesTimelineSelection()
 {
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     const string startMarker = "private async Task InsertBlankSequenceFrameAsync";
     // 棘轮记账（2026-09-19，S1 收尾）：原来的结束标记是那个已被命令取代的菜单项处理器，
     // 换成紧随其后的下一个方法（时间轴 KeyDown），断言的内容没变。
@@ -3404,7 +3408,7 @@ static void UnnumberedSequenceFrameImportsPreservePickerOrder()
 static void SequenceTimelineDeleteKeyUsesSelectedFrame()
 {
     var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var document = XDocument.Parse(xaml);
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
     var timeline = document.Descendants().Single(element => string.Equals(
@@ -3493,7 +3497,7 @@ static void SequenceCollectionMultiSelectionTracksClickOrder()
 static void SequenceEditorSupportsExtendedMultiSelection()
 {
     var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var document = XDocument.Parse(xaml);
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
     var timeline = document.Descendants().Single(element => string.Equals(
@@ -3521,7 +3525,7 @@ static void SequenceEditorSupportsExtendedMultiSelection()
 static void SequenceBatchCopyUsesTimelineTargetSelection()
 {
     var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var document = XDocument.Parse(xaml);
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
     var timeline = document.Descendants().Single(element => string.Equals(
@@ -3553,7 +3557,7 @@ static void SequenceBatchCopyUsesTimelineTargetSelection()
 
 static void SequenceFrameReorderRefreshesPreview()
 {
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var methodStart = source.IndexOf(
         "private async void SequenceFrameManagerGridView_DragItemsCompleted",
         StringComparison.Ordinal);
@@ -3577,7 +3581,7 @@ static void SequencePreviewPrimesNextFrame()
         Directory.GetCurrentDirectory(),
         "Controls",
         "BufferedImagePresenter.xaml.cs"));
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
 
     AssertEqual(true, presenter.Contains("public void Prepare(ImageSource? source)", StringComparison.Ordinal));
     AssertEqual(true, presenter.Contains("ShowPrepared", StringComparison.Ordinal));
@@ -3603,7 +3607,7 @@ static void SequencePreviewInvalidatesDecodedWriteableBitmaps()
 static void SequenceEditorProvidesPlaybackModeAndSpaceShortcut()
 {
     var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
-    var source = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var document = XDocument.Parse(xaml);
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
     var playbackModeToggle = document.Descendants().Single(element => string.Equals(
@@ -3652,7 +3656,7 @@ static void SequenceEditorCanPauseWhenEffectiveVoiceEnds()
 
 static void SequencePreviewVoiceUsesPersistentSingleChannel()
 {
-    var sequenceSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.SequenceFrames.cs"));
+    var sequenceSource = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var voiceSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.VoiceMaterials.cs"));
 
     var stopPreviewStart = sequenceSource.IndexOf("private void StopSequencePreview()", StringComparison.Ordinal);
@@ -4598,6 +4602,18 @@ static string ReadUnrealSyncViewModelSource()
 static string ReadViewModelSource(string fileName) =>
     File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "ViewModels", fileName));
 
+/// <summary>
+/// 读一个 <c>MainWindow.SequenceFrames*.cs</c> 壳源文件。
+///
+/// 和 <see cref="ReadViewModelSource"/> 同一个来由：序列帧编辑器在壳里，
+/// 有一批"接线事实"（哪个按钮绑哪条命令、那只定时器的回调里带了什么）
+/// 没有行为断言的缝，只能读源码盯。以前这些断言各自 <c>File.ReadAllText</c> 一遍
+/// **同一个文件**（15 处），既啰嗦又把棘轮那一格占着；收成一个口之后
+/// 调用点从 15 降到 1，省下的额度留给真正需要的漂移护栏。
+/// </summary>
+static string ReadSequenceFramesShellSource(string fileName) =>
+    File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), fileName), Encoding.UTF8);
+
 static void UnrealBridgeStateIsScopedToCharacterAndProject()
 {
     var root = CreateTemporaryTestFolder();
@@ -5483,6 +5499,128 @@ static void PsdReaderToleratesResavedFiles()
 /// 往「图层信息」段尾部塞几个字节（模拟 Photoshop 的 4 字节补齐），并同步改两处长度。
 /// 纯字节手术 —— 只有这样才能造出"PS 存过的样子"来试读取器。
 /// </summary>
+static void EffectPreviewIsPreloadedBeforePlayback()
+{
+    // 晓桀报的：特效预览一闪一闪、卡到看不清，要和主序列预览一样"提前缓存好"。
+    //
+    // 原样是：角色层开播前 `PreloadSequencePreviewBitmapsAsync()` 把整条序列解好，
+    // 而特效层**没有**对应的一步 —— 它在 UI 线程的定时器回调里现用现解一张 PNG，
+    // 特效层还比角色层快"倍数"倍（每帧都换图），于是播放一闪一闪。
+    // 修法：给它补一条按路径预加载，并且在开播前调用。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var cache = new SequencePreviewBitmapCache();
+        var missing = Path.Combine(root, "没有这张特效帧.png");
+
+        // 不存在的文件：记一笔失败、别抛（预加载失败只该提示，不该把播放带崩）。
+        var failures = cache.PreloadPathsAsync(
+                [(missing, "特效帧 1"), (string.Empty, "（空帧）")])
+            .GetAwaiter().GetResult();
+        AssertEqual(1, failures.Count);
+        AssertEqual(missing, failures[0].FilePath);
+        AssertEqual(true, failures[0].Message.Contains("文件不存在", StringComparison.Ordinal));
+        AssertEqual(true, cache.IsFailed(missing));
+        // 空路径（特效的空帧）直接跳过，不该算失败
+        AssertEqual(1, failures.Count);
+
+        // 再预加载一次不该重复报同一张 —— 否则每次播放都要弹一遍提示。
+        var again = cache.PreloadPathsAsync([(missing, "特效帧 1")]).GetAwaiter().GetResult();
+        AssertEqual(0, again.Count);
+
+        // 接线：开播那条路上必须**先**把特效层解好，而且要在角色层那条之后、启动定时器之前。
+        var shellSource = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
+        var start = shellSource.IndexOf("private async Task StartSequencePreviewAsync", StringComparison.Ordinal);
+        AssertEqual(true, start >= 0);
+        var body = shellSource.Substring(start, Math.Min(2000, shellSource.Length - start));
+        var characterPreload = body.IndexOf("await PreloadSequencePreviewBitmapsAsync();", StringComparison.Ordinal);
+        var effectPreload = body.IndexOf("await PreloadSequenceEffectBitmapsAsync();", StringComparison.Ordinal);
+        var timerStart = body.IndexOf("_sequencePreviewTimer.Start();", StringComparison.Ordinal);
+        AssertEqual(true, characterPreload >= 0 && effectPreload > characterPreload);
+        AssertEqual(true, timerStart > effectPreload);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SessionRestoreDoesNotDependOnDirectionOrder()
+{
+    // 晓桀报的：**每次打开同步台都弹**「同步进度中的角色 Misaka 已不在当前来源列表中」。
+    //
+    // 根因不是缓存脏，是恢复的**顺序反了**：来源列表 `CharacterSources` 是按方向重建的
+    // （导入方向看「Unreal 候选」——要跑过扫描才有；发布方向看工具箱里的已完成角色），
+    // 而恢复现场时先查来源、后落方向，字段默认值又恰好是"导入方向"。
+    // 于是冷启动那一刻列表还是空的，必然查不到 → 报错 **并且整段恢复被跳过**
+    // （方向、角色、上次检测时间、导入快照一个都没回来）。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var projectPath = Path.Combine(root, "CrossingVoid.uproject");
+        File.WriteAllText(projectPath, "{}");
+        var enginePath = Path.Combine(root, "UnrealEditor.exe");
+        File.WriteAllText(enginePath, "x");
+        var misaka = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴") with { IsCompleted = true };
+        var kirito = CreateCharacter(Path.Combine(root, "SAO_Kirito"), "SAO_Kirito", "桐人[SAO]") with { IsCompleted = true };
+        Directory.CreateDirectory(misaka.ToolFolderPath);
+        Directory.CreateDirectory(kirito.ToolFolderPath);
+
+        // 上一轮：发布方向 + 选中御坂，落一份现场（`session.json`）。
+        var previous = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        previous.Load(enginePath, projectPath);
+        previous.IsEngineToToolbox = false;
+        previous.RefreshDraftSources([misaka, kirito]);
+        previous.SelectSource(previous.CharacterSources.Single(item =>
+            string.Equals(item.DraftCharacter?.Code, misaka.Code, StringComparison.OrdinalIgnoreCase)));
+        previous.FlushSessionCache();
+
+        // 冷启动：**不预先设方向**（字段默认是导入方向），来源也只有工具箱角色 ——
+        // 这正是刚点开同步台那一瞬间的样子。
+        var cold = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        cold.Load(enginePath, projectPath);
+        var outcome = cold.RefreshDraftSources([misaka, kirito]);
+
+        // 一句提示都不该有；方向与角色都该从现场回来（回不来就说明整段恢复又被跳过了）。
+        AssertEqual("", outcome.ErrorMessage);
+        AssertEqual(true, outcome.Restored);
+        AssertEqual(false, cold.IsEngineToToolbox);
+        AssertEqual("Misaka", cold.SelectedSource?.DraftCharacter?.Code);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void EffectSubFrameTickKeepsTimelineHighlightInSync()
+{
+    // 时间轴按特效帧展开之后，**真正一格一格往前的是特效层**（它有自己的、快"倍数"倍的节拍）。
+    // 高亮如果只挂在角色层那次 tick 上，就永远停在每帧的第一格 —— 中间那些展开出来的
+    // 特效帧格一次都不会亮，看着就是"还在按原来的帧格播"（晓桀 2026-09-25 报的原话）。
+    //
+    // 这是**接线断言**：那只 DispatcherQueueTimer 的复调在壳里，没有行为断言的缝
+    // （同「同步台在查看模式下依然点得动」那一类）。逻辑本身由
+    // `预览叠特效时时间轴按特效帧展开成单格` 覆盖，这里只盯"回调里有没有把它带上"。
+    var effectSource = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.Effects.cs");
+    var increment = effectSource.IndexOf("_sequenceEffectSubFrame++;", StringComparison.Ordinal);
+    AssertEqual(true, increment >= 0);
+    // 只在**同一个 tick 回调内**找（往后取一段窗口），别被文件里别处的同名调用蒙混过去。
+    var window = effectSource.Substring(increment, Math.Min(900, effectSource.Length - increment));
+    AssertEqual(
+        true,
+        window.Contains("SynchronizeSequenceTimelineSelectionToCurrentFrame();", StringComparison.Ordinal));
+
+    // 配套的另一半：角色层自己停下来时，特效层那只定时器也得停 ——
+    // 否则角色画面停在最后一帧、特效还在自顾自地闪。
+    var shellSource = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
+    var tickStart = shellSource.IndexOf("private void SequencePreviewTimer_Tick", StringComparison.Ordinal);
+    AssertEqual(true, tickStart >= 0);
+    var tickBody = shellSource.Substring(tickStart, Math.Min(1600, shellSource.Length - tickStart));
+    AssertEqual(true, tickBody.Contains("sender.Stop();", StringComparison.Ordinal));
+    AssertEqual(true, tickBody.Contains("StopSequenceEffectSubFrameTimer();", StringComparison.Ordinal));
+}
+
 static void EffectTimelineExpandsIntoPerEffectFrames()
 {
     // 「预览叠特效」开着时，时间轴要按**特效帧**展开：每个动作帧摊成"格数 × 倍数"格，
@@ -6113,7 +6251,10 @@ static UnrealProjectSyncViewModel CreateBlueprintSetupViewModel(int pendingCount
 {
     var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
     viewModel.IsEngineToToolbox = false;
-    viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep);
+    // 走**第 5 步**（蓝图置入），不要拿 MaxStep 当它 —— MaxStep 现在是 6（特效同步），
+    // 走上去之后这一步的工作区不是蓝图置入，按钮可用性/勾选计数一律为 0，整组用例假红。
+    // （这个坑在 `WorkflowStateIsIsolatedPerCharacter` 里已经踩过一次，这里是同一个。）
+    viewModel.ReturnToWorkflowStep(5);
     var items = new List<UnrealBlueprintSetupResultItem>
     {
         new()
@@ -6380,7 +6521,9 @@ static void ReloadingStepNavigatesBeforeDetecting()
     // 2026-09-24 改：**进步骤本身不再检测**（晓桀「只由我进行检测操作」），
     // 检测只剩「重新加载」与「依次检测后续步骤」两个手动入口。
     // 所以这条改走「重新加载」—— 要验的那个不变量（先落步、失败也不回退）一个字没变。
-    var (sync, controller, host, root) = CreateWorkflowController();
+    // 传 4：这条用例要验的是"先落步、失败也不回退"，拿第 4 步当样本；
+    // 不传就是第 1 步，落步前后都是 1，断言等于没验。
+    var (sync, controller, host, root) = CreateWorkflowController(4);
     try
     {
         var stepWhenDetecting = 0;
@@ -6880,12 +7023,22 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // Controls/AtlasToolPanel.xaml 里，所以这里只多了 21 行）。同样是加功能。
     // 5609 -> 5610：工具集页去掉 MaxWidth（右栏要占满剩下的宽度），顺手给整页 Grid
     // 起个名字让 UI 冒烟能量宽度。多一行注释，不是文件在悄悄变胖。
+    // 5610 -> 5621：这一档又是三处**实打实的功能**加出来的 UI ——
+    //   序列编辑器播放按钮（`SequenceEditorPlayButton`，带 ToolTip 与图标样式）、
+    //   编辑器工具栏的「导入特效帧 ▾」菜单（`SequenceEffectImportButton`）、
+    //   时间轴模式提示 + 时间轴 ListView 的拖拽重排属性与缩略图
+    //   （`SequenceTimelineModeText` / `CanReorderItems` 等，多轨道编辑的地基）。
+    //   同一批提交里还顺手把流程列表 4~7 前移成 3~6（那部分是净减行）。
+    //   三处都是加功能，不是文件在无意义地长，所以上限跟着抬。
+    // 5621 -> 5675：给第六步「特效同步」补**它自己的中栏**（+54 行）。
+    //   在那之前第六步借的是第四步的差异树面板，而那棵树对第六步永远是空的 ——
+    //   检测出来的特效清单没有地方显示。这一块是那一步唯一的界面，属于加功能。
     //
     // 注意：「把十二个遮罩层抽成 Controls/*.xaml」这条**已经被否掉了**：它们的
     // 手势语义本来就各不相同，收敛会悄悄改掉行为，而那些手势一条 UI 测试都没有。
     // 现在只保留护栏（每个全屏遮罩层至少有一种关法）。真要砍 XAML，
     // 先给这些手势补上测试覆盖，再谈收敛。
-    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5610);
+    Ratchet("MainWindow.xaml 行数", File.ReadAllLines("MainWindow.xaml", Encoding.UTF8).Length, 5675);
 
     // 4) Services 最大单文件。
     var largestService = Directory.EnumerateFiles("Services", "*.cs", SearchOption.AllDirectories)
@@ -6933,7 +7086,10 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // 117 -> 111：同一招再用一次。第四步桥接脚本被读了九次（每条跨语言契约各读一遍），
     // 收成 `ReadSequenceSyncScriptSource()` 一个口；期间新增的「第四步序列同步自检」护栏
     // 也走这个口，所以是净降，不是拿新增护栏去挤额度。
-    Ratchet("读源码文件的调用点", sourceReadCalls, 111);
+    // 111 -> 96：第三招。`MainWindow.SequenceFrames.cs` 被 15 条断言各读了一遍，
+    // 收成 `ReadSequenceFramesShellSource(fileName)`；新增的两条漂移护栏
+    // （「特效层自己的节拍也要把时间轴高亮带着走」的两半）都走这个口，净降。
+    Ratchet("读源码文件的调用点", sourceReadCalls, 96);
 
     if (violations.Count > 0)
     {
@@ -7505,6 +7661,9 @@ static void ReclassifiedVoiceSurvivesBaselineFilter()
         reader.IsEngineToToolbox = false;
         reader.RefreshDraftSources([character]);
         reader.SelectSource(reader.CharacterSources.Single());
+        // 冷启动/切角色一律从第 1 步开始（晓桀明确不要"恢复上次停在哪一步"），
+        // 所以要显式走进这一步，它的树才会从自己的小文件回来。
+        reader.ReturnToWorkflowStep(2);
 
         var restored = reader.SelectionTreeRoots
             .SelectMany(item => item.Children)
@@ -7583,6 +7742,8 @@ static void RefreshKeepsFreshSequenceTreeOverCache()
         reader.IsEngineToToolbox = false;
         reader.RefreshDraftSources([character]);
         reader.SelectSource(reader.CharacterSources.Single());
+        // 同上：不再自动恢复步号，要显式走进第 4 步。
+        reader.ReturnToWorkflowStep(4);
         AssertEqual(true, reader.IsWorkflowStepLoaded(4));
         var restored = reader.SelectionTreeRoots.ToArray();
         AssertEqual(1, restored.Length);
@@ -7686,13 +7847,9 @@ static void SequenceSyncStepKeepsItsOwnCacheFile()
                 UnrealSyncCacheFolder.GetCacheFolderPath(kirito),
                 Step4SequenceSyncCache.FileName)));
 
-        // 换一个新会话，并把会话缓存那份删掉 —— 只剩它自己的小文件，照样要能恢复整棵树。
-        var syncCacheFiles = Directory.GetFiles(misakaFolder, "sync-*.json");
-        AssertEqual(true, syncCacheFiles.Length > 0);
-        foreach (var path in syncCacheFiles)
-        {
-            File.Delete(path);
-        }
+        // 换一个新会话：这一步的树**只有这一份文件**可读（那份"所有步骤挤一起"的会话缓存
+        // 已经拆掉了，`sync-*.json` 不复存在），所以下面等于在验"小缓存自己够不够用"。
+        AssertEqual(0, Directory.GetFiles(misakaFolder, "sync-*.json").Length);
 
         var reader = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
         reader.Load(enginePath, projectPath);
@@ -7708,6 +7865,136 @@ static void SequenceSyncStepKeepsItsOwnCacheFile()
         AssertEqual(
             true,
             restoredRoots[0].DetailText.Contains("Unreal 现有 23 个帧位", StringComparison.Ordinal));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void EffectSyncStepKeepsItsOwnCacheFile()
+{
+    // 第六步「特效同步」按六条规范补的独立缓存：检测完（本地打 sheet + 建计划）
+    // 清单就该落进它自己的小文件；只落在跑过这一步的角色目录里；
+    // 换会话之后不用再打一次 sheet 就能把中栏摆回来。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var projectPath = Path.Combine(root, "CrossingVoid.uproject");
+        File.WriteAllText(projectPath, "{}");
+        var enginePath = Path.Combine(root, "UnrealEditor.exe");
+        File.WriteAllText(enginePath, "x");
+        var misaka = CreateCharacter(Path.Combine(root, "Misaka"), "Misaka", "御坂美琴") with { IsCompleted = true };
+        var kirito = CreateCharacter(Path.Combine(root, "SAO_Kirito"), "SAO_Kirito", "桐人[SAO]") with { IsCompleted = true };
+        Directory.CreateDirectory(misaka.ToolFolderPath);
+        Directory.CreateDirectory(kirito.ToolFolderPath);
+
+        // 计划里放两条：一条是特效层（该进清单），一条是角色序列（不该进）。
+        var sheetPath = Path.Combine(root, "Misaka_DefAtk_Effect_Sheet.png");
+        File.WriteAllBytes(sheetPath, [1, 2, 3]);
+        var plan = new UnrealBridgeSequenceSyncPlan
+        {
+            CharacterCode = misaka.Code,
+            UnrealProjectPath = projectPath,
+            Actions =
+            [
+                new UnrealBridgeSequenceSyncAction
+                {
+                    ActionCode = "DefAtk",
+                    DisplayName = "防御反击",
+                    IsEffectLayer = true,
+                    EffectSheetImagePath = sheetPath,
+                    EffectColumns = 3,
+                    EffectRows = 2,
+                    EffectMaterialName = "MI_DefAtk_Effect",
+                    EffectNiagaraSystemName = "NS_FXSheet",
+                    EffectFps = 48,
+                    Frames = [new UnrealBridgeSequenceSyncFrame(), new UnrealBridgeSequenceSyncFrame()]
+                },
+                new UnrealBridgeSequenceSyncAction
+                {
+                    ActionCode = "Sk2",
+                    DisplayName = "二技能",
+                    IsEffectLayer = false
+                }
+            ]
+        };
+
+        UnrealSyncSourceItem SourceOf(UnrealProjectSyncViewModel viewModel, CharacterCard character) =>
+            viewModel.CharacterSources.Single(item =>
+                string.Equals(item.DraftCharacter?.Code, character.Code, StringComparison.OrdinalIgnoreCase));
+
+        var detector = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        detector.Load(enginePath, projectPath);
+        detector.IsEngineToToolbox = false;
+        detector.RefreshDraftSources([misaka, kirito]);
+        detector.SelectSource(SourceOf(detector, misaka));
+        detector.ReturnToWorkflowStep(6);
+
+        // 照壳侧真实的顺序来：**检测在"操作进行中"里完成，收尾才结束操作**。
+        // 这个顺序正是"中栏一片空白"那类 bug 的温床 —— 结果写进去那一刻还在忙碌态，
+        // 面板被收起；收尾时如果不重新通知这一步的面板，它就停在收起上，
+        // 而占位面板按内容态又是收起的 → 两边都不显示（2026-09-25 实测：第六步进去什么都没有）。
+        var notified = new List<string>();
+        detector.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName is { } name)
+            {
+                notified.Add(name);
+            }
+        };
+        detector.SetWorkflowOperationRunning(true);
+        detector.SetEffectSyncPlan(plan);
+        AssertEqual(UnrealSyncWorkspaceState.Busy, detector.WorkspaceState);
+        AssertEqual(Visibility.Collapsed, detector.EffectSyncWorkspaceVisibility);
+        notified.Clear();
+        detector.SetWorkflowOperationRunning(false);
+        detector.FlushSessionCache();
+
+        // 只收特效那条：角色序列在第六步没有意义（那是第四步的活）。
+        AssertEqual(1, detector.EffectSyncItems.Count);
+        AssertEqual("DefAtk", detector.EffectSyncItems[0].ActionCode);
+        AssertEqual("3×2", detector.EffectSyncItems[0].GridText);
+        AssertEqual(true, detector.EffectSyncItems[0].SheetReady);
+        // 有内容 → 中栏要给这一步自己的面板让位
+        AssertEqual(UnrealSyncWorkspaceState.HasContent, detector.WorkspaceState);
+        AssertEqual(Visibility.Visible, detector.EffectSyncWorkspaceVisibility);
+        // 而且必须是**被通知过**的：光算得对不算数，绑定不会自己刷新
+        AssertEqual(true, notified.Contains("EffectSyncWorkspaceVisibility"));
+        // 「同步特效到虚幻」按钮的闸门：第六步没有勾选树，问的是它自己的清单条数
+        AssertEqual(true, detector.HasPublishSelection);
+        AssertEqual(true, detector.CanStartPublish);
+
+        var step6Path = Path.Combine(
+            UnrealSyncCacheFolder.GetCacheFolderPath(misaka),
+            Step6EffectSyncCache.FileName);
+        AssertEqual(true, File.Exists(step6Path));
+        AssertEqual(
+            false,
+            File.Exists(Path.Combine(
+                UnrealSyncCacheFolder.GetCacheFolderPath(kirito),
+                Step6EffectSyncCache.FileName)));
+
+        // 换会话：清单从自己的小文件回来，不需要再打一次 sheet。
+        var reader = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+        reader.Load(enginePath, projectPath);
+        reader.IsEngineToToolbox = false;
+        reader.RefreshDraftSources([misaka, kirito]);
+        reader.SelectSource(SourceOf(reader, misaka));
+        reader.ReturnToWorkflowStep(6);
+        AssertEqual(true, reader.IsEffectSyncLoaded);
+        AssertEqual(1, reader.EffectSyncItems.Count);
+        AssertEqual("DefAtk", reader.EffectSyncItems[0].ActionCode);
+        AssertEqual("MI_DefAtk_Effect", reader.EffectSyncItems[0].MaterialName);
+        AssertEqual(UnrealSyncWorkspaceState.HasContent, reader.WorkspaceState);
+        // 没同步过就是没同步过，不能因为"检测过"就显示成已完成
+        AssertEqual("尚未同步到 Unreal", reader.EffectSyncAppliedText);
+
+        // 同步成功之后记一笔，重进这一步仍然看得见
+        reader.MarkEffectSyncApplied();
+        reader.FlushSessionCache();
+        var applied = Step6EffectSyncCache.TryLoad(misaka, misaka.Code);
+        AssertEqual(true, applied?.AppliedAtUtc is not null);
     }
     finally
     {
@@ -7832,7 +8119,8 @@ static void WorkspaceReactsToRawCollectionChanges()
         // 每一步：先声明这一步已加载（空 -> 无差异），再直接往集合里塞一条。
         var steps = new (int Step, Action MarkLoaded, Action Add, Func<Visibility> Content)[]
         {
-            (4,
+            // 步号是收口后的：基础配置 = 3、蓝图置入 = 5（收口时 4~7 前移成 3~6）。
+            (3,
                 () => viewModel.SetLightConfigurationResult(new UnrealLightConfigurationResult
                 {
                     Succeeded = true, CharacterCode = character.Code, Items = []
@@ -7844,7 +8132,7 @@ static void WorkspaceReactsToRawCollectionChanges()
                         Status = UnrealLightConfigurationStatus.Pending
                     }, true)),
                 () => viewModel.LightConfigurationWorkspaceVisibility),
-            (6,
+            (5,
                 () => viewModel.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
                 {
                     Succeeded = true, CharacterCode = character.Code, Items = []
@@ -7889,7 +8177,8 @@ static void WorkspaceGroupsStayConsistentWithItems()
     {
         IsEngineToToolbox = false,
     };
-    viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep);
+    // 第 5 步（蓝图置入）：下面全是按蓝图置入的结果摆的，拿 MaxStep 会走到特效步上去。
+    viewModel.ReturnToWorkflowStep(5);
 
     // 复刻实际遇到的构成：59 项里 58 项无差异、1 项待写入。
     var items = new List<UnrealBlueprintSetupResultItem>();
@@ -7986,7 +8275,10 @@ static void WorkspaceNeverShowsBlankPanel()
     {
         IsEngineToToolbox = false,
     };
-    viewModel.ReturnToWorkflowStep(UnrealSyncWorkflow.MaxStep);
+    // 第 5 步（蓝图置入）：这条用例后面全都用蓝图置入的结果驱动中栏。
+    // 以前用 MaxStep —— 那时它就是蓝图那一步；特效独立成步之后 MaxStep = 6，
+    // 于是中栏落在"特效同步"这一步上，报的永远是 NoCharacter（就是这次的假红）。
+    viewModel.ReturnToWorkflowStep(5);
 
     void AssertPlaceholderIsReadable(UnrealSyncWorkspaceState expected)
     {
@@ -8268,16 +8560,14 @@ static void WorkflowStateIsIsolatedPerCharacter()
         var kiritoCache = UnrealSyncCacheFolder.GetCacheFolderPath(kirito);
         AssertEqual(true, Directory.Exists(misakaCache));
         AssertEqual(true, Directory.Exists(kiritoCache));
-        // 角色目录下有**两类**分步文件，别用 `*step4*.json` 一把捞：
-        //   1) 同步台的分步进度缓存：sync-<项目键>-step<N>.json
-        //   2) 各步自己的小缓存：    step1-foundation.json / step3-light-configuration.json …
-        // 这条用例验的是(1)不串台，所以按 `sync-` 前缀取；(2) 单独在下面验。
-        AssertEqual(true, Directory.GetFiles(misakaCache, "sync-*step6*.json").Length == 1);
-        AssertEqual(true, Directory.GetFiles(kiritoCache, "sync-*step4*.json").Length == 1);
-        // 御坂的目录里不该出现桐人那一步的文件，反之亦然
-        AssertEqual(0, Directory.GetFiles(misakaCache, "sync-*step4*.json").Length);
-        AssertEqual(0, Directory.GetFiles(kiritoCache, "sync-*step6*.json").Length);
-        // 各步自己的小缓存同样只落在跑过那一步的角色目录里
+        // 每一类都只落在"跑过那一步的那个角色"目录里。
+        //
+        // 以前这里还验过 `sync-<项目键>-step<N>.json`（那份所有步骤共用的分步进度缓存）——
+        // 它已经连整个服务一起拆掉了，同步台现在**只有各步自己的小文件**，
+        // 所以 `sync-*.json` 必须一个都不剩（残留就说明旧写路径又回来了）。
+        AssertEqual(0, Directory.GetFiles(misakaCache, "sync-*.json").Length);
+        AssertEqual(0, Directory.GetFiles(kiritoCache, "sync-*.json").Length);
+
         AssertEqual(1, Directory.GetFiles(kiritoCache, "step3-light-configuration.json").Length);
         AssertEqual(0, Directory.GetFiles(misakaCache, "step3-light-configuration.json").Length);
 
@@ -13760,6 +14050,74 @@ static int RunUnrealSyncSmoke(string[] args)
                 }
             }
 
+            // 第六步「特效同步」：这一步的检测**是纯本地的**（打网格 sheet + 建计划，
+            // 不跑 Unreal 全量导出），所以冒烟可以直接把它跑一遍 ——
+            // 否则这一步整条链路在真实工程上一次都没被人跑过。
+            var effectAtlases = new SequenceAtlasPackService()
+                .PackEffectSheetsAsync(character, null, null, CancellationToken.None)
+                .GetAwaiter().GetResult();
+            var effectPlan = new UnrealBridgeSequencePublishService()
+                .BuildEffectSyncPlanForAll(character, projectPath, effectAtlases);
+            var effectItems = effectPlan.Actions
+                .Where(action => action.IsEffectLayer)
+                .Select(Step6EffectSyncItem.From)
+                .ToArray();
+            Console.WriteLine($"  第六步 特效（本地，不跑 Unreal 导出）：{effectItems.Length} 个动作有特效层");
+            foreach (var item in effectItems)
+            {
+                Console.WriteLine(
+                    $"      {item.DisplayName}：{item.FrameCount} 帧 · 网格 {item.GridText}"
+                    + $" · {item.StatusText} · MI={item.MaterialName}");
+            }
+
+            // `--effect-sync`：真的把特效同步一遍（**会写进 Unreal 工程**，所以默认不做）。
+            //
+            // 走的是**真实控制器**，只有 Host 是假的 —— 也就是说"点按钮那条路"本身
+            // 也在验证范围内，而不是我在测试里另写一遍编排。
+            if (args.Contains("--effect-sync", StringComparer.OrdinalIgnoreCase))
+            {
+                var syncForEffect = new UnrealProjectSyncViewModel(new UnrealProjectSyncService());
+                syncForEffect.Load(enginePath, projectPath);
+                syncForEffect.IsEngineToToolbox = false;
+                syncForEffect.RefreshDraftSources([character]);
+                syncForEffect.SelectSource(syncForEffect.CharacterSources.Single(item =>
+                    string.Equals(item.DraftCharacter?.Code, character.Code, StringComparison.OrdinalIgnoreCase)));
+                syncForEffect.ReturnToWorkflowStep(6);
+                var publishHost = new FakePublishHost();
+                publishHost.Settings.LoadAndEnsureProjectRoot();
+                new UnrealSyncPublishController(publishHost, syncForEffect)
+                    .PublishCurrentCharacterAssetsToUnrealAsync().GetAwaiter().GetResult();
+                foreach (var line in publishHost.Logs)
+                {
+                    Console.WriteLine($"      · {line}");
+                }
+
+                // 工程里该出现两样：网格 sheet + 材质实例（面片/母材质/系统是插件里的共享资产）。
+                var contentRoot = Path.Combine(Path.GetDirectoryName(projectPath)!, "Content");
+                string ToDisk(string packagePath) => Path.Combine(
+                    contentRoot,
+                    packagePath.Replace("/Game/", string.Empty, StringComparison.OrdinalIgnoreCase)
+                        .Replace('/', Path.DirectorySeparatorChar));
+                foreach (var action in effectPlan.Actions.Where(action => action.IsEffectLayer))
+                {
+                    var folder = ToDisk(action.TargetMaterialFolder);
+                    foreach (var (label, assetName) in new[]
+                             {
+                                 ("网格 sheet", action.EffectSheetName),
+                                 ("材质实例", action.EffectMaterialName)
+                             })
+                    {
+                        var assetPath = Path.Combine(folder, $"{assetName}.uasset");
+                        var present = File.Exists(assetPath);
+                        Console.WriteLine($"      {(present ? "✓" : "✗")} {label} {assetPath}");
+                        if (!present)
+                        {
+                            failures++;
+                        }
+                    }
+                }
+            }
+
             // 各步的小缓存必须落在这个角色自己的目录里（一步一个文件）
             var cacheFolder = UnrealSyncCacheFolder.GetCacheFolderPath(character);
             var stepFiles = Directory.Exists(cacheFolder)
@@ -15276,6 +15634,7 @@ static void WorkflowStateProjectionFollowsStepSemantics()
         bool step3Loaded = false,
         bool step4Loaded = false,
         int sharedTreeCount = 0,
+        int step4Pending = 0,
         int step3Count = 0,
         int step3Error = 0,
         int step3Pending = 0,
@@ -15283,6 +15642,8 @@ static void WorkflowStateProjectionFollowsStepSemantics()
         int step5Count = 0,
         int step5Error = 0,
         int step5Pending = 0,
+        bool step6Loaded = false,
+        int step6Count = 0,
         bool hasDetection = false,
         bool importDirection = false) => new(
             IsImportDirection: importDirection,
@@ -15298,6 +15659,7 @@ static void WorkflowStateProjectionFollowsStepSemantics()
             Step3Loaded: step3Loaded,
             Step4Loaded: step4Loaded,
             SharedTreeItemCount: sharedTreeCount,
+            Step4PendingCount: step4Pending,
             Step3ItemCount: step3Count,
             Step3ErrorCount: step3Error,
             Step3PendingCount: step3Pending,
@@ -15305,6 +15667,8 @@ static void WorkflowStateProjectionFollowsStepSemantics()
             Step5ItemCount: step5Count,
             Step5ErrorCount: step5Error,
             Step5PendingCount: step5Pending,
+            Step6Loaded: step6Loaded,
+            Step6ItemCount: step6Count,
             HasDetectionRun: hasDetection);
 
     // 没选角色 / 选了但没检测
@@ -15358,7 +15722,13 @@ static void WorkflowStateProjectionFollowsStepSemantics()
     AssertEqual("待设置", UnrealSyncWorkflowState.StepStatusText(Inputs(3, step3Loaded: true, step3Pending: 2), 3));
     AssertEqual("已完成", UnrealSyncWorkflowState.StepStatusText(Inputs(3, step3Loaded: true), 3));
     AssertEqual("待检测", UnrealSyncWorkflowState.StepStatusText(Inputs(4), 4));
-    AssertEqual("进行中", UnrealSyncWorkflowState.StepStatusText(Inputs(4, hasDetection: true), 4));
+    // 第四步：检测完但**还有差异**才是「进行中」；
+    // 一条不剩（全是 Unchanged）必须变成「已完成」—— 以前这里少了最后一档，
+    // 序列已经「共检查 173 项 · 无差异 173 项」了徽标还挂着「进行中」（晓桀 2026-09-25 报的）。
+    AssertEqual("进行中", UnrealSyncWorkflowState.StepStatusText(Inputs(4, hasDetection: true, step4Pending: 2), 4));
+    AssertEqual("已完成", UnrealSyncWorkflowState.StepStatusText(Inputs(4, hasDetection: true), 4));
+    // 站到后面的步骤回头看，也该是「已完成」而不是「待处理/进行中」
+    AssertEqual("已完成", UnrealSyncWorkflowState.StepStatusText(Inputs(5, hasDetection: true), 4));
     AssertEqual("进行中", UnrealSyncWorkflowState.StepStatusText(Inputs(5), 5));
     AssertEqual("存在错误", UnrealSyncWorkflowState.StepStatusText(Inputs(5, step5Loaded: true, step5Error: 1), 5));
     AssertEqual("已完成", UnrealSyncWorkflowState.StepStatusText(Inputs(5, step5Loaded: true), 5));

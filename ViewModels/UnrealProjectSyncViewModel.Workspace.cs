@@ -128,6 +128,11 @@ internal sealed partial class UnrealProjectSyncViewModel
         Step3Loaded: _stepLoads.IsLoaded(3),
         Step4Loaded: _stepLoads.IsLoaded(4),
         SharedTreeItemCount: SelectionTreeRoots.Count,
+        // 第四步的徽标要看"还剩几条差异"：全是 Unchanged 才算完成。
+        // 用 `_lastPublishChanges`（检测出来的那份完整差异列表），
+        // 和 `HasNoPublishChanges`、和发布前那条"没差异就别同步"同一个口径。
+        Step4PendingCount: _lastPublishChanges.Count(change =>
+            change.Kind != UnrealBridgeChangeKind.Unchanged),
         Step3ItemCount: LightConfigurationItems.Count,
         Step3ErrorCount: LightConfigurationErrorCount,
         Step3PendingCount: LightConfigurationPendingCount,
@@ -135,6 +140,9 @@ internal sealed partial class UnrealProjectSyncViewModel
         Step5ItemCount: BlueprintSetupItems.Count,
         Step5ErrorCount: BlueprintSetupErrorCount,
         Step5PendingCount: BlueprintSetupPendingCount,
+        // 第 6 步「特效同步」：自己的加载标志 + 自己的动作清单条数。
+        Step6Loaded: IsEffectSyncLoaded,
+        Step6ItemCount: EffectSyncItems.Count,
         HasDetectionRun: HasImportDetection);
 
     /// <summary>这一步在界面上的名字，占位文案里用。</summary>
@@ -227,6 +235,8 @@ internal sealed partial class UnrealProjectSyncViewModel
                 4 => DetectionResultSummaryText,
                 3 => LightConfigurationSummaryText,
                 5 => BlueprintSetupSummaryText,
+                // 第六步「特效同步」：它没有差异树，摘要就是自己的动作清单。
+                6 => EffectSyncSummaryText,
                 _ => string.Empty,
             };
         }
@@ -270,6 +280,12 @@ internal sealed partial class UnrealProjectSyncViewModel
         OnPropertyChanged(nameof(LightConfigurationWorkspaceVisibility));
         OnPropertyChanged(nameof(BlueprintSetupWorkspaceVisibility));
         OnPropertyChanged(nameof(SelectionContentVisibility));
+        // 第六步「特效同步」自己那块也必须在这里补一句 —— 漏掉它就是下面注释说的那个
+        // 状态：检测时先写结果（那一刻还在忙碌态 → 面板收起），收尾才变成内容态；
+        // 面板若没被重新通知，就停在收起上，而占位面板按内容态又是收起的 → **中栏一片空白**。
+        // （2026-09-25 实测踩到：第六步进去什么都没有。）
+        OnPropertyChanged(nameof(EffectSyncWorkspaceVisibility));
+        OnPropertyChanged(nameof(EffectSyncDetailsVisibility));
         OnPropertyChanged(nameof(WorkspacePlaceholderGlyph));
         OnPropertyChanged(nameof(WorkspacePlaceholderTitle));
         OnPropertyChanged(nameof(WorkspacePlaceholderDescription));

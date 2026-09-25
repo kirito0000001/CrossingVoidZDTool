@@ -47,9 +47,10 @@ internal static class SessionStateCache
                     AppJsonSerializerContext.Default.SessionStateCacheDocument));
             return true;
         }
-        catch (Exception)
+        catch (Exception error)
         {
-            // 写不进去不是错误：下次交互会再写一遍。
+            // 写不进去不是错误：下次交互会再写一遍。但**不能一声不吭**（同第 1 步）。
+            ToolboxLog.Warn($"[UnrealSync] 全局现场写入失败：{path}", error);
             return false;
         }
     }

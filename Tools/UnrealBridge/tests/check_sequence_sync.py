@@ -177,7 +177,17 @@ def run_sync(action_codes, detach_paths, bridge, sync_action, flow_break=False,
         shutil.rmtree(root, ignore_errors=True)
 
 
-def ok_action(action):
+def ok_action(action, report=None):
+    """顶替 `_sync_action` 的假实现。
+
+    `report` 必须收下：脚本 2026-09-24 起把「动作内部的阶段点」经它写进进度
+    （`_sync_action(action, report=…)`）。不收就会出现
+    `ok_action() got an unexpected keyword argument 'report'`，
+    而且那条 TypeError 会被逐动作的兜底抓住，表现成"动作全失败"——把自检自己骗过去。
+    """
+    if report is not None:
+        report("正在准备动作目录与命名")
+        report("正在导入图集贴图并切精灵（%d 格素材）" % len(action.get("sourceImages") or []))
     return {
         "actionCode": action["actionCode"],
         "sequencePath": "/Game/GameActor2D/Misaka/AnimSequences/%s.%s" % (
@@ -190,7 +200,7 @@ def ok_action(action):
     }
 
 
-def boom_action(action):
+def boom_action(action, report=None):
     raise RuntimeError("%s: ZDBridge.create_paper_flipbook_from_sprites failed" % action["actionCode"])
 
 
