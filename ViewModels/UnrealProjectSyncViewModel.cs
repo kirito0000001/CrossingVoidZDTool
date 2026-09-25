@@ -499,7 +499,9 @@ internal sealed partial class UnrealProjectSyncViewModel : ObservableObject
     /// 最后一步现在靠 `WorkflowStep != MaxStep` 恒灰。
     /// </summary>
     public bool WorkflowNextButtonEnabled =>
-        WorkflowStep != UnrealSyncWorkflow.MaxStep && CanAdvanceWorkflow && IsWorkflowOperationIdle;
+        // 最后一步认**界面上**那一步（`LastVisibleStep`）：特效隐藏时它就是第 5 步，
+        // 走到那儿「下一步」就该是灰的「已完成」，不能再留一个能通往隐藏步骤的口子。
+        WorkflowStep != UnrealSyncWorkflow.LastVisibleStep && CanAdvanceWorkflow && IsWorkflowOperationIdle;
 
     // ── IsPublishSelectionReady / CanExecutePublishChange 搬到了 Step2MaterialSync.cs ──
 

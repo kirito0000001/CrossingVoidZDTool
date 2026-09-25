@@ -82,7 +82,9 @@ internal sealed class UnrealSyncWorkflowController(
     public async Task GoToNextStepAsync()
     {
         var step = _sync.WorkflowStep;
-        if (step >= UnrealSyncWorkflow.MaxStep)
+        // 认**界面上**的最后一步：特效隐藏时它就是第 5 步（蓝图置入），
+        // 再点「下一步」不该把人送进一个看不见的步骤。
+        if (step >= UnrealSyncWorkflow.LastVisibleStep)
         {
             _host.Notify(new UnrealSyncNotice(
                 UnrealSyncNoticeSeverity.Informational, "已经是最后一步", "蓝图置入完成后本次同步就结束了。"));
@@ -153,7 +155,7 @@ internal sealed class UnrealSyncWorkflowController(
         }
 
         var startStep = _sync.WorkflowStep;
-        for (var step = startStep; step <= UnrealSyncWorkflow.MaxStep; step++)
+        for (var step = startStep; step <= UnrealSyncWorkflow.LastVisibleStep; step++)
         {
             await EnterStepAsync(step);
             // 进步骤本身不再检测了，所以"依次检测"要自己显式跑这一步的检测。
@@ -167,7 +169,7 @@ internal sealed class UnrealSyncWorkflowController(
                 return;
             }
 
-            if (step == UnrealSyncWorkflow.MaxStep)
+            if (step == UnrealSyncWorkflow.LastVisibleStep)
             {
                 break;
             }
@@ -187,8 +189,9 @@ internal sealed class UnrealSyncWorkflowController(
 
         _host.Notify(new UnrealSyncNotice(
             UnrealSyncNoticeSeverity.Success,
-            "六步检测已跑完",
-            $"从第 {startStep} 步检测到第 {UnrealSyncWorkflow.MaxStep} 步，没有需要先处理的内容。"));
+            // 「六步」是收口前的说法；特效隐藏之后界面上只有五步，标题别再报数字。
+            "依次检测已跑完",
+            $"从第 {startStep} 步检测到第 {UnrealSyncWorkflow.LastVisibleStep} 步，没有需要先处理的内容。"));
     }
 
     /// <summary>

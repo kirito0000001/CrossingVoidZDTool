@@ -2886,12 +2886,12 @@
                                                     <TextBlock Grid.Column="2" Style="{StaticResource SubtleTextStyle}" Text="{Binding UnrealProjectSync.WorkflowStep5StatusText, Mode=OneWay}" />
                                                 </Grid>
                                                 <!--
-                                                    第 6 步「特效同步」：和上面五步同构（序号 / 名称 / 状态）。
-                                                    特效有自己的检测与同步（网格 sheet + 材质实例），不再挂在第四步上 ——
-                                                    用户当时的话（步号按当时的编号）："我最早说的是在第七步同步，不要给第五步压得太重"。
-                                                    （那时特效是第 7 步；收口后 4~7 前移成 3~6，它就是现在的第 6 步。）
+                                                    第 6 步「特效同步」：和上面五步同构；特效有自己的检测与同步（网格 sheet + 材质实例）。
+                                                    **现在整行是隐藏的**（晓桀 2026-09-25「先把特效这一步隐藏起来吧」）：
+                                                    Visibility 绑 IsEffectSyncStepVisible → UnrealSyncWorkflow.IncludesEffectSyncStep，
+                                                    改那一个常量这一行就回来 —— 代码 / 缓存 / 中栏面板都别拆。
                                                 -->
-                                                <Grid ColumnSpacing="8">
+                                                <Grid ColumnSpacing="8" Visibility="{Binding UnrealProjectSync.IsEffectSyncStepVisible, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}">
                                                     <Grid.ColumnDefinitions>
                                                         <ColumnDefinition Width="Auto" />
                                                         <ColumnDefinition Width="*" />

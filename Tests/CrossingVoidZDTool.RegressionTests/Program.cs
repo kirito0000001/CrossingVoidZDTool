@@ -116,6 +116,7 @@ var tests = new (string Name, Action Run)[]
     ("特效层自己的节拍也要把时间轴高亮带着走", EffectSubFrameTickKeepsTimelineHighlightInSync),
     ("冷启动恢复现场不依赖方向与来源的先后", SessionRestoreDoesNotDependOnDirectionOrder),
     ("特效层预览也要提前缓存好", EffectPreviewIsPreloadedBeforePlayback),
+    ("特效那一步隐藏了但没被拆掉", EffectStepIsHiddenButStillWired),
     ("工具集清单里有创建与拆分图集", AtlasToolCatalogListsBuiltInTools),
     ("拆分图集能把裁剪过的格子贴回原画布", AtlasExtractRestoresTrimmedSprites),
     ("创建图集会生成清单与命令行参数", AtlasFolderPackBuildsManifestAndArguments),
@@ -1416,7 +1417,7 @@ static void CharacterAntiSwitchDefaultsAndPersists()
 
 static void CharacterDeskUsesScrollableCardsAndDetailDialog()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadMainWindowXaml();
     var characterDeskSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.CharacterDesk.cs"));
     var navigationSource = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.Navigation.cs"));
     var document = XDocument.Parse(xaml);
@@ -2790,7 +2791,7 @@ static void ReorderingSequenceFramesPreservesMetadata()
 
 static void SequenceEditorProvidesCompleteTimelineControls()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadMainWindowXaml();
     var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var document = XDocument.Parse(xaml);
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
@@ -2852,7 +2853,7 @@ static void SequenceEditorProvidesCompleteTimelineControls()
 
 static void SequenceTimelineUsesCompactUniformHeightCards()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadMainWindowXaml();
     var document = XDocument.Parse(xaml);
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
     var frameCard = document.Descendants().Single(element => string.Equals(
@@ -3407,7 +3408,7 @@ static void UnnumberedSequenceFrameImportsPreservePickerOrder()
 
 static void SequenceTimelineDeleteKeyUsesSelectedFrame()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadMainWindowXaml();
     var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var document = XDocument.Parse(xaml);
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
@@ -3496,7 +3497,7 @@ static void SequenceCollectionMultiSelectionTracksClickOrder()
 
 static void SequenceEditorSupportsExtendedMultiSelection()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadMainWindowXaml();
     var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var document = XDocument.Parse(xaml);
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
@@ -3524,7 +3525,7 @@ static void SequenceEditorSupportsExtendedMultiSelection()
 
 static void SequenceBatchCopyUsesTimelineTargetSelection()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadMainWindowXaml();
     var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var document = XDocument.Parse(xaml);
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
@@ -3606,7 +3607,7 @@ static void SequencePreviewInvalidatesDecodedWriteableBitmaps()
 
 static void SequenceEditorProvidesPlaybackModeAndSpaceShortcut()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadMainWindowXaml();
     var source = ReadSequenceFramesShellSource("MainWindow.SequenceFrames.cs");
     var document = XDocument.Parse(xaml);
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
@@ -3629,7 +3630,7 @@ static void SequenceEditorProvidesPlaybackModeAndSpaceShortcut()
 
 static void SequenceEditorCanPauseWhenEffectiveVoiceEnds()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadMainWindowXaml();
     var viewModelSource = File.ReadAllText(Path.Combine(
         Directory.GetCurrentDirectory(),
         "ViewModels",
@@ -3889,7 +3890,7 @@ static void SequenceVoiceSyncAnalysisRefreshesWhenFpsChanges()
 
 static void SequenceVoiceSyncResultsAppearInInspectorAndTimeline()
 {
-    var xaml = File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"));
+    var xaml = ReadMainWindowXaml();
     var document = XDocument.Parse(xaml);
     XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
     var inspectorScrollViewer = document.Descendants().Single(element => string.Equals(
@@ -4613,6 +4614,13 @@ static string ReadViewModelSource(string fileName) =>
 /// </summary>
 static string ReadSequenceFramesShellSource(string fileName) =>
     File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), fileName), Encoding.UTF8);
+
+/// <summary>
+/// 读 `MainWindow.xaml`。同一个来由（见上两条）：九条断言各自读过一遍同一个文件，
+/// 收成一个口，省下的棘轮额度留给真正需要的漂移护栏。
+/// </summary>
+static string ReadMainWindowXaml() =>
+    File.ReadAllText(Path.Combine(Directory.GetCurrentDirectory(), "MainWindow.xaml"), Encoding.UTF8);
 
 static void UnrealBridgeStateIsScopedToCharacterAndProject()
 {
@@ -5499,6 +5507,58 @@ static void PsdReaderToleratesResavedFiles()
 /// 往「图层信息」段尾部塞几个字节（模拟 Photoshop 的 4 字节补齐），并同步改两处长度。
 /// 纯字节手术 —— 只有这样才能造出"PS 存过的样子"来试读取器。
 /// </summary>
+static void EffectStepIsHiddenButStillWired()
+{
+    // 晓桀 2026-09-25：「先把特效这一步隐藏起来吧，可能之后不会用了」。
+    //
+    // 「隐藏」在这里 = **界面上不露 + 走不过去**，但代码/缓存/中栏面板/桥接脚本全都留着
+    // （他说的"可能之后不会用了"就是还可能回来）。所以这条盯两件事：
+    // 一是那一个开关真的把界面关上了，二是**别顺手把那一步拆掉**。
+    AssertEqual(false, UnrealSyncWorkflow.IncludesEffectSyncStep);
+    AssertEqual(5, UnrealSyncWorkflow.LastVisibleStep);
+    // 代码认识的范围**没有缩**：第 6 步仍然在钳位区间里，那一步的东西才不用拆
+    AssertEqual(6, UnrealSyncWorkflow.MaxStep);
+
+    var viewModel = new UnrealProjectSyncViewModel(new UnrealProjectSyncService())
+    {
+        IsEngineToToolbox = false,
+    };
+    AssertEqual(false, viewModel.IsEffectSyncStepVisible);
+    // 右栏那一行绑的就是它 —— 光有属性不算，得真绑上
+    var xaml = ReadMainWindowXaml();
+    AssertEqual(
+        true,
+        xaml.Contains(
+            "Visibility=\"{Binding UnrealProjectSync.IsEffectSyncStepVisible",
+            StringComparison.Ordinal));
+
+    // 走不过去：站在第 5 步点「下一步」，**停在原地**并说明是最后一步，
+    // 不能把人送进一个界面上看不见的步骤。
+    var (sync, controller, host, root) = CreateWorkflowController(5);
+    try
+    {
+        // 让这一步"有数据"，否则按钮本来就是灰的，断言等于没验
+        sync.SetBlueprintSetupResult(new UnrealBlueprintSetupResult
+        {
+            Succeeded = true,
+            CharacterCode = "Misaka",
+            Items = [],
+        });
+        AssertEqual(true, sync.CanAdvanceWorkflow);
+        // 但它就是最后一步 → 「下一步」仍然该是灰的「已完成」
+        AssertEqual(false, sync.WorkflowNextButtonEnabled);
+
+        controller.GoToNextStepAsync().GetAwaiter().GetResult();
+        AssertEqual(5, sync.WorkflowStep);
+        AssertEqual(1, host.Notices.Count);
+        AssertEqual("已经是最后一步", host.Notices[0].Title);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static void EffectPreviewIsPreloadedBeforePlayback()
 {
     // 晓桀报的：特效预览一闪一闪、卡到看不清，要和主序列预览一样"提前缓存好"。
@@ -6470,14 +6530,15 @@ static void DetectAllStepsIgnoresPendingSteps()
 
         controller.DetectAllStepsAsync().GetAwaiter().GetResult();
 
-        // 一路检测到最大步，中间不再因"还有没处理的事"停下。
-        // 用 Range 写而不是写死 4,5,6：以后挪号（合并第 2 步）这条不用再改。
+        // 一路检测到**界面上**的最后一步，中间不再因"还有没处理的事"停下。
+        // 用 Range + `LastVisibleStep` 写而不是写死数字：以后挪号、或者像现在这样
+        // 把第六步「特效同步」藏起来（`LastVisibleStep` 跟着变 5），这条都不用再改。
         AssertSequence(
-            Enumerable.Range(4, UnrealSyncWorkflow.MaxStep - 3).ToArray(),
+            Enumerable.Range(4, UnrealSyncWorkflow.LastVisibleStep - 3).ToArray(),
             host.DetectedSteps.ToArray());
-        AssertEqual(UnrealSyncWorkflow.MaxStep, sync.WorkflowStep);
+        AssertEqual(UnrealSyncWorkflow.LastVisibleStep, sync.WorkflowStep);
         var notice = host.Notices.Single();
-        AssertEqual("六步检测已跑完", notice.Title);
+        AssertEqual("依次检测已跑完", notice.Title);
         AssertEqual(UnrealSyncNoticeSeverity.Success, notice.Severity);
     }
     finally
@@ -7089,7 +7150,9 @@ static void TechnicalDebtRatchetOnlyGoesDown()
     // 111 -> 96：第三招。`MainWindow.SequenceFrames.cs` 被 15 条断言各读了一遍，
     // 收成 `ReadSequenceFramesShellSource(fileName)`；新增的两条漂移护栏
     // （「特效层自己的节拍也要把时间轴高亮带着走」的两半）都走这个口，净降。
-    Ratchet("读源码文件的调用点", sourceReadCalls, 96);
+    // 96 -> 88：第四招。`MainWindow.xaml` 被 9 条断言各读了一遍，收成 `ReadMainWindowXaml()`
+    //（-9 +1 = -8）；新增的「特效那一步隐藏了但没被拆掉」也走这个口，净降。
+    Ratchet("读源码文件的调用点", sourceReadCalls, 88);
 
     if (violations.Count > 0)
     {

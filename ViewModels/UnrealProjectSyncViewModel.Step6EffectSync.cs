@@ -73,6 +73,15 @@ internal sealed partial class UnrealProjectSyncViewModel
 
     public bool IsEffectSyncWorkspace => !IsEngineToToolbox && WorkflowStep == 6;
 
+    /// <summary>
+    /// 这一步要不要露在右侧流程列表里。
+    ///
+    /// 晓桀 2026-09-25：「先把特效这一步隐藏起来吧，可能之后不会用了」。
+    /// 隐藏**只影响界面**：代码、缓存、中栏面板都留着，改
+    /// <see cref="UnrealSyncWorkflow.IncludesEffectSyncStep"/> 一处就整条回来。
+    /// </summary>
+    public bool IsEffectSyncStepVisible => UnrealSyncWorkflow.IncludesEffectSyncStep;
+
     public Visibility EffectSyncWorkspaceVisibility =>
         IsEffectSyncWorkspace && WorkspaceState == UnrealSyncWorkspaceState.HasContent
             ? Visibility.Visible
