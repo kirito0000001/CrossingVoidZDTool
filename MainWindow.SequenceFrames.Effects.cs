@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -296,8 +297,12 @@ namespace CrossingVoidZDTool
                 section.Action,
                 expectedFrameCount: ResolveEffectFrameCount(character, section));
             _sequenceEffectPreviewCache.Clear();
+            // 清完立刻补一次预加载 —— 否则播放中重载特效层（改帧/换动作）后缓存是空的，
+            // 接下来每一帧都命中不了（晓桀 2026-09-25：那会一路闪到最后全看不见）。
+            _ = PreloadSequenceEffectBitmapsAsync();
             _sequenceEffectShownFrameOrdinal = -1;
             _sequenceEffectSubFrame = 0;
+            _sequenceEffectLastSubFrame = -1;
             _sequenceEffectPinnedSlot = null;
             _applicationViewModel.SequenceFrames.SetEffectLayer(layer.HasFrames ? layer : null);
             UpdateSequenceEffectLayerSource();
@@ -352,6 +357,144 @@ namespace CrossingVoidZDTool
         /// 所以特效层在自己的小定时器上推进，角色层照旧按素材帧推进 —— 两层合起来
         /// 正好是"角色 10fps、特效 20fps"的样子。
         /// </summary>
+        /// <summary>
+        /// 特效层的**逐格序列**：第 i 格（1 起）该显示哪一帧，缺号的是 null。
+        ///
+        /// 为什么要"建"而不是"算"：以前每个 tick 现算序号 `startOrdinal + subFrame`，再去
+        /// `layer.Frames` 里**线性查** `Ordinal` 相等的那一帧。而 `Frames` 里**只有导进来的那些帧**
+        /// —— 缺号的根本不在列表里；预加载覆盖的又是"池子里的帧"，跟播放要的"逐格的帧"不是同一个集合。
+        /// 于是池子里缺哪一号，播放就解析成空、白一帧：看上去就是"**有些图片闪一下**"
+        /// （晓桀 2026-09-25 报的，特效本来就快，一闪就没了）。
+        ///
+        /// 建成序列之后：**缺号在"建"的时候一次定下来**（预加载照着它一次多带一张），
+        /// 播放只按下标取，不再每 tick 查一遍。
+        /// 重建的触发就是下面那把 key：换动作 / 改倍数 / 重新导入 / 帧数变了。
+        /// </summary>
+        private List<SequenceEffectFrame?> _sequenceEffectSlots = [];
+        private string _sequenceEffectSlotsKey = string.Empty;
+
+        private void RebuildSequenceEffectSlots()
+        {
+            var frames = _applicationViewModel.SequenceFrames.PreviewFrames;
+            var layer = _applicationViewModel.SequenceFrames.EffectLayer;
+            var key = string.Join(
+                "|",
+                layer?.LayerName ?? string.Empty,
+                layer?.Multiplier ?? 0,
+                layer?.ImportedAt?.Ticks ?? 0,
+                layer?.Frames.Count ?? 0,
+                frames.Count,
+                frames.Sum(frame => Math.Max(1, frame.DurationFrames)));
+            if (string.Equals(key, _sequenceEffectSlotsKey, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _sequenceEffectSlotsKey = key;
+            _sequenceEffectSlots = [];
+            if (layer is null || !layer.HasFrames)
+            {
+                return;
+            }
+
+            var byOrdinal = layer.Frames
+                .GroupBy(frame => frame.Ordinal)
+                .ToDictionary(group => group.Key, group => group.First());
+            var multiplier = Math.Max(1, layer.Multiplier);
+            foreach (var frame in frames)
+            {
+                var slotCount = Math.Max(1, frame.DurationFrames) * multiplier;
+                for (var slot = 0; slot < slotCount; slot++)
+                {
+                    _sequenceEffectSlots.Add(
+                        byOrdinal.TryGetValue(_sequenceEffectSlots.Count + 1, out var effectFrame)
+                            ? effectFrame
+                            : null);
+                }
+            }
+        }
+
+        /// <summary>按**格号**取这一格该显示哪张图（1 起；越界 / 缺号 / 空帧 → null）。</summary>
+        private ImageSource? ResolveSequenceEffectSourceAt(int ordinal)
+        {
+            if (ordinal < 1 || ordinal > _sequenceEffectSlots.Count)
+            {
+                return null;
+            }
+
+            var effectFrame = _sequenceEffectSlots[ordinal - 1];
+            if (effectFrame is null || effectFrame.IsEmpty)
+            {
+                return null;
+            }
+
+            if (_sequenceEffectPreviewCache.TryGet(effectFrame.FilePath, out var cached))
+            {
+                _sequenceEffectLastSource = cached;
+                return cached;
+            }
+
+            // **播放中绝不现解**。
+            //
+            // 以前这里同步 `LoadFile` 一张：一张 PNG 解在 UI 线程上要十几毫秒，特效层按"倍数"
+            // 播（最狠 40fps，每帧只有 25ms）—— 解不过来就整条都跟不上：**每一帧都闪、最后全看不见**
+            // （晓桀 2026-09-25 报的）。现在改成：命中不了就**沿用上一张**（画面冻一下也比闪强），
+            // 同时把这个文件丢给预加载去补 —— 补上了下一 tick 就是命中。
+            QueueSequenceEffectPreload(effectFrame.FilePath, effectFrame.FileName);
+            return _sequenceEffectLastSource;
+        }
+
+        private ImageSource? _sequenceEffectLastSource;
+        private int _sequenceEffectLastSubFrame = -1;
+
+        /// <summary>
+        /// 播放中发现没预加载到的图：**异步**解一张放回缓存，不阻塞这一 tick。
+        /// 同一个文件同时只会排一次（用一张"排队中"的表挡重复）。
+        /// </summary>
+        private readonly HashSet<string> _sequenceEffectPreloadQueue = new(StringComparer.OrdinalIgnoreCase);
+
+        private void QueueSequenceEffectPreload(string filePath, string displayName)
+        {
+            if (string.IsNullOrWhiteSpace(filePath) || !_sequenceEffectPreloadQueue.Add(filePath))
+            {
+                return;
+            }
+
+            _ = Task.Run(() =>
+            {
+                // ⚠️ 后台线程**只能解码**：`WriteableBitmap` 是 WinRT 对象，在这里建会抛
+                // `0x8001010E`（RPC_E_WRONG_THREAD）—— 上一版就是这么错的（晓桀 2026-09-25 贴的日志）。
+                // 解出来的字节回到 UI 线程再装成 bitmap。
+                SequencePreviewBitmapCache.DecodedBitmap decoded;
+                try
+                {
+                    decoded = SequencePreviewBitmapCache.DecodeToPixels(filePath);
+                }
+                catch (Exception ex)
+                {
+                    _sequenceEffectPreloadQueue.Remove(filePath);
+                    DispatcherQueue.TryEnqueue(() =>
+                        AppendLog(LogKind.Warning, $"特效帧解码不出来：{displayName}", ex));
+                    return;
+                }
+
+                DispatcherQueue.TryEnqueue(() =>
+                {
+                    _sequenceEffectPreloadQueue.Remove(filePath);
+                    try
+                    {
+                        var loaded = SequencePreviewBitmapCache.CreateFromPixels(decoded);
+                        _sequenceEffectPreviewCache.Store(filePath, loaded);
+                        _sequenceEffectLastSource = loaded;
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendLog(LogKind.Warning, $"特效帧装不进画面：{displayName}", ex);
+                    }
+                });
+            });
+        }
+
         private void UpdateSequenceEffectLayerSource()
         {
             var frames = _applicationViewModel.SequenceFrames.PreviewFrames;
@@ -370,6 +513,8 @@ namespace CrossingVoidZDTool
                 return;
             }
 
+            RebuildSequenceEffectSlots();
+
             // 这一帧在特效序列里的起点：前面所有帧的格数 × 倍数，再加本帧内的子帧号。
             var startOrdinal = 1;
             for (var index = 0; index < currentIndex; index++)
@@ -377,37 +522,38 @@ namespace CrossingVoidZDTool
                 startOrdinal += Math.Max(1, frames[index].DurationFrames) * Math.Max(1, layer.Multiplier);
             }
 
+            // ── 诊断（只在两个事件上打，不刷屏）─────────────────────────────
+            // "来回播"只有两个可能：① **当前帧**在被来回改（角色/时间轴那一侧）；
+            // ② 当前帧没变、但**子帧自己绕回**了（`% slotCount` 到了头）。
+            // 这两条日志分开报，跑一次就能看出是哪一侧。
+            var slotCount = Math.Max(1, current.DurationFrames) * Math.Max(1, layer.Multiplier);
             if (_sequenceEffectShownFrameOrdinal != currentIndex)
             {
+                AppendDiagnosticLog(
+                    LogKind.Info,
+                    $"[Effect Cursor] 切帧：{_sequenceEffectShownFrameOrdinal} → {currentIndex}" +
+                    $"（子帧清零，原 counter={_sequenceEffectSubFrame}，本帧格数={slotCount}）");
                 _sequenceEffectShownFrameOrdinal = currentIndex;
                 _sequenceEffectSubFrame = 0;
             }
 
-            var ordinal = startOrdinal + ResolveSequenceEffectSubFrameOfCurrentFrame(current);
-            var effectFrame = layer.Frames.FirstOrDefault(frame => frame.Ordinal == ordinal);
-            if (effectFrame is null || effectFrame.IsEmpty)
+            var subFrame = ResolveSequenceEffectSubFrameOfCurrentFrame(current);
+            if (_sequenceEffectLastSubFrame >= 0 && subFrame < _sequenceEffectLastSubFrame)
             {
-                ShowSequenceEffectSource(null);
-                return;
+                AppendDiagnosticLog(
+                    LogKind.Info,
+                    $"[Effect Cursor] 子帧绕回：frame={currentIndex} {_sequenceEffectLastSubFrame}→{subFrame}" +
+                    $"（counter={_sequenceEffectSubFrame}，本帧格数={slotCount}）");
             }
 
-            if (!_sequenceEffectPreviewCache.TryGet(effectFrame.FilePath, out var source))
-            {
-                try
-                {
-                    source = SequencePreviewBitmapCache.LoadFile(effectFrame.FilePath);
-                    _sequenceEffectPreviewCache.Store(effectFrame.FilePath, source);
-                }
-                catch (Exception ex)
-                {
-                    _sequenceEffectPreviewCache.MarkFailed(effectFrame.FilePath);
-                    AppendLog(LogKind.Warning, $"特效帧读不出来：{effectFrame.FileName}", ex);
-                    ShowSequenceEffectSource(null);
-                    return;
-                }
-            }
+            _sequenceEffectLastSubFrame = subFrame;
 
-            ShowSequenceEffectSource(source);
+            var ordinal = startOrdinal + subFrame;
+            ShowSequenceEffectSource(ResolveSequenceEffectSourceAt(ordinal));
+
+            // **提前把下一格准备到暗的那张上**（同角色层的 `PrepareNextSequencePreviewSource`）：
+            // 下一 tick 的 `Show` 就只剩"翻一下可见性"。
+            PrepareSequenceEffectSource(ResolveSequenceEffectSourceAt(ordinal + 1));
         }
 
         /// <summary>
@@ -438,6 +584,17 @@ namespace CrossingVoidZDTool
         }
 
         /// <summary>
+        /// 把某张图**先铺到暗的那张上**（不翻页）。下一 tick 的
+        /// <see cref="ShowSequenceEffectSource"/> 于是只是切换可见性，
+        /// 不会出现"已经翻过去了、图还没铺好"的那一帧空窗。
+        /// </summary>
+        private void PrepareSequenceEffectSource(ImageSource? source)
+        {
+            SequencePreviewEffectPresenter.Prepare(source);
+            SequenceEditorPreviewEffectPresenter.Prepare(source);
+        }
+
+        /// <summary>
         /// 特效层**先解码好再播** —— 和角色层那条 `PreloadSequencePreviewBitmapsAsync` 同一个道理。
         ///
         /// 以前只有角色层预加载，特效层是**播放中现用现解**（`UpdateSequenceEffectLayerSource()`
@@ -456,10 +613,16 @@ namespace CrossingVoidZDTool
                 return;
             }
 
+            // 照着**逐格序列**加载（一次多带一张）：播放要的是"逐格的帧"，
+            // 以前加载的是"池子里的帧" —— 两个集合不是一回事（缺号的格子到时候才现解，卡一下）。
+            RebuildSequenceEffectSlots();
+            // 每次开播都重新试一遍（失败不该是永久的）。
+            _sequenceEffectPreviewCache.ResetFailures();
             var failures = await _sequenceEffectPreviewCache.PreloadPathsAsync(
-                layer.Frames
-                    .Where(frame => !frame.IsEmpty && !string.IsNullOrWhiteSpace(frame.FilePath))
-                    .Select(frame => (frame.FilePath, frame.FileName)));
+                _sequenceEffectSlots
+                    .Where(frame => frame is { IsEmpty: false } && !string.IsNullOrWhiteSpace(frame.FilePath))
+                    .Select(frame => (frame!.FilePath, frame.FileName))
+                    .Distinct());
             if (failures.Count == 0)
             {
                 return;

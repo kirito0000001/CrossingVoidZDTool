@@ -1910,7 +1910,17 @@ namespace CrossingVoidZDTool
             SequencePreviewPresenter.Show(source);
             SequenceEditorPreviewPresenter.Show(source);
             // 角色层每次换图都把特效层跟着对齐（同一个时间点，两层各显各的帧）。
-            UpdateSequenceEffectLayerSource();
+            //
+            // ⚠️ 但**只在特效层自己的节拍没在跑时**才对 —— 播放中两条 tick 都推特效层会互相打架：
+            // 特效 tick 刚把子帧推到第 4 格、高亮也推到第 4 格，角色 tick（10fps）紧跟着进来，
+            // 它看到的"当前帧"是刚被高亮改过的那个，于是判成"帧变了"把子帧清零 → 推回第 3 格；
+            // 特效 tick 再推回第 4 格…… 看上去就是**这两格来回播**（晓桀 2026-09-25 的第二张截图）。
+            // 播放期间只由特效层自己的 tick 推进（它本来就会检测帧切换并对齐），
+            // 暂停/单步时才靠这句对齐。
+            if (_sequenceEffectSubFrameTimer is not { IsRunning: true })
+            {
+                UpdateSequenceEffectLayerSource();
+            }
         }
 
         private void PrepareNextSequencePreviewSource()

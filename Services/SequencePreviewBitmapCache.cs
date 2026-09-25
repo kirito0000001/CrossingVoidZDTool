@@ -23,6 +23,15 @@ internal sealed class SequencePreviewBitmapCache
 
     public void MarkFailed(string path) => _failedPaths.Add(path);
 
+    /// <summary>
+    /// 把"读不出来"的名单清掉 —— 每次预加载前调。
+    ///
+    /// 以前失败是**永久**的：一张图在预加载时正好被别的进程占着（PS 开着、图集工具刚写完），
+    /// 就被记进 `_failedPaths`，以后每次都跳过它 —— 于是"播到后面整个特效都不见了"
+    /// （晓桀 2026-09-25 报的）。图是可再生的，每次开播都该重新试一次。
+    /// </summary>
+    public void ResetFailures() => _failedPaths.Clear();
+
     public void Store(string cacheKey, ImageSource bitmap)
     {
         if (!string.IsNullOrWhiteSpace(cacheKey))
@@ -34,8 +43,72 @@ internal sealed class SequencePreviewBitmapCache
     /// <summary>
     /// 直接按文件路径加载一张图（特效层用：它的缓存键就是路径本身）。
     /// 失败会抛，调用方自己决定"这一张画不出来"怎么处理。
+    /// ⚠️ **只能在 UI 线程调** —— 它内部要建 <see cref="WriteableBitmap"/>（WinRT 对象，跨线程会
+    /// 抛 `RPC_E_WRONG_THREAD / 0x8001010E`）。要在后台线程解码就先 <see cref="DecodeToPixels"/>，
+    /// 再回到 UI 线程 <see cref="CreateFromPixels"/>。
     /// </summary>
-    public static ImageSource LoadFile(string filePath) => LoadWriteableBitmap(filePath);
+    public static ImageSource LoadFile(string filePath) => CreateFromPixels(DecodeToPixels(filePath));
+
+    /// <summary>解好的一张图（GDI+ 产物，纯内存字节）—— 这一步**可以**在后台线程做。</summary>
+    public readonly record struct DecodedBitmap(int Width, int Height, byte[] Pixels);
+
+    /// <summary>
+    /// 把 PNG 解成 RGBA 字节（预乘）。**不碰任何 WinRT 类型**，所以能在后台线程跑。
+    ///
+    /// 拆出这一步就是因为 `WriteableBitmap` 只能在 UI 线程建：以前
+    /// `QueueSequenceEffectPreload` 把整条 `LoadFile` 丢进 `Task.Run`，结果每张都抛
+    /// `0x8001010E`（晓桀 2026-09-25 贴的日志）。现在后台只解码、UI 线程只建 bitmap。
+    /// </summary>
+    public static DecodedBitmap DecodeToPixels(string filePath)
+    {
+        using var source = new Bitmap(filePath);
+        using var converted = new Bitmap(source.Width, source.Height, PixelFormat.Format32bppPArgb);
+        using (var graphics = Graphics.FromImage(converted))
+        {
+            graphics.Clear(Color.Transparent);
+            graphics.DrawImage(source, 0, 0, source.Width, source.Height);
+        }
+
+        var rectangle = new Rectangle(0, 0, converted.Width, converted.Height);
+        var bitmapData = converted.LockBits(rectangle, ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
+        try
+        {
+            var rowBytes = converted.Width * 4;
+            var stride = Math.Abs(bitmapData.Stride);
+            var buffer = new byte[stride * converted.Height];
+            Marshal.Copy(bitmapData.Scan0, buffer, 0, buffer.Length);
+            if (bitmapData.Stride == rowBytes)
+            {
+                return new DecodedBitmap(converted.Width, converted.Height, buffer);
+            }
+
+            // 行有 padding：按行搬到紧凑缓冲里。
+            var compact = new byte[rowBytes * converted.Height];
+            for (var y = 0; y < converted.Height; y++)
+            {
+                Array.Copy(buffer, y * stride, compact, y * rowBytes, rowBytes);
+            }
+
+            return new DecodedBitmap(converted.Width, converted.Height, compact);
+        }
+        finally
+        {
+            converted.UnlockBits(bitmapData);
+        }
+    }
+
+    /// <summary>
+    /// 把解好的字节装成 <see cref="WriteableBitmap"/>。
+    /// ⚠️ **只能在 UI 线程调**（WinRT 对象）。
+    /// </summary>
+    public static ImageSource CreateFromPixels(DecodedBitmap decoded)
+    {
+        var writeableBitmap = new WriteableBitmap(decoded.Width, decoded.Height);
+        using var pixelStream = writeableBitmap.PixelBuffer.AsStream();
+        pixelStream.Write(decoded.Pixels, 0, decoded.Pixels.Length);
+        writeableBitmap.Invalidate();
+        return writeableBitmap;
+    }
 
     public async Task<IReadOnlyList<SequencePreviewBitmapLoadFailure>> PreloadAsync(IEnumerable<SequenceFrameItem> frames)
     {
@@ -136,7 +209,7 @@ internal sealed class SequencePreviewBitmapCache
     {
         try
         {
-            return LoadWriteableBitmap(frame.FilePath);
+            return LoadFile(frame.FilePath);
         }
         catch
         {
@@ -149,46 +222,6 @@ internal sealed class SequencePreviewBitmapCache
         }
     }
 
-    private static WriteableBitmap LoadWriteableBitmap(string filePath)
-    {
-        using var source = new Bitmap(filePath);
-        using var converted = new Bitmap(source.Width, source.Height, PixelFormat.Format32bppPArgb);
-        using (var graphics = Graphics.FromImage(converted))
-        {
-            graphics.Clear(Color.Transparent);
-            graphics.DrawImage(source, 0, 0, source.Width, source.Height);
-        }
-
-        var writeableBitmap = new WriteableBitmap(converted.Width, converted.Height);
-        var rectangle = new Rectangle(0, 0, converted.Width, converted.Height);
-        var bitmapData = converted.LockBits(rectangle, ImageLockMode.ReadOnly, PixelFormat.Format32bppPArgb);
-        try
-        {
-            using var pixelStream = writeableBitmap.PixelBuffer.AsStream();
-            var rowBytes = converted.Width * 4;
-            var stride = Math.Abs(bitmapData.Stride);
-            var buffer = new byte[stride * converted.Height];
-            Marshal.Copy(bitmapData.Scan0, buffer, 0, buffer.Length);
-            if (bitmapData.Stride == rowBytes)
-            {
-                pixelStream.Write(buffer, 0, buffer.Length);
-            }
-            else
-            {
-                for (var y = 0; y < converted.Height; y++)
-                {
-                    pixelStream.Write(buffer, y * stride, rowBytes);
-                }
-            }
-        }
-        finally
-        {
-            converted.UnlockBits(bitmapData);
-        }
-
-        writeableBitmap.Invalidate();
-        return writeableBitmap;
-    }
 
     public void Clear()
     {
