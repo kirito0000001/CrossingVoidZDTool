@@ -106,12 +106,15 @@ var tests = new (string Name, Action Run)[]
     ("底板导出只留本次结果并写对照表", BasePlateExportWritesFramesAndManifest),
     ("特效按文件名编号对号入座并保留空帧", SequenceEffectImportMapsFramesByNumber),
     ("特效层可读可清且不碰动作帧", SequenceEffectLayerLoadsAndClears),
+    ("特效帧落点去掉了多余的两层，旧目录会自动搬上来", SequenceEffectFramesLiveDirectlyUnderEffects),
     ("特效层按动作帧率的2倍展开并保留空帧", SequenceEffectSyncLayoutDoublesFpsAndKeepsBlankFrames),
     ("同步计划带上特效层并携带图集矩形", SequencePlanCarriesEffectLayerAction),
     ("特效帧算进动作内容指纹且失败时不记", EffectFramesJoinActionFingerprint),
     ("底板PSD的图层能原样读回且顺序就是帧序", BasePlatePsdLayersReadBackInOrder),
-    ("特效帧从底板PSD读回时按图层顺序落位", EffectFramesImportFromPsdKeepsLayerOrder),
+    ("特效帧按图层组的帧号落位、缺帧算空帧", EffectFramesImportFromPsdKeepsLayerOrder),
     ("PS/画世界重存过的底板PSD照样能读回", PsdReaderToleratesResavedFiles),
+    ("底板PSD按图层组写、按图层组读回", BasePlatePsdGroupsRoundTrip),
+    ("底板PSD的组记录与画世界同形状", BasePlatePsdGroupRecordsMatchPainterApp),
     ("预览叠特效时时间轴按特效帧展开成单格", EffectTimelineExpandsIntoPerEffectFrames),
     ("特效层自己的节拍也要把时间轴高亮带着走", EffectSubFrameTickKeepsTimelineHighlightInSync),
     ("冷启动恢复现场不依赖方向与来源的先后", SessionRestoreDoesNotDependOnDirectionOrder),
@@ -4925,16 +4928,47 @@ static void BasePlateExportWritesFramesAndManifest()
         // 上一次导出的残留：目录只该拥有本次结果，所以要被清掉。
         Directory.CreateDirectory(plan.OutputDirectory);
         File.WriteAllText(Path.Combine(plan.OutputDirectory, "stale.png"), "old");
+        // 但 `Effect/`（从 PSD 读回来的特效帧）是**画出来的成果**，重导底板不该把它删了。
+        var effectFolder = BasePlateExportPlanner.ResolveEffectFolderPath(plan.OutputDirectory);
+        Directory.CreateDirectory(effectFolder);
+        File.WriteAllText(Path.Combine(effectFolder, "0001.png"), "drawn");
 
         var result = new BasePlateExportService()
             .ExportAsync(plan, root, progress: null, CancellationToken.None)
             .GetAwaiter()
             .GetResult();
 
+        // PSD 是按**图层组**写的：一帧一组（组名 `帧0001`…），
+        // 组里是 [原本帧（对照底图）] + [空白层 特效] —— 展开一个组就能对着画。
+        var psdDocument = PsdReader.Read(result.PsdFilePath);
+        AssertSequence(
+            Enumerable.Range(1, result.FrameCount)
+                .Select(index => BasePlateExportPlanner.FormatFrameGroupName(index))
+                .ToArray(),
+            psdDocument.Layers
+                .Where(layer => layer.SectionDividerKind == PsdSectionDividerKinds.GroupStartOpen)
+                .Select(layer => layer.Name)
+                .ToArray());
+        AssertEqual(
+            result.FrameCount,
+            psdDocument.Layers.Count(layer => layer.SectionDividerKind == PsdSectionDividerKinds.GroupEnd));
+        // 每组两层：原本帧 + 特效空层
+        AssertEqual(
+            result.FrameCount,
+            psdDocument.Layers.Count(layer =>
+                layer.SectionDividerKind == 0 &&
+                layer.Name.StartsWith(BasePlateExportPlanner.BasePlateLayerName, StringComparison.Ordinal)));
+        AssertEqual(
+            result.FrameCount,
+            psdDocument.Layers.Count(layer =>
+                layer.SectionDividerKind == 0 &&
+                layer.Name == BasePlateExportPlanner.EffectLayerName));
+
         // (2 + 1 + 1) 格 × 2 = 8 张。
         AssertEqual(8, result.FrameCount);
         AssertEqual(1, result.RemovedStaleFiles);
         AssertEqual(false, File.Exists(Path.Combine(plan.OutputDirectory, "stale.png")));
+        AssertEqual(true, File.Exists(Path.Combine(effectFolder, "0001.png")));
 
         var written = Directory
             .EnumerateFiles(plan.OutputDirectory, "*.png")
@@ -5411,6 +5445,215 @@ static void BasePlatePsdLayersReadBackInOrder()
 /// 靠名字认帧认不出来）；整张透明的层算空帧；图层数和动作帧数对不上就**先停下报数**，
 /// 因为多一层少一层都会让整条特效时序错位，而那种错看起来很像"本来就该这样"。
 /// </summary>
+static void SequenceEffectFramesLiveDirectlyUnderEffects()
+{
+    // 晓桀 2026-09-27：「特效多套了两层路径」—— 原来落点是
+    // `<动作>\Effects\Effect\Frames\`，`Effect`（层名）和 `Frames` 两层都是多余的：
+    // 层名本来就写在每个文件名里（`Misaka_Sk2_Effect_0001.png`）。
+    // 现在就是 `<动作>\Effects\<帧>.png`，而**人已经画好的旧目录要被搬上来**（不能丢）。
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var action = SequenceFrameService.BuildActions(new CharacterSkillsData()).First();
+        var service = new SequenceEffectService();
+
+        // 新落点就在 Effects 根上，没有层名/Frames 那两层
+        var framesFolder = SequenceEffectService.GetLayerFramesFolderPath(character, action);
+        AssertEqual(SequenceEffectService.GetEffectsRootPath(character, action), framesFolder);
+        AssertEqual(true, framesFolder.EndsWith("Effects", StringComparison.Ordinal));
+
+        // 造一份旧落点的现场：Effects\Effect\Frames\ 里放两张画好的帧
+        var legacy = Path.Combine(
+            SequenceEffectService.GetEffectsRootPath(character, action),
+            SequenceEffectService.DefaultLayerName,
+            SequenceActionFolderLayout.FramesFolderName);
+        Directory.CreateDirectory(legacy);
+        var prefix = SequenceEffectService.BuildAssetPrefix(action.Code);
+        var legacyFirst = Path.Combine(legacy, $"{prefix}_0001.png");
+        var legacyThird = Path.Combine(legacy, $"{prefix}_0003.png");
+        WriteSolidImage(legacyFirst, Color.Red, 8, 8);
+        WriteSolidImage(legacyThird, Color.Blue, 8, 8);
+
+        // 读一次就会顺手搬家
+        var layer = service.Load(character, action, expectedFrameCount: 3);
+        AssertEqual(2, layer.Frames.Count);
+        AssertEqual(1, layer.Frames[0].Ordinal);
+        AssertEqual(3, layer.Frames[1].Ordinal);
+        // 文件真的在新落点，旧目录整棵消失
+        AssertEqual(true, File.Exists(Path.Combine(framesFolder, $"{prefix}_0001.png")));
+        AssertEqual(true, File.Exists(Path.Combine(framesFolder, $"{prefix}_0003.png")));
+        AssertEqual(false, Directory.Exists(legacy));
+
+        // 清一层只删**这一层自己的**帧：落点是共用的，删 A 不能碰 B
+        var otherPrefix = SequenceEffectService.BuildAssetPrefix(action.Code, "EffectB");
+        var otherFile = Path.Combine(framesFolder, $"{otherPrefix}_0001.png");
+        WriteSolidImage(otherFile, Color.Green, 8, 8);
+        AssertEqual(2, service.ClearLayer(character, action));
+        AssertEqual(false, File.Exists(Path.Combine(framesFolder, $"{prefix}_0001.png")));
+        AssertEqual(true, File.Exists(otherFile));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void BasePlatePsdGroupRecordsMatchPainterApp()
+{
+    // 2026-09-27：画世界导入我们导出的 PSD 报「图层读取错误 -53」。
+    // 拿它自己导出的 5 图层组样本逐条对过，差在三处 —— 这三处都必须和它一模一样，
+    // 否则它读不动（这些都是"规范允许多种写法、但对方只吃一种"的地方）：
+    //   ① 分组壳层也要写 **4 个通道**（0×0 矩形 → 每个通道 2 字节 RLE 头），不是 0 个；
+    //   ② `lsct` 的数据只有 **4 字节**（种类），没有混合模式/子类型那两段；
+    //   ③ 附加块顺序是 **`luni` 在前、`lsct` 在后**。
+    var root = CreateTemporaryTestFolder();
+    const int canvas = 8;
+    try
+    {
+        var image = Path.Combine(root, "one.png");
+        WriteSolidImage(image, Color.Red, canvas, canvas);
+        var psd = Path.Combine(root, "grouped.psd");
+        PsdWriter.WriteGrouped(
+            psd,
+            canvas,
+            canvas,
+            [new PsdLayerSource("参考 0001", image)],
+            [new PsdLayerGroup("帧0001", [new PsdLayerSource("特效", image)])]);
+
+        var document = PsdReader.Read(psd);
+        var groupEnd = document.Layers.Single(layer => layer.SectionDividerKind == PsdSectionDividerKinds.GroupEnd);
+        var groupStart = document.Layers.Single(layer => layer.SectionDividerKind == PsdSectionDividerKinds.GroupStartOpen);
+
+        // ① 壳层 4 个通道
+        AssertEqual(4, groupEnd.ChannelCount);
+        AssertEqual(4, groupStart.ChannelCount);
+
+        // ② `lsct` 长度 4，③ 排在 `luni` 后面
+        foreach (var divider in new[] { groupEnd, groupStart })
+        {
+            AssertEqual(2, divider.ExtraBlocks.Count);
+            AssertEqual("luni", divider.ExtraBlocks[0].Key);
+            AssertEqual("lsct", divider.ExtraBlocks[1].Key);
+            AssertEqual(4, divider.ExtraBlocks[1].Length);
+        }
+
+        // 普通图层要有 `luni`（真名字在里面；少了这个画世界里看到的是乱码名）
+        var reference = document.Layers.Single(layer =>
+            layer.SectionDividerKind == 0 && layer.Name.StartsWith("参考", StringComparison.Ordinal));
+        AssertEqual(1, reference.ExtraBlocks.Count);
+        AssertEqual("luni", reference.ExtraBlocks[0].Key);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void BasePlatePsdGroupsRoundTrip()
+{
+    // 2026-09-26 的形状（晓桀：「图层组里默认就是原本帧，这样子才方便画，
+    // 图层组就默认一个原本帧、默认一个空白层就行了」）：
+    //   写：一帧一组（`帧0001`…），组里是 [原本帧（对照底图）] + [空白层 特效]；
+    //   读：**只看图层组**，整组合并成一张，但**跳过「原本帧」那层**（不跳就会把角色烘进特效帧）。
+    //   组里加多少层都行，组数也不必和帧数相等。
+    var root = CreateTemporaryTestFolder();
+    const int canvas = 24;
+    try
+    {
+        var red = Path.Combine(root, "red.png");
+        var blue = Path.Combine(root, "blue.png");
+        WriteSolidImage(red, Color.Red, canvas, canvas);
+        WriteSolidImage(blue, Color.Blue, canvas, canvas);
+
+        // 三帧：
+        //   1 组：参考蓝 + 画一层红 → 读回应该是**红**（参考蓝被跳过；没跳过就会是蓝/紫）
+        //   2 组：参考红 + 空层     → 读回全透明（这一帧没画）
+        //   3 组：参考蓝 + 红 + 蓝  → 读回是蓝（验组内多层合并）
+        var psd = Path.Combine(root, "grouped.psd");
+        PsdWriter.WriteGrouped(
+            psd,
+            canvas,
+            canvas,
+            [],
+            [
+                new PsdLayerGroup(BasePlateExportPlanner.FormatFrameGroupName(1), [
+                    new PsdLayerSource(BasePlateExportPlanner.BasePlateLayerName, blue),
+                    new PsdLayerSource(BasePlateExportPlanner.EffectLayerName, red)]),
+                new PsdLayerGroup(BasePlateExportPlanner.FormatFrameGroupName(2), [
+                    new PsdLayerSource(BasePlateExportPlanner.BasePlateLayerName, red),
+                    new PsdLayerSource(BasePlateExportPlanner.EffectLayerName, string.Empty)]),
+                new PsdLayerGroup(BasePlateExportPlanner.FormatFrameGroupName(3), [
+                    new PsdLayerSource(BasePlateExportPlanner.BasePlateLayerName, blue),
+                    new PsdLayerSource("底", red),
+                    new PsdLayerSource("上", blue)])
+            ]);
+
+        // 写出去的组：记录顺序是 [边界 3] → 组内层 → [组开始 1/2（组名）]，
+        // 对照底图在**组里面**（名字是「原本帧」，读回时按名字跳过）。
+        var document = PsdReader.Read(psd);
+        var groupStarts = document.Layers
+            .Where(layer => layer.SectionDividerKind == PsdSectionDividerKinds.GroupStartOpen)
+            .Select(layer => layer.Name)
+            .ToArray();
+        AssertSequence(
+            ["帧0001", "帧0002", "帧0003"],
+            groupStarts);
+        AssertEqual(
+            3,
+            document.Layers.Count(layer => layer.SectionDividerKind == PsdSectionDividerKinds.GroupEnd));
+        AssertEqual(
+            3,
+            document.Layers.Count(layer =>
+                layer.SectionDividerKind == 0 &&
+                layer.Name.StartsWith(BasePlateExportPlanner.BasePlateLayerName, StringComparison.Ordinal)));
+        // 顶层不再有散落的参考层（以前 26 帧就是 26 张全亮着叠在一起）
+        AssertEqual(
+            0,
+            document.Layers.Count(layer => layer.SectionDividerKind == 0 && layer.Name.StartsWith("参考", StringComparison.Ordinal)));
+
+        var effectFolder = Path.Combine(root, "Effect");
+        var staged = new SequenceEffectPsdImportService().StageFrames(
+            psd,
+            expectedFrameCount: 3,
+            expectedCanvasWidth: canvas,
+            expectedCanvasHeight: canvas,
+            outputFolder: effectFolder);
+
+        // 三帧都在，文件名就是帧号
+        AssertSequence([1, 2, 3], staged.Select(frame => frame.Ordinal).ToArray());
+        AssertEqual("0001.png", Path.GetFileName(staged[0].FilePath));
+        using (var first = new Bitmap(staged[0].FilePath))
+        {
+            // 组里画的是一层红，参考底图是蓝 —— 读回是红就说明**参考那份没被烘进来**
+            AssertEqual(Color.Red.ToArgb(), first.GetPixel(1, 1).ToArgb());
+        }
+
+        using (var third = new Bitmap(staged[2].FilePath))
+        {
+            // 组内红 + 蓝两层合并；参考底图（蓝）同样被跳过
+            AssertEqual(Color.Blue.ToArgb(), third.GetPixel(1, 1).ToArgb());
+        }
+
+        // 只放了参考、没画的组（第 2 帧）读出来是全透明 —— 后续收进特效层时会被当成空帧
+        AssertEqual(true, SequenceEffectService.IsFullyTransparent(staged[1].FilePath));
+
+        // 组数**少于**帧数不报错：缺的那几帧就是没有文件（这里给 2 帧，文件只有 1、3）
+        var partial = new SequenceEffectPsdImportService().StageFrames(
+            psd,
+            expectedFrameCount: 5,
+            expectedCanvasWidth: canvas,
+            expectedCanvasHeight: canvas,
+            outputFolder: Path.Combine(root, "Effect2"));
+        AssertSequence([1, 2, 3], partial.Select(frame => frame.Ordinal).ToArray());
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
 static void PsdReaderToleratesResavedFiles()
 {
     // 底板 PSD 一定会经过 PS / 画世界转手一次再回来，而它们会动三处结构：
@@ -5440,55 +5683,30 @@ static void PsdReaderToleratesResavedFiles()
         AssertEqual("0001", paddedDocument.Layers[0].Name);
         AssertEqual((byte)255, paddedDocument.Layers[0].Rgba[0]);
 
-        // ② 底部多一层「背景」：只有"去掉它层数就正好"时才丢，丢完两帧还在。
-        var staged = new SequenceEffectPsdImportService().StageFrames(
-            WritePlate("with-background.psd", [
-                new PsdLayerSource("背景", white),
-                new PsdLayerSource("0001", red),
-                new PsdLayerSource("0002", blue)]),
-            expectedFrameCount: 2,
-            expectedCanvasWidth: canvas,
-            expectedCanvasHeight: canvas,
-            stagingFolder: Path.Combine(root, "staging"));
-        AssertEqual(2, staged.Count);
-        using (var first = new Bitmap(staged[0]))
-        {
-            AssertEqual(Color.Red.ToArgb(), first.GetPixel(1, 1).ToArgb());
-        }
-
-        // ③ 分组壳层（`lsct`）不算帧：给第 1 层挂上一个，两帧仍然对得上。
-        var withGroup = WritePlate("with-group.psd", [
-            new PsdLayerSource("0001", red),
-            new PsdLayerSource("0002", blue)]);
-        AppendLayerBlock(withGroup, layerIndex: 0, "lsct", [0, 0, 0, 3]);
-        var grouped = new SequenceEffectPsdImportService().StageFrames(
-            withGroup,
-            expectedFrameCount: 2,
-            expectedCanvasWidth: canvas,
-            expectedCanvasHeight: canvas,
-            stagingFolder: Path.Combine(root, "staging2"));
-        AssertEqual(2, grouped.Count);
-
-        // 但"多出来的不是背景层"仍然要拦（第 1 帧的层是红的，不是背景）。
+        // ② 旧版（一帧一层、没有图层组）的文件要**明确说不认识**，并告诉人重出一份 ——
+        // 现在读回只看图层组，旧的平铺文件里一组都没有。
         var refused = false;
+        var refusalMessage = string.Empty;
         try
         {
             _ = new SequenceEffectPsdImportService().StageFrames(
-                WritePlate("too-many.psd", [
+                WritePlate("flat-old-style.psd", [
+                    new PsdLayerSource("背景", white),
                     new PsdLayerSource("0001", red),
-                    new PsdLayerSource("0002", blue),
-                    new PsdLayerSource("0003", white)]),
+                    new PsdLayerSource("0002", blue)]),
                 expectedFrameCount: 2,
                 expectedCanvasWidth: canvas,
                 expectedCanvasHeight: canvas,
-                stagingFolder: Path.Combine(root, "staging3"));
+                outputFolder: Path.Combine(root, "staging"));
         }
-        catch (InvalidOperationException)
+        catch (InvalidOperationException ex)
         {
             refused = true;
+            refusalMessage = ex.Message;
         }
 
         AssertEqual(true, refused);
+        AssertEqual(true, refusalMessage.Contains("图层组", StringComparison.Ordinal));
     }
     finally
     {
@@ -5779,61 +5997,8 @@ static void AppendToLayerInfoSection(string path, byte[] extra)
     File.WriteAllBytes(path, result);
 }
 
-/// <summary>给第 <paramref name="layerIndex"/> 层的附加块里加一块（比如 <c>lsct</c>），同步三处长度。</summary>
-static void AppendLayerBlock(string path, int layerIndex, string key, byte[] payload)
-{
-    var bytes = File.ReadAllBytes(path);
-    var cursor = 26;
-    cursor += 4 + ReadBigEndian(bytes, cursor);
-    cursor += 4 + ReadBigEndian(bytes, cursor);
-    var layerAndMaskAt = cursor;
-    var layerInfoLengthAt = cursor + 4;
-    var layerInfoLength = ReadBigEndian(bytes, layerInfoLengthAt);
-    cursor += 8;
-    var recordCount = Math.Abs((short)ReadBigEndian16(bytes, cursor));
-    cursor += 2;
-    var recordEnd = 0;
-    var extraLengthAt = 0;
-    for (var index = 0; index < recordCount; index++)
-    {
-        cursor += 16;
-        var channelCount = ReadBigEndian16(bytes, cursor);
-        cursor += 2 + channelCount * 6 + 12;
-        var extraLength = ReadBigEndian(bytes, cursor);
-        cursor += 4;
-        if (index == layerIndex)
-        {
-            extraLengthAt = cursor - 4;
-            recordEnd = cursor + extraLength;
-        }
-
-        cursor += extraLength;
-    }
-
-    AssertEqual(true, extraLengthAt > 0);
-    var block = new List<byte>();
-    block.AddRange("8BIM"u8.ToArray());
-    block.AddRange(Encoding.ASCII.GetBytes(key));
-    block.AddRange(BitConverter.GetBytes(payload.Length).Reverse());
-    block.AddRange(payload);
-    if (payload.Length % 2 == 1)
-    {
-        block.Add(0);
-    }
-
-    var updated = new List<byte>(bytes);
-    updated.InsertRange(recordEnd, block);
-    var result = updated.ToArray();
-    WriteBigEndian(result, extraLengthAt, ReadBigEndian(bytes, extraLengthAt) + block.Count);
-    WriteBigEndian(result, layerInfoLengthAt, layerInfoLength + block.Count);
-    WriteBigEndian(result, layerAndMaskAt, ReadBigEndian(bytes, layerAndMaskAt) + block.Count);
-    File.WriteAllBytes(path, result);
-}
-
 static int ReadBigEndian(byte[] bytes, int offset) =>
     (bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3];
-
-static int ReadBigEndian16(byte[] bytes, int offset) => (bytes[offset] << 8) | bytes[offset + 1];
 
 static void WriteBigEndian(byte[] bytes, int offset, int value)
 {
@@ -5858,18 +6023,32 @@ static void EffectFramesImportFromPsdKeepsLayerOrder()
         var action = SequenceFrameService.BuildActions(new CharacterSkillsData()).First();
         const int canvas = 24;
 
-        // 三帧：1 有内容、2 整张透明（那几页没画）、3 有内容。
+        // 三帧的动作，但 PSD 里**只有第 1、第 3 两组的帧号**（中间那帧故意没写组）：
+        // 帧号按组名认，所以缺的那一帧就是空帧，而不是让后面整体往前挪一位。
         var one = Path.Combine(root, "one.png");
-        var two = Path.Combine(root, "two.png");
         var three = Path.Combine(root, "three.png");
         WriteSolidImage(one, Color.Red, canvas, canvas);
-        WriteSolidImage(two, Color.Transparent, canvas, canvas);
         WriteSolidImage(three, Color.Blue, canvas, canvas);
         var psd = Path.Combine(root, "plate.psd");
-        PsdWriter.Write(psd, canvas, canvas, [
-            new PsdLayerSource("mikoto_dz1_lightning 副本 1", one),
-            new PsdLayerSource("mikoto_dz1_lightning 副本 2", two),
-            new PsdLayerSource("mikoto_dz1_lightning 副本 3", three)]);
+        PsdWriter.WriteGrouped(
+            psd,
+            canvas,
+            canvas,
+            [],
+            [
+                new PsdLayerGroup(
+                    BasePlateExportPlanner.FormatFrameGroupName(1),
+                    [
+                        new PsdLayerSource(BasePlateExportPlanner.BasePlateLayerName, three),
+                        new PsdLayerSource("mikoto_dz1_lightning 副本 1", one)
+                    ]),
+                new PsdLayerGroup(
+                    BasePlateExportPlanner.FormatFrameGroupName(3),
+                    [
+                        new PsdLayerSource(BasePlateExportPlanner.BasePlateLayerName, one),
+                        new PsdLayerSource("mikoto_dz1_lightning 副本 3", three)
+                    ])
+            ]);
 
         var importer = new SequenceEffectPsdImportService();
         var staged = importer.StageFrames(
@@ -5877,11 +6056,15 @@ static void EffectFramesImportFromPsdKeepsLayerOrder()
             expectedFrameCount: 3,
             expectedCanvasWidth: canvas,
             expectedCanvasHeight: canvas,
-            stagingFolder: Path.Combine(root, "staging"));
-        AssertEqual(3, staged.Count);
+            outputFolder: Path.Combine(root, "Effect"));
+        AssertEqual(2, staged.Count);
+        AssertSequence([1, 3], staged.Select(frame => frame.Ordinal).ToArray());
+        // 文件名就是帧号，和底板那批 PNG 一个规矩（好看、好对）
+        AssertEqual("0001.png", Path.GetFileName(staged[0].FilePath));
+        AssertEqual("0003.png", Path.GetFileName(staged[1].FilePath));
 
         var service = new SequenceEffectService();
-        var result = service.ImportInOrder(character, action, staged, expectedFrameCount: 3);
+        var result = service.ImportStaged(character, action, staged, expectedFrameCount: 3);
         AssertEqual(2, result.ImportedFrames);
         AssertEqual(1, result.EmptyFrames);
 
@@ -5892,28 +6075,6 @@ static void EffectFramesImportFromPsdKeepsLayerOrder()
         AssertEqual(3, layer.Frames[1].Ordinal);
         AssertEqual("Click_Effect_0001.png", layer.Frames[0].FileName);
         AssertEqual("Click_Effect_0003.png", layer.Frames[1].FileName);
-
-        // 层数对不上（2 层 vs 期望 3）：先停下，一个文件都不落。
-        var mismatch = Path.Combine(root, "mismatch.psd");
-        PsdWriter.Write(mismatch, canvas, canvas, [
-            new PsdLayerSource("a", one),
-            new PsdLayerSource("b", three)]);
-        var threw = false;
-        try
-        {
-            importer.StageFrames(
-                mismatch,
-                expectedFrameCount: 3,
-                expectedCanvasWidth: canvas,
-                expectedCanvasHeight: canvas,
-                stagingFolder: Path.Combine(root, "staging2"));
-        }
-        catch (InvalidOperationException)
-        {
-            threw = true;
-        }
-
-        AssertEqual(true, threw);
     }
     finally
     {
@@ -5923,7 +6084,8 @@ static void EffectFramesImportFromPsdKeepsLayerOrder()
 
 /// <summary>
 /// 特效层和动作帧各住各的：清空特效**不能**碰 ZDMaterial 里的素材帧。
-/// 目录形状也要钉住 —— 它在 <c>ZDMaterial/&lt;动作&gt;/Effects/&lt;层名&gt;/Frames/</c>。
+/// 目录形状也要钉住 —— 它在 <c>ZDMaterial/&lt;动作&gt;/Effects/</c>（帧直接放这一层，
+/// 不再套 <c>&lt;层名&gt;\Frames\</c>；层名写在文件名里，见 2026-09-27 那次"去两层"）。
 /// </summary>
 static void SequenceEffectLayerLoadsAndClears()
 {
@@ -5944,7 +6106,7 @@ static void SequenceEffectLayerLoadsAndClears()
         var service = new SequenceEffectService();
         var layerFolder = SequenceEffectService.GetLayerFramesFolderPath(character, action);
         AssertEqual(
-            Path.Combine(character.FolderPath, "ZDMaterial", action.Code, "Effects", "Effect", "Frames"),
+            Path.Combine(character.FolderPath, "ZDMaterial", action.Code, "Effects"),
             layerFolder);
 
         _ = service.Import(character, action, [drawnPath], expectedFrameCount: 1);

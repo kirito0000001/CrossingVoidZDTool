@@ -5,6 +5,27 @@ using System.Text;
 
 namespace CrossingVoidZDTool.Services;
 
+/// <summary>
+/// PSD 的 <c>lsct</c>（分组壳层）种类。写和读两半都认这一份，别再各写一套数字。
+///
+/// 一个组的记录顺序（文件里是从下往上）是
+/// <c>[GroupEnd] → 组内各图层 → [GroupStart*（组名在这条上）]</c>。
+/// </summary>
+internal static class PsdSectionDividerKinds
+{
+    /// <summary>组开始，展开状态（组名写在它上面）。</summary>
+    public const int GroupStartOpen = 1;
+
+    /// <summary>组开始，折叠状态（同上）。</summary>
+    public const int GroupStartClosed = 2;
+
+    /// <summary>组的边界标记（在组的最下面，名字固定是 <c>&lt;/Layer group&gt;</c>，没有像素）。</summary>
+    public const int GroupEnd = 3;
+}
+
+/// <summary>图层记录尾巴上的一个附加块：四字符键 + 数据长度（字节）。</summary>
+internal sealed record PsdLayerBlock(string Key, int Length);
+
 /// <summary>PSD 里的一层：名字 + 它在画布上的矩形 + 自己的 RGBA 像素（紧密排列）。</summary>
 internal sealed record PsdLayerBitmap(
     string Name,
@@ -15,10 +36,33 @@ internal sealed record PsdLayerBitmap(
     byte[] Rgba)
 {
     /// <summary>
-    /// 这是一条<b>分组壳层</b>（PSD 里用 <c>lsct</c> 块标记的组开始/结束），不是画出来的图层：
-    /// 它没有像素、矩形是 0×0。导入时要跳过它，否则帧序会整体错一位。
+    /// 分组壳层的种类（PSD 的 <c>lsct</c> 块）：<c>0</c> = 不是壳层，
+    /// <c>1/2</c> = 组开始（开/合状态，**它的名字就是组名**），<c>3</c> = 组的边界标记
+    /// （被画在组的**最下面**，名字固定是 <c>&lt;/Layer group&gt;</c>）。
+    ///
+    /// 组的记录顺序（从下往上）是：<c>[边界 3] → 组内各图层 → [组开始 1/2]</c> ——
+    /// 画世界和 Photoshop 都是这个写法（拿晓桀给的 5 图层组样本对过）。
     /// </summary>
-    public bool IsSectionDivider { get; init; }
+    public int SectionDividerKind { get; init; }
+
+    /// <summary>
+    /// 这条记录写了几个通道。正常图层是 4；**分组壳层也是 4**（0×0 矩形，所以每个通道只有
+    /// 2 字节的 RLE 头）—— 画世界导出的组就是这样，写成 0 个通道它导入会报
+    /// 「图层读取错误 -53」（2026-09-27 实测）。
+    /// </summary>
+    public int ChannelCount { get; init; }
+
+    /// <summary>
+    /// 附加块清单（键 + 数据长度）。
+    /// 分组壳层的 <c>lsct</c> 必须在这里、而且长度是 **4**（只有种类，没有后面那两段）。
+    /// </summary>
+    public IReadOnlyList<PsdLayerBlock> ExtraBlocks { get; init; } = [];
+
+    /// <summary>
+    /// 这是一条<b>分组壳层</b>，不是画出来的图层：它没有像素、矩形是 0×0。
+    /// 按顺序取帧时要跳过它，否则帧序会整体错一位。
+    /// </summary>
+    public bool IsSectionDivider => SectionDividerKind != 0;
 }
 
 /// <summary>读出来的 PSD：画布尺寸 + 按**文件顺序**列的图层。</summary>
@@ -38,9 +82,11 @@ internal sealed record PsdDocument(int Width, int Height, IReadOnlyList<PsdLayer
 /// 而 PS / 画世界重新存过之后会变成 <c>A,R,G,B</c>（实测两份文件正是这两种顺序）。
 /// 按位置读会把 alpha 当成 R —— 颜色整个错掉，而且**一声不响**。
 /// （Pillow 的 PSD 图层支持就是这么错的，所以它不能拿来当基准。）</item>
-/// <item><b>图层记录的顺序就是帧顺序。</b><c>Layers[i]</c> 对应导出底板时的第 <c>i+1</c> 张，
-/// 所以读回来按数组下标编号即可，**不看图层名**。
-/// （拿未被改动的底板 PSD 和源 PNG 逐像素比过：16/16 完全一致。）</item>
+/// <item><b>要按「图层组」读，不是按图层顺序读。</b>底板 PSD 现在是**一帧一个组**
+/// （组名 <c>帧0001</c>…，组里是 <c>原本帧</c> + 空的 <c>特效</c> 层），
+/// 读回来靠 <see cref="PsdLayerBitmap.SectionDividerKind"/> 把图层归到组里、整组合并成一张，
+/// 帧号认组名；组里加多少层都不影响帧数。
+/// （更早那版是"一帧一层、层序即帧序"，一改层数就整体错位，已经不走了。）</item>
 /// <item><b>图层落在画布哪儿由它自己的矩形决定。</b>我们导出时每层都贴左上角、
 /// 尺寸就是整张画布，但人在 PS 里画的特效层是**子矩形**（实测 <c>339,201,509,323</c> 这种），
 /// 按"层的尺寸"摆放会整体错位。</item>
@@ -119,7 +165,11 @@ internal static class PsdReader
 
         var rects = new (int Left, int Top, int Width, int Height)[layerCount];
         var names = new string[layerCount];
-        var dividers = new bool[layerCount];
+        // 每一条记录的分组壳层**种类**（0 = 正常图层，1/2 = 组开始，3 = 组边界）。
+        var dividers = new int[layerCount];
+        // 通道数 + 附加块清单：回归要拿它们和画世界导出的组逐条对形状（见 PsdLayerBitmap 的说明）。
+        var channelCounts = new int[layerCount];
+        var extraBlocks = new List<PsdLayerBlock>[layerCount];
         var channelSpans = new List<(short Id, int Length)>[layerCount];
 
         for (var layer = 0; layer < layerCount; layer++)
@@ -131,6 +181,7 @@ internal static class PsdReader
             rects[layer] = (left, top, Math.Max(0, right - left), Math.Max(0, bottom - top));
 
             var channelCount = reader.ReadUInt16();
+            channelCounts[layer] = channelCount;
             if (channelCount > MaxChannelsPerLayer)
             {
                 throw new InvalidDataException($"第 {layer + 1} 层的通道数不正常（{channelCount}），这份 PSD 的结构不认识。");
@@ -156,12 +207,21 @@ internal static class PsdReader
             var extraEnd = reader.ReadUInt32BlockStart();
             reader.SkipBlock();                  // 图层蒙版数据
             reader.SkipBlock();                  // 混合范围
+            var nameFieldStart = reader.Position;
             var nameLength = reader.ReadByte();
             var nameBytes = reader.ReadBytes(nameLength);
             names[layer] = DecodeLayerName(nameBytes);
             // 附加块里只关心一个：`lsct`（分组的开始/结束壳层）。其余（图层样式、缩略图等）
             // 一律跳过，但块是**要一个个走**的 —— 只有这样才能看见 `lsct`。
-            dividers[layer] = ScanForSectionDivider(reader, extraEnd);
+            //
+            // ⚠️ 名字字段是**补齐到 4 字节**的（长度字节也一起算），必须先跳到边界再扫块：
+            // 从 `nameLength + 1` 直接往下扫，块区前面会多出 1~3 个填充 0，
+            // 于是要么把填充当签名读、要么整段漏读（2026-09-27 实测：
+            // 「参考 0001」「</Layer group>」这些带填充的名字，附加块被读成空）。
+            reader.Position = nameFieldStart + (nameLength + 1 + 3) / 4 * 4;
+            var blocks = new List<PsdLayerBlock>();
+            dividers[layer] = ReadSectionDividerKind(reader, extraEnd, blocks);
+            extraBlocks[layer] = blocks;
             reader.Position = extraEnd;
         }
 
@@ -206,7 +266,10 @@ internal static class PsdReader
 
             layers.Add(new PsdLayerBitmap(names[layer], left, top, width, height, rgba)
             {
-                IsSectionDivider = dividers[layer]
+                SectionDividerKind = dividers[layer]
+                ,
+                ChannelCount = channelCounts[layer],
+                ExtraBlocks = extraBlocks[layer] ?? []
             });
         }
 
@@ -263,12 +326,17 @@ internal static class PsdReader
     }
 
     /// <summary>
-    /// 在图层的附加块里找 <c>lsct</c>（分组的开始/结束壳层）。找到即返回真。
-    /// 块是「签名(4) + 键(4) + 长度(4) + 数据（奇数长度再补 1 字节）」。
+    /// 在图层的附加块里找 <c>lsct</c>（分组壳层），返回它的**种类**：
+    /// 1/2 = 组开始（组名在这个记录上），3 = 组的边界标记，0 = 不是壳层。
+    ///
+    /// 块是「签名(4) + 键(4) + 长度(4) + 数据（奇数长度再补 1 字节）」，
+    /// `lsct` 的数据开头就是一个 4 字节的 Int32 种类（后面还可能跟混合模式/子类型，
+    /// 这里不看）。**只判断"是不是壳层"不够** —— 分不出组名记录和边界记录，
+    /// 就没法把图层归到组里（见 <see cref="PsdLayerBitmap.SectionDividerKind"/>）。
     /// </summary>
-    private static bool ScanForSectionDivider(SeekReader reader, int extraEnd)
+    private static int ReadSectionDividerKind(SeekReader reader, int extraEnd, List<PsdLayerBlock> blocks)
     {
-        var isDivider = false;
+        var kind = 0;
         while (reader.Position + 12 <= extraEnd)
         {
             reader.Skip(4);                       // 签名 '8BIM'（有的老文件是 '8B64'，不细究）
@@ -281,13 +349,16 @@ internal static class PsdReader
 
             if (key[0] == 'l' && key[1] == 's' && key[2] == 'c' && key[3] == 't')
             {
-                isDivider = true;
+                // 数据至少 4 字节才够放种类；不够就按"边界标记"记（保守：不把它当组名）。
+                kind = length >= 4 ? reader.ReadInt32() : 3;
+                reader.Position -= length >= 4 ? 4 : 0;
             }
 
+            blocks.Add(new PsdLayerBlock(System.Text.Encoding.ASCII.GetString(key), length));
             reader.Skip(length + (length % 2));
         }
 
-        return isDivider;
+        return kind;
     }
 
     /// <summary>把一个通道的像素按 4 字节步长铺进 RGBA 缓冲区的指定分量。</summary>

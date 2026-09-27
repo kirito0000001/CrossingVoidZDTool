@@ -8,8 +8,19 @@ using System.Text;
 
 namespace CrossingVoidZDTool.Services;
 
-/// <summary>PSD 里的一层：图层名 + 它自己那张图（尺寸就是这一层的矩形）。</summary>
+/// <summary>
+/// PSD 里的一层：图层名 + 它自己那张图（尺寸就是这一层的矩形）。
+/// <see cref="ImagePath"/> 为空 = 一张**全透明的空层**（组里给画特效留的那张）。
+/// </summary>
 internal sealed record PsdLayerSource(string Name, string ImagePath);
+
+/// <summary>
+/// PSD 里的一个**图层组**：组名 + 组里的图层（第一个在最下面）。
+///
+/// 底板 PSD 现在按"一帧一组"写：组里是空的（或只有一张占位空层），
+/// 画特效的人可以往里加任意多层、返工随便改；读回时**把整组合并成一张**就是那一帧。
+/// </summary>
+internal sealed record PsdLayerGroup(string Name, IReadOnlyList<PsdLayerSource> Layers);
 
 /// <summary>
 /// 把若干张 PNG 写成一份**多图层 PSD**，给画世界 / Photoshop 直接导入。
@@ -40,6 +51,10 @@ internal static class PsdWriter
     private const int BlendModeNormal = 0x6E6F726D; // 'norm'
     private const uint SignaturePsd = 0x38425053;   // '8BPS'
 
+    // 分组壳层的种类：读那一半（PsdReader）和这里共用同一份数字。
+    private const int GroupStartKind = PsdSectionDividerKinds.GroupStartOpen;
+    private const int GroupEndKind = PsdSectionDividerKinds.GroupEnd;
+
     /// <summary>
     /// 写一份 PSD。图层顺序 = 传进来的顺序（第一个在最下面）。
     /// 返回写出的字节数。
@@ -53,14 +68,89 @@ internal static class PsdWriter
             throw new InvalidOperationException("没有图层，写不出 PSD。");
         }
 
+        return WriteCore(
+            path,
+            canvasWidth,
+            canvasHeight,
+            layers.Select(PsdLayer.Read).ToArray(),
+            layers[0]);
+    }
+
+    /// <summary>
+    /// 按**图层组**写一份 PSD：每个组 = 一帧。
+    ///
+    /// 组的记录顺序（从下往上）照画世界 / Photoshop 的写法：
+    /// <c>[边界标记 3] → 组内各图层 → [组开始 1/2（组名在这个记录上）]</c>。
+    /// 读回那一侧（`SequenceEffectPsdImportService`）就靠这个把图层归到组里，
+    /// 再把**整组合并**成一张 —— 所以组里加多少层都不影响帧数，
+    /// 画的人不用再"把特效合并成一层"才能用，也就还能返工。
+    /// </summary>
+    public static long WriteGrouped(
+        string path,
+        int canvasWidth,
+        int canvasHeight,
+        IReadOnlyList<PsdLayerSource> topLevelLayers,
+        IReadOnlyList<PsdLayerGroup> groups)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(topLevelLayers);
+        ArgumentNullException.ThrowIfNull(groups);
+        if (groups.Count == 0)
+        {
+            throw new InvalidOperationException("没有图层组，写不出 PSD。");
+        }
+
+        // 记录从下往上排：**顶层图层在最下面**（对照底图就是这些），
+        // 然后每个组摊成 [边界 → 组内各层 → 组名]，组与组之间保持传进来的先后。
+        var records = new List<PsdLayer>();
+        foreach (var layer in topLevelLayers)
+        {
+            records.Add(ReadLayer(layer, canvasWidth, canvasHeight));
+        }
+
+        foreach (var group in groups)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(group.Name);
+            records.Add(PsdLayer.Divider(GroupEndKind, "</Layer group>"));
+            foreach (var layer in group.Layers)
+            {
+                records.Add(ReadLayer(layer, canvasWidth, canvasHeight));
+            }
+
+            records.Add(PsdLayer.Divider(GroupStartKind, group.Name));
+        }
+
+        // 合并图（忽略图层时看到的那张）取**最底下那张顶层图层**（底板 PSD 里 = 第 1 帧的对照底图）；
+        // 没有顶层图层就退到第一组的第一层。
+        var compositeSource = topLevelLayers.Count > 0
+            ? topLevelLayers[0]
+            : groups[0].Layers.Count > 0
+                ? groups[0].Layers[0]
+                : throw new InvalidOperationException("既没有顶层图层、第一个组也是空的，写不出合并图。");
+
+        return WriteCore(path, canvasWidth, canvasHeight, records, compositeSource);
+    }
+
+    /// <summary>一层来源 → 编码后的一层；空路径就是一张全透明的空层。</summary>
+    private static PsdLayer ReadLayer(PsdLayerSource source, int canvasWidth, int canvasHeight) =>
+        string.IsNullOrWhiteSpace(source.ImagePath)
+            ? PsdLayer.Empty(source.Name, canvasWidth, canvasHeight)
+            : PsdLayer.Read(source);
+
+    private static long WriteCore(
+        string path,
+        int canvasWidth,
+        int canvasHeight,
+        IReadOnlyList<PsdLayer> encoded,
+        PsdLayerSource compositeSource)
+    {
         ArgumentOutOfRangeException.ThrowIfLessThan(canvasWidth, 1);
         ArgumentOutOfRangeException.ThrowIfLessThan(canvasHeight, 1);
 
         // 先把每层的四个通道编成 RLE。图层记录里的「通道数据长度」必须写在通道数据之前，
         // 所以这一遍躲不掉；编完每层就只留下压缩后的字节（几 KB），原始像素当场丢掉。
-        var encoded = layers.Select(PsdLayer.Read).ToArray();
         // 合并图（忽略图层时看到的那张）= 最底层那张，按画布尺寸铺在左上角，其余透明。
-        var composite = PsdLayer.ReadComposite(layers[0], canvasWidth, canvasHeight);
+        var composite = PsdLayer.ReadComposite(compositeSource, canvasWidth, canvasHeight);
 
         using var stream = new MemoryStream();
         using (var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true))
@@ -140,7 +230,8 @@ internal static class PsdWriter
         writer.WriteInt32(0);                    // left
         writer.WriteInt32(layer.Height);         // bottom
         writer.WriteInt32(layer.Width);          // right
-        writer.WriteUInt16(4);                   // 通道数
+        // 通道数：**壳层也写 4**（0×0 矩形，所以每个通道只有 2 字节的 RLE 头）。
+        writer.WriteUInt16(4);
         // 通道 ID：0/1/2 是 R/G/B，-1 是 alpha；顺序照画世界导出的文件（RGB 在前）。
         var planes = layer.FileOrderPlanes;
         for (var index = 0; index < planes.Count; index++)
@@ -163,7 +254,7 @@ internal static class PsdWriter
         var name = PsdLayerNameEncoding.Encode(layer.Name + "\0");
         var nameFieldLength = (name.Length + 1 + 3) / 4 * 4;
         const int rangesLength = 40;
-        var blocks = BuildLayerBlocks(layer.Name);
+        var blocks = BuildLayerBlocks(layer.Name, layer.SectionDividerKind);
         writer.WriteUInt32((uint)(8 + rangesLength + nameFieldLength + blocks.Length));
         writer.WriteUInt32(0);                   // 没有图层蒙版
         writer.WriteUInt32(rangesLength);
@@ -191,7 +282,7 @@ internal static class PsdWriter
     /// <c>lclr</c>/<c>shmd</c> 那一串，纯像素图层用不上；而画世界的解析器只要这一个就够
     /// （它自己导出的文件就是这样）。
     /// </summary>
-    private static byte[] BuildLayerBlocks(string name)
+    private static byte[] BuildLayerBlocks(string name, int sectionDividerKind = 0)
     {
         using var stream = new MemoryStream();
         using var writer = new BinaryWriter(stream, Encoding.UTF8, leaveOpen: true);
@@ -202,6 +293,20 @@ internal static class PsdWriter
         writer.WriteUInt32((uint)name.Length);
         writer.Write(unicode);
         writer.WriteUInt16(0);
+
+        // 分组壳层再加一个 `lsct`：数据**只有 4 字节**（种类），没有混合模式/子类型那两段。
+        //
+        // 2026-09-27 实测：一开始照规范写 12 字节（种类 + 混合模式 + 子类型），
+        // 画世界导入报「图层读取错误 -53」；它自己导出的组样本里这个块长度就是 **4**。
+        // 块顺序也照它来：`luni` 在前、`lsct` 在后（我原来写反了）。
+        if (sectionDividerKind != 0)
+        {
+            writer.WriteInt32(BlendSignature);
+            WriteTag(writer, "lsct");
+            writer.WriteUInt32(4);
+            writer.WriteInt32(sectionDividerKind);
+        }
+
         return stream.ToArray();
     }
 
@@ -216,12 +321,18 @@ internal static class PsdWriter
     /// <summary>一层编码完的样子：名字、自己的矩形、四个通道（alpha / R / G / B）的逐行 RLE。</summary>
     private sealed class PsdLayer
     {
-        private PsdLayer(string name, int width, int height, List<byte[]>[] planes)
+        private PsdLayer(
+            string name,
+            int width,
+            int height,
+            List<byte[]>[] planes,
+            int sectionDividerKind = 0)
         {
             Name = name;
             Width = width;
             Height = height;
             Planes = planes;
+            SectionDividerKind = sectionDividerKind;
         }
 
         public string Name { get; }
@@ -229,6 +340,11 @@ internal static class PsdWriter
         public int Width { get; }
 
         public int Height { get; }
+
+        /// <summary>0 = 正常图层；1/2 = 组开始（组名在这个记录上）；3 = 组的边界标记。</summary>
+        public int SectionDividerKind { get; }
+
+        public bool IsSectionDivider => SectionDividerKind != 0;
 
         /// <summary>[0]=alpha [1]=R [2]=G [3]=B，每项是逐行的 RLE 数据。</summary>
         public IReadOnlyList<byte[]>[] Planes { get; }
@@ -242,6 +358,33 @@ internal static class PsdWriter
 
         public static PsdLayer Read(PsdLayerSource source) =>
             ReadCore(source.Name, new Bitmap(source.ImagePath));
+
+        /// <summary>一张**全透明的空层**（组里给画特效留的那张）。</summary>
+        public static PsdLayer Empty(string name, int width, int height)
+        {
+            var pixels = new byte[width * height * 4];
+            return new PsdLayer(
+                name,
+                width,
+                height,
+                [
+                    EncodePlane(pixels, channelOffset: 3, width, height, pixelStride: 4),
+                    EncodePlane(pixels, channelOffset: 0, width, height, pixelStride: 4),
+                    EncodePlane(pixels, channelOffset: 1, width, height, pixelStride: 4),
+                    EncodePlane(pixels, channelOffset: 2, width, height, pixelStride: 4)
+                ]);
+        }
+
+        /// <summary>
+        /// 一条**分组壳层**记录：没有通道数据、矩形 0×0，靠附加块里的 <c>lsct</c>
+        /// 表明自己是组的开始还是边界。
+        ///
+        /// ⚠️ **照样要给 4 个空通道**（每个 0 行 → 数据是 2 字节的 RLE 头）。
+        /// 2026-09-27 实测踩到：一开始写成 0 个通道，画世界导入报「图层读取错误 -53」——
+        /// 它导出的组样本里每个壳层也是 4 个通道（0×0 矩形，所以通道数据只有 2 字节）。
+        /// </summary>
+        public static PsdLayer Divider(int kind, string name) =>
+            new(name, 0, 0, [[], [], [], []], kind);
 
         /// <summary>合并图那四条通道：最底层那张按画布尺寸铺好（画布比它大就补透明）。</summary>
         public static PsdLayer ReadComposite(PsdLayerSource source, int canvasWidth, int canvasHeight) =>

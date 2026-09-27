@@ -42,11 +42,11 @@ namespace CrossingVoidZDTool
         ///
         /// 前提是"导出底板 → 在 PS / 画世界里画 → 存回原处"：
         /// 那份 PSD 就在底板目录里（和底板 PNG 同一个落点），所以这里不用弹框，
-        /// 按角色 + 动作算出路径直接读。**图层顺序就是帧顺序**，见
+        /// 按角色 + 动作算出路径直接读。读的是**图层组**（一帧一组、帧号认组名），见
         /// <see cref="SequenceEffectPsdImportService"/>。
         ///
-        /// 图层数对不上会**先停下报数**，不猜：多一层少一层都会让整条特效时序错位，
-        /// 而且看起来很像"画的时候就是这样的"。
+        /// 组数不必和帧数相等：少的算空帧、多的忽略（组里画几层都行，随便返工）。
+        /// 唯一会停下报错的是"这个文件里根本没有图层组"（拿旧版一帧一层的底板画的）。
         /// </summary>
         private void ImportEffectFramesFromBasePlatePsd()
         {
@@ -68,10 +68,10 @@ namespace CrossingVoidZDTool
 
             var plan = BuildBasePlatePlan(character, section, definition, parsedForm);
             var psdPath = SequenceEffectPsdImportService.ResolveBasePlatePsdPath(plan);
-            var stagingFolder = SequenceEffectPsdImportService.GetStagingFolderPath(
-                character,
-                section.Action,
-                SequenceEffectService.DefaultLayerName);
+            // 读回来的特效帧**就放在底板目录里**（`<动作>-2x/Effect/`）：和对照底板 PNG、
+            // 那份 PSD 挨在一起，一眼就能看到自己画了什么（晓桀 2026-09-25）。
+            // 这个子目录**不受"重新导出底板时清空目录"的影响**（见 BasePlateExportService）。
+            var effectFolder = BasePlateExportPlanner.ResolveEffectFolderPath(plan.OutputDirectory);
 
             try
             {
@@ -80,14 +80,15 @@ namespace CrossingVoidZDTool
                     expectedFrameCount,
                     plan.CanvasWidth,
                     plan.CanvasHeight,
-                    stagingFolder);
-                var result = new SequenceEffectService().ImportInOrder(
+                    effectFolder);
+                var result = new SequenceEffectService().ImportStaged(
                     character,
                     section.Action,
                     staged,
                     expectedFrameCount);
                 ReloadEffectLayer(character, section);
                 ReportEffectImport(section, result, expectedFrameCount, Path.GetFileName(psdPath));
+                AppendLog(LogKind.Info, $"[Effect PSD] 读回的特效帧已写到：{effectFolder}");
             }
             catch (InvalidOperationException ex)
             {
@@ -100,11 +101,7 @@ namespace CrossingVoidZDTool
                 ShowFloatingTip(InfoBarSeverity.Error, "读回特效失败", ex.Message);
                 AppendLog(LogKind.Error, $"从底板 PSD 读回特效帧失败：{psdPath}", ex);
             }
-            finally
-            {
-                // 暂存目录只是中转，成败都不留在盘上。
-                DeleteStagingFolder(stagingFolder);
-            }
+            // 注意：这里**不再删**那个目录 —— 它现在就是给用户看结果的落点（以前是 `.from-psd` 暂存）。
         }
 
         /// <summary>
@@ -212,22 +209,6 @@ namespace CrossingVoidZDTool
                 result.EmptyFrames > 0
                     ? $"另有 {result.EmptyFrames} 帧没有内容（空帧），同步到虚幻时是空关键帧。"
                     : "全部帧都有内容。");
-        }
-
-        private static void DeleteStagingFolder(string stagingFolder)
-        {
-            try
-            {
-                if (Directory.Exists(stagingFolder))
-                {
-                    Directory.Delete(stagingFolder, recursive: true);
-                }
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                // 暂存目录没删掉只是留了点垃圾，不该把一次成功的导入报成失败。
-                ToolboxLog.Warn($"特效导入的暂存目录没清掉：{stagingFolder}", ex);
-            }
         }
 
         void ISequenceFramesCommandHost.OpenEffectFolder()

@@ -36,17 +36,124 @@ internal sealed class SequenceEffectService
     public static string GetEffectsRootPath(CharacterCard character, SequenceFrameAction action) =>
         Path.Combine(SequenceActionFolderLayout.GetActionFolderPath(character, action), "Effects");
 
+    /// <summary>
+    /// 这一层的帧**直接放在 <c>Effects\</c> 里**（不再套 <c>&lt;层名&gt;\Frames\</c>）。
+    ///
+    /// 晓桀 2026-09-27：「特效多套了两层路径」—— 原来落点是
+    /// <c>&lt;动作&gt;\Effects\Effect\Frames\</c>，<c>Effect</c> 和 <c>Frames</c> 两层都是多余的：
+    /// 层名本来就写在每个文件名里（<c>Misaka_Sk2_Effect_0001.png</c>），
+    /// 而 <c>Effects\</c> 本身已经说明这是特效。现在就是 <c>&lt;动作&gt;\Effects\&lt;帧&gt;.png</c>。
+    ///
+    /// 旧落点由 <see cref="MigrateLegacyLayout"/> 一次性搬上来（人已经画好的东西不能丢）。
+    /// </summary>
     public static string GetLayerFolderPath(
         CharacterCard character,
         SequenceFrameAction action,
         string layerName = DefaultLayerName) =>
-        Path.Combine(GetEffectsRootPath(character, action), layerName);
+        GetEffectsRootPath(character, action);
 
     public static string GetLayerFramesFolderPath(
         CharacterCard character,
         SequenceFrameAction action,
         string layerName = DefaultLayerName) =>
-        Path.Combine(GetLayerFolderPath(character, action, layerName), SequenceActionFolderLayout.FramesFolderName);
+        GetLayerFolderPath(character, action, layerName);
+
+    /// <summary>旧落点：<c>&lt;动作&gt;\Effects\&lt;层名&gt;\Frames\</c>（2026-09-27 之前）。</summary>
+    private static string GetLegacyLayerFramesFolderPath(
+        CharacterCard character,
+        SequenceFrameAction action,
+        string layerName) =>
+        Path.Combine(
+            GetEffectsRootPath(character, action),
+            layerName,
+            SequenceActionFolderLayout.FramesFolderName);
+
+    /// <summary>
+    /// 把「多套了两层」的旧落点搬成新落点（一次性；搬过就什么都不做）。
+    ///
+    /// 只在旧目录**有图**、而且新目录里**还没有这一层的图**时才搬 ——
+    /// 两边都有就什么都不动（那是已经在用新落点了，别去搅和）。
+    /// </summary>
+    internal static void MigrateLegacyLayout(
+        CharacterCard character,
+        SequenceFrameAction action,
+        string layerName = DefaultLayerName)
+    {
+        var legacy = GetLegacyLayerFramesFolderPath(character, action, layerName);
+        if (!Directory.Exists(legacy))
+        {
+            return;
+        }
+
+        var legacyFiles = Directory.EnumerateFiles(legacy, "*.png").ToArray();
+        if (legacyFiles.Length == 0)
+        {
+            TryRemoveEmptyLegacyFolders(legacy);
+            return;
+        }
+
+        var current = GetLayerFramesFolderPath(character, action, layerName);
+        var alreadyThere = Directory.Exists(current) &&
+            Directory.EnumerateFiles(current, "*.png")
+                .Any(path => IsFrameOfLayer(Path.GetFileName(path), action.Code, layerName));
+        if (alreadyThere)
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(current);
+        var moved = 0;
+        foreach (var file in legacyFiles)
+        {
+            var target = Path.Combine(current, Path.GetFileName(file));
+            try
+            {
+                File.Move(file, target, overwrite: true);
+                moved++;
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                ToolboxLog.Warn($"特效帧搬家失败（留在旧位置）：{file}", error);
+            }
+        }
+
+        TryRemoveEmptyLegacyFolders(legacy);
+        if (moved > 0)
+        {
+            ToolboxLog.Info(
+                $"特效帧落点上移：{action.Code} 的 {moved} 张从 "
+                + $"{Path.Combine("Effects", layerName, SequenceActionFolderLayout.FramesFolderName)} 搬到了 Effects\\（去掉了多余的两层）。");
+        }
+    }
+
+    private static void TryRemoveEmptyLegacyFolders(string legacyFramesFolder)
+    {
+        foreach (var folder in new[]
+                 {
+                     legacyFramesFolder,
+                     Path.GetDirectoryName(legacyFramesFolder)
+                 })
+        {
+            if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder))
+            {
+                continue;
+            }
+
+            if (Directory.EnumerateFileSystemEntries(folder).Any())
+            {
+                continue;
+            }
+
+            try
+            {
+                Directory.Delete(folder);
+            }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                // 删不掉就留着，空目录不碍事。
+            }
+        }
+    }
 
     /// <summary>层名 → 资产名前缀：<c>Effect</c> → <c>Sk2_Effect</c>（和角色序列同构）。</summary>
     public static string BuildAssetPrefix(string actionCode, string layerName = DefaultLayerName) =>
@@ -65,6 +172,8 @@ internal sealed class SequenceEffectService
     {
         ArgumentNullException.ThrowIfNull(character);
         ArgumentNullException.ThrowIfNull(action);
+        // 旧落点（多套了两层）一次性搬到新落点，别让人已经画好的东西找不着。
+        MigrateLegacyLayout(character, action, layerName);
         var assetPrefix = BuildAssetPrefix(action.Code, layerName);
         var framesFolder = GetLayerFramesFolderPath(character, action, layerName);
         if (!Directory.Exists(framesFolder))
@@ -116,25 +225,25 @@ internal sealed class SequenceEffectService
     }
 
     /// <summary>
-    /// 同上，但帧号**按数组顺序**给（第 1 个文件就是第 1 帧），不看文件名。
+    /// 按**给定的帧号**逐张收进特效层（第 N 帧落到第 N 格）。
     ///
-    /// 这条给"从底板 PSD 读回"用：那份 PSD 的图层顺序就是帧顺序，而图层名是画的时候
-    /// 随手起的（PS 自己会起 <c>xxx 副本 5</c> 这种），从名字里根本读不出帧号。
-    /// 文件名和帧号解耦之后，中间那批暂存 PNG 就可以随便命名。
+    /// 这条给"从底板 PSD 读回"用。帧号由那一侧**按图层组名**算出来（`帧0003` → 第 3 帧），
+    /// **不再假设"第几个文件就是第几帧"** —— 组少几个、缺的是哪几帧，落点都还对得上
+    /// （晓桀 2026-09-25：「数量都可以不用完全对的上了」）。
     /// </summary>
-    public SequenceEffectImportResult ImportInOrder(
+    public SequenceEffectImportResult ImportStaged(
         CharacterCard character,
         SequenceFrameAction action,
-        IReadOnlyList<string> orderedSourceFiles,
+        IReadOnlyList<SequenceEffectPsdImportService.StagedEffectFrame> stagedFrames,
         int expectedFrameCount,
         int multiplier = BasePlateExportPlanner.Multiplier,
         string layerName = DefaultLayerName)
     {
-        ArgumentNullException.ThrowIfNull(orderedSourceFiles);
+        ArgumentNullException.ThrowIfNull(stagedFrames);
         return ImportResolved(
             character,
             action,
-            orderedSourceFiles.Select((file, index) => (File: file, Ordinal: index + 1)),
+            stagedFrames.Select(frame => (File: frame.FilePath, Ordinal: frame.Ordinal)),
             expectedFrameCount,
             multiplier,
             layerName);
@@ -198,8 +307,15 @@ internal sealed class SequenceEffectService
         }
 
         var removed = 0;
-        foreach (var file in Directory.EnumerateFiles(framesFolder))
+        // 落点现在是共用的 `Effects\`（不再有层名子目录），所以**只删这一层自己的帧** ——
+        // 以后一个动作有多条特效时，删 A 不能把 B 的一起删了。
+        foreach (var file in Directory.EnumerateFiles(framesFolder, "*.png"))
         {
+            if (!IsFrameOfLayer(Path.GetFileName(file), action.Code, layerName))
+            {
+                continue;
+            }
+
             if (AtomicFileWriter.TryDelete(file))
             {
                 removed++;
@@ -207,6 +323,21 @@ internal sealed class SequenceEffectService
         }
 
         return removed;
+    }
+
+    /// <summary>
+    /// 这个文件名是不是**这一层**的帧。比对的是完整规范名
+    /// （<c>&lt;动作&gt;_&lt;层名&gt;_0001.png</c>），不能只比前缀 ——
+    /// `Click_EffectB_0001.png` 也以 `Click_Effect` 开头，比前缀会把别的层一起带走。
+    /// </summary>
+    private static bool IsFrameOfLayer(string fileName, string actionCode, string layerName)
+    {
+        var ordinal = TryResolveOrdinal(fileName);
+        return ordinal > 0 &&
+            string.Equals(
+                fileName,
+                BuildFrameFileName(actionCode, layerName, ordinal),
+                StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>规范帧文件名：<c>&lt;角色&gt;_…</c> 由调用方给前缀，这里只负责编号。</summary>

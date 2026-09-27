@@ -61,6 +61,41 @@ internal static class BasePlateExportPlanner
     public const string PsdExtension = ".psd";
 
     /// <summary>
+    /// 底板目录里、给**读回来的特效帧**用的子文件夹：<c>&lt;动作&gt;-2x/Effect/</c>。
+    ///
+    /// 晓桀 2026-09-25：「重新导入/从 PSD 读回的特效就在底板文件夹里面再开一个文件夹，
+    /// 这样子方便我查看」—— 特效帧和它对照的底板 PNG、那份 PSD 挨在一起，
+    /// 不用在工具箱内部的目录里翻。
+    ///
+    /// ⚠️ 这个子文件夹**不受"重新导出底板时清空目录"的影响**（见 <c>BasePlateExportService</c>）：
+    /// 里面的特效是画出来的成果，重导一次底板不该把它删了。
+    /// </summary>
+    public const string EffectFolderName = "Effect";
+
+    /// <summary>PSD 里一组 = 一帧的组名，形如 <c>帧0001</c>。</summary>
+    public static string FormatFrameGroupName(int outputIndex) =>
+        $"帧{outputIndex.ToString("0000", System.Globalization.CultureInfo.InvariantCulture)}";
+
+    /// <summary>
+    /// 组里那层**原本帧**（对照底图）的层名。
+    ///
+    /// 晓桀 2026-09-26：「图层组里默认就是原本帧，这样子才方便画，图层组就默认一个原本帧、
+    /// 默认一个空白层就行了」—— 把对照底图放进**这一帧自己的组**里，展开一个组就能对着画，
+    /// 不用去底下一长串参考层里翻。
+    ///
+    /// ⚠️ 读回时**按这个名字跳过它**（不跳过的话对照底图会被合并进特效帧，
+    /// 表现是「特效里多了个角色」）。所以这一层**别改名**：改了就会被当成分内的内容。
+    /// </summary>
+    public const string BasePlateLayerName = "原本帧";
+
+    /// <summary>PSD 里给画特效留的那张空层。<b>组内</b>，读回时和用户自己加的层一起合并。</summary>
+    public const string EffectLayerName = "特效";
+
+    /// <summary>组的落点：<c>&lt;底板目录&gt;/Effect/</c>。</summary>
+    public static string ResolveEffectFolderPath(string outputDirectory) =>
+        Path.Combine(outputDirectory, EffectFolderName);
+
+    /// <summary>
     /// 落点：<c>&lt;工作区&gt;/Export/&lt;角色&gt;/BasePlate/&lt;动作&gt;-&lt;倍数&gt;x/</c>。
     /// 目录名带倍数，是因为换倍率导出的帧数不一样，混在一起会互相覆盖。
     /// </summary>
