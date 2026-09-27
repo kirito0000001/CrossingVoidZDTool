@@ -59,6 +59,32 @@ internal sealed record PsdLayerBitmap(
     public IReadOnlyList<PsdLayerBlock> ExtraBlocks { get; init; } = [];
 
     /// <summary>
+    /// 图层标志位（原样读出来）。
+    ///
+    /// **第 1 位（<c>0x02</c>）= 这一层/这一组被关掉了** —— PSD 的惯例是
+    /// <c>可见 = !(标志位 &amp; 0x02)</c>。底板导出默认只留第 1 个图层组可见、
+    /// 后面的组都带这一位（写那一半见 <see cref="PsdWriter"/>）。
+    /// 读回特效帧时**不看这一位**：被关掉的组里照样可能是画好的特效，
+    /// 该收的还是要收回来。
+    /// </summary>
+    public byte Flags { get; init; }
+
+    /// <summary>这一层（或这一组）是不是被关掉了可视性。</summary>
+    public bool IsHidden => (Flags & 0x02) != 0;
+
+    /// <summary>
+    /// 图层不透明度（<c>0</c>–<c>255</c>，<c>255</c> = 完全不透明）。
+    ///
+    /// 在画世界 / PS 里把某一层的不透明度调小，写出来的就是这个字节；
+    /// **合成那一半要拿它缩放这一层的 alpha** —— 不然"看上去淡淡的"那层读回来会变实
+    /// （晓桀 2026-09-27 报的「透明度没算」，他的帧0035 里就有一层是 89/255 ≈ 35%）。
+    ///
+    /// 默认 <c>255</c>：没有这个字段的文件，以及我们自己写出去的 PSD
+    /// （<see cref="PsdWriter"/> 永远写 255）照旧按 100% 算。
+    /// </summary>
+    public byte Opacity { get; init; } = 255;
+
+    /// <summary>
     /// 这是一条<b>分组壳层</b>，不是画出来的图层：它没有像素、矩形是 0×0。
     /// 按顺序取帧时要跳过它，否则帧序会整体错一位。
     /// </summary>
@@ -169,6 +195,10 @@ internal static class PsdReader
         var dividers = new int[layerCount];
         // 通道数 + 附加块清单：回归要拿它们和画世界导出的组逐条对形状（见 PsdLayerBitmap 的说明）。
         var channelCounts = new int[layerCount];
+        // 标志位：回归要拿它钉住「默认只显示第 1 个图层组」这件事（见 PsdLayerBitmap.Flags）。
+        var flags = new byte[layerCount];
+        // 每一条记录的图层不透明度（见 PsdLayerBitmap.Opacity）：合成时按它缩放这一层的 alpha。
+        var opacities = new byte[layerCount];
         var extraBlocks = new List<PsdLayerBlock>[layerCount];
         var channelSpans = new List<(short Id, int Length)>[layerCount];
 
@@ -202,8 +232,11 @@ internal static class PsdReader
 
             channelSpans[layer] = spans;
 
-            reader.Skip(8);                      // 混合签名 + 混合模式
-            reader.Skip(4);                      // 不透明度 / 剪贴标志 / 标志位 / 填充
+            reader.Skip(8);                       // 混合签名 + 混合模式
+            opacities[layer] = reader.ReadByte(); // 不透明度：合成时按它缩放这一层的 alpha
+            reader.Skip(1);                       // 剪贴标志
+            flags[layer] = reader.ReadByte();     // 标志位：第 1 位 = 这一层/这一组被关掉
+            reader.Skip(1);                       // 填充
             var extraEnd = reader.ReadUInt32BlockStart();
             reader.SkipBlock();                  // 图层蒙版数据
             reader.SkipBlock();                  // 混合范围
@@ -269,7 +302,9 @@ internal static class PsdReader
                 SectionDividerKind = dividers[layer]
                 ,
                 ChannelCount = channelCounts[layer],
-                ExtraBlocks = extraBlocks[layer] ?? []
+                ExtraBlocks = extraBlocks[layer] ?? [],
+                Flags = flags[layer],
+                Opacity = opacities[layer]
             });
         }
 

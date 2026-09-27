@@ -104,9 +104,11 @@ var tests = new (string Name, Action Run)[]
     ("导出菜单是可扩展的清单", SequenceExportMenuListsExtensibleEntries),
     ("底板按动作帧率的2倍逐帧切片", BasePlatePlannerSlicesEachCellByMultiplier),
     ("底板导出只留本次结果并写对照表", BasePlateExportWritesFramesAndManifest),
+    ("带特效的底板导出把已画好的特效填进图层组", BasePlateExportCarriesDrawnEffectFramesIntoGroups),
     ("特效按文件名编号对号入座并保留空帧", SequenceEffectImportMapsFramesByNumber),
     ("特效层可读可清且不碰动作帧", SequenceEffectLayerLoadsAndClears),
     ("特效帧落点去掉了多余的两层，旧目录会自动搬上来", SequenceEffectFramesLiveDirectlyUnderEffects),
+    ("一个动作的几层特效各写各的目录和文件名", SequenceEffectLayersAreIndependent),
     ("特效层按动作帧率的2倍展开并保留空帧", SequenceEffectSyncLayoutDoublesFpsAndKeepsBlankFrames),
     ("同步计划带上特效层并携带图集矩形", SequencePlanCarriesEffectLayerAction),
     ("特效帧算进动作内容指纹且失败时不记", EffectFramesJoinActionFingerprint),
@@ -114,6 +116,9 @@ var tests = new (string Name, Action Run)[]
     ("特效帧按图层组的帧号落位、缺帧算空帧", EffectFramesImportFromPsdKeepsLayerOrder),
     ("PS/画世界重存过的底板PSD照样能读回", PsdReaderToleratesResavedFiles),
     ("底板PSD按图层组写、按图层组读回", BasePlatePsdGroupsRoundTrip),
+    ("导入特效帧时按图层自己的不透明度缩 alpha", SequenceEffectPsdImportHonorsLayerOpacity),
+    ("选PSD导入时默认开在当前动作的底板目录", PsdPickerStartsInTheActionBasePlateFolder),
+    ("同一格的多层特效按层号叠成一张图", SequenceEffectStackComposesLayersInOrder),
     ("底板PSD的组记录与画世界同形状", BasePlatePsdGroupRecordsMatchPainterApp),
     ("预览叠特效时时间轴按特效帧展开成单格", EffectTimelineExpandsIntoPerEffectFrames),
     ("特效层自己的节拍也要把时间轴高亮带着走", EffectSubFrameTickKeepsTimelineHighlightInSync),
@@ -4822,11 +4827,15 @@ static void UnrealProjectBackupStaysInsideToolboxWorkspace()
 static void SequenceExportMenuListsExtensibleEntries()
 {
     var items = SequenceExportMenu.Build();
-    AssertEqual(2, items.Count);
+    AssertEqual(3, items.Count);
     AssertEqual("导出图集", items[0].Text);
     AssertEqual(SequenceExportAction.Atlas, items[0].Action);
     AssertEqual(SequenceExportAction.BasePlate, items[1].Action);
     AssertEqual(true, items[1].Text.Contains("底板", StringComparison.Ordinal));
+    // 第三条 = 底板 + 已经画好的特效帧，落在**同一份** PSD 上（所以壳里那步覆盖确认不能少）。
+    AssertEqual(SequenceExportAction.BasePlateWithEffect, items[2].Action);
+    AssertEqual(true, items[2].Text.Contains("底板", StringComparison.Ordinal));
+    AssertEqual(true, items[2].Text.Contains("特效", StringComparison.Ordinal));
     AssertEqual(true, items.All(item => !string.IsNullOrWhiteSpace(item.ToolTip)));
 }
 
@@ -4902,6 +4911,80 @@ static void BasePlatePlannerSlicesEachCellByMultiplier()
 }
 
 /// <summary>
+/// 「导入特效帧 → 从 PSD 导入…」的文件选择框**默认开在这个动作的底板目录**上
+/// （晓桀 2026-09-27：「浏览器默认打开底板的位置，然后我可以自行选择 PSD 导入」）：
+/// 导出过就开在放那份 PSD 的目录里；还没导出过（目录不在）退到 BasePlate/ 那一级，
+/// 免得选择框自己记着上次挑过的无关目录。
+/// </summary>
+static void PsdPickerStartsInTheActionBasePlateFolder()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var frames = new List<SequenceFrameItem>
+        {
+            CreateBasePlateTestFrame(Path.Combine(root, "1 a.png"), index: 1, duration: 1, width: 40, height: 30)
+        };
+
+        var plan = BasePlateExportPlanner.Build(root, "Misaka", "Sk2", frames, actionFps: 10);
+        var actionFolder = Path.Combine(root, "Export", "Misaka", "BasePlate", "Sk2-2x");
+
+        // 还没导出过：动作目录还不存在，退到 BasePlate/ 那一级（而不是一个不存在的路径）。
+        AssertEqual(false, Directory.Exists(actionFolder));
+        AssertEqual(
+            Path.Combine(root, "Export", "Misaka", "BasePlate"),
+            BasePlateExportPlanner.ResolvePsdPickerStartFolder(plan));
+
+        // 导出过：开在放那份 PSD 的目录里，挑的时候第一眼就能看到它。
+        Directory.CreateDirectory(actionFolder);
+        AssertEqual(actionFolder, BasePlateExportPlanner.ResolvePsdPickerStartFolder(plan));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>
+/// 预览是**多层叠加**播的：第 1 层在最下、层号大的盖上去（晓桀 2026-09-27：
+/// 「我之前想要的是多层叠加播放」）。这里盯住那个纯字节的合成函数 ——
+/// 它按预乘 alpha 做 source-over：上层半透明要按比例把下层露出来，
+/// 没画的点（alpha = 0）下层原样留着，尺寸对不上的层丢掉、一层都不剩就吵一声。
+/// </summary>
+static void SequenceEffectStackComposesLayersInOrder()
+{
+    // 两个像素（字节序 B,G,R,A，预乘 alpha）：下层不透明红、上层半透明蓝。
+    var bottom = new byte[] { 0, 0, 255, 255, 0, 0, 255, 255 };
+    var top = new byte[] { 128, 0, 0, 128, 0, 0, 0, 0 };
+
+    var composed = SequenceEffectFrameComposer.Compose(2, 1, [bottom, top]);
+
+    // 第 1 格：蓝 128 + 红 0 = 128；红 0 + 255×127/255 = 127；
+    // alpha 128 + 255×127/255 = 255（`+127` 的四舍五入在这里正好把 127.49 收上去）。
+    AssertEqual((byte)128, composed[0]);
+    AssertEqual((byte)0, composed[1]);
+    AssertEqual((byte)127, composed[2]);
+    AssertEqual((byte)255, composed[3]);
+
+    // 第 2 格：上层这里没画，下层原样留着。
+    AssertEqual((byte)0, composed[4]);
+    AssertEqual((byte)0, composed[5]);
+    AssertEqual((byte)255, composed[6]);
+    AssertEqual((byte)255, composed[7]);
+
+    // 只有一层时就是它自己（走 BlockCopy 那条快路）。
+    var single = SequenceEffectFrameComposer.Compose(2, 1, [bottom]);
+    AssertSequence(bottom, single);
+
+    // 尺寸对不上的层会被丢掉；一层都不剩就抛出来，而不是给一张全透明图。
+    var failure = AssertThrows(() => SequenceEffectFrameComposer.Compose(2, 1, [new byte[4]]));
+    AssertEqual(true, failure is ArgumentException);
+
+    // 画布尺寸本身不合法也要拦住（0 或负数算不出字节数）。
+    AssertThrows(() => SequenceEffectFrameComposer.Compose(0, 1, [bottom]));
+}
+
+/// <summary>
 /// 底板写盘：每张输出一图（非空白帧原样复制）、空白帧出透明 PNG、
 /// 目录**只留本次结果**（上次的残留会被清掉）、顺带写 frames.csv，
 /// 并且拒绝往工作区导出区之外写（那是"路径算错就删别人东西"的护栏）。
@@ -4940,15 +5023,31 @@ static void BasePlateExportWritesFramesAndManifest()
 
         // PSD 是按**图层组**写的：一帧一组（组名 `帧0001`…），
         // 组里是 [原本帧（对照底图）] + [空白层 特效] —— 展开一个组就能对着画。
+        //
+        // 可视性（2026-09-27 晓桀）：「导出底板都默认只显示第一个图层组，后面的可视性关闭」——
+        // 第 1 组亮着且展开，第 2 组往后一律**关掉眼睛 + 折起来**。
+        // 66 组一起亮着叠出来的是一张糊图，画的人还得一个个点灭。
         var psdDocument = PsdReader.Read(result.PsdFilePath);
+        var groupHeaders = psdDocument.Layers
+            .Where(layer => layer.SectionDividerKind is
+                PsdSectionDividerKinds.GroupStartOpen or PsdSectionDividerKinds.GroupStartClosed)
+            .ToArray();
         AssertSequence(
             Enumerable.Range(1, result.FrameCount)
                 .Select(index => BasePlateExportPlanner.FormatFrameGroupName(index))
                 .ToArray(),
-            psdDocument.Layers
-                .Where(layer => layer.SectionDividerKind == PsdSectionDividerKinds.GroupStartOpen)
-                .Select(layer => layer.Name)
-                .ToArray());
+            groupHeaders.Select(layer => layer.Name).ToArray());
+        AssertEqual(PsdSectionDividerKinds.GroupStartOpen, groupHeaders[0].SectionDividerKind);
+        AssertEqual(false, groupHeaders[0].IsHidden);
+        AssertEqual(1, groupHeaders.Count(layer => !layer.IsHidden));
+        AssertEqual(
+            result.FrameCount - 1,
+            groupHeaders.Count(layer => layer.IsHidden));
+        AssertSequence(
+            Enumerable.Repeat(PsdSectionDividerKinds.GroupStartClosed, result.FrameCount - 1).ToArray(),
+            groupHeaders.Skip(1).Select(layer => layer.SectionDividerKind).ToArray());
+        // 关的是**组**，组里画的东西照旧可见：只有组的头那条带隐藏位。
+        AssertEqual(0, psdDocument.Layers.Count(layer => layer.SectionDividerKind == 0 && layer.IsHidden));
         AssertEqual(
             result.FrameCount,
             psdDocument.Layers.Count(layer => layer.SectionDividerKind == PsdSectionDividerKinds.GroupEnd));
@@ -4963,6 +5062,25 @@ static void BasePlateExportWritesFramesAndManifest()
             psdDocument.Layers.Count(layer =>
                 layer.SectionDividerKind == 0 &&
                 layer.Name == BasePlateExportPlanner.EffectLayerName));
+
+        // 最底下垫着一层**组外面**的「背景」（晓桀 2026-09-27：「然后默认的背景是这个颜色」）：
+        // 纯色 #6B6B6B、铺满画布、亮着 —— 就是画世界给「没有背景层的文档」铺的那块底色，
+        // 现在写成真的一层，PS / 别的软件打开和 Windows 缩略图里都是这块底色而不是透明格子。
+        // 它在所有组外面，所以「从 PSD 读回特效」时不会被当成哪一帧画的内容
+        // （CollectGroups 只收组里面的图层）。
+        var background = psdDocument.Layers[0];
+        AssertEqual(BasePlateExportPlanner.BackgroundLayerName, background.Name);
+        AssertEqual(0, background.SectionDividerKind);
+        AssertEqual(false, background.IsHidden);
+        AssertEqual(plan.CanvasWidth, background.Width);
+        AssertEqual(plan.CanvasHeight, background.Height);
+        AssertEqual((byte)255, background.Rgba[3]);
+        AssertEqual(BasePlateExportPlanner.BackgroundRed, background.Rgba[0]);
+        AssertEqual(BasePlateExportPlanner.BackgroundGreen, background.Rgba[1]);
+        AssertEqual(BasePlateExportPlanner.BackgroundBlue, background.Rgba[2]);
+        AssertEqual(
+            1,
+            psdDocument.Layers.Count(layer => layer.Name == BasePlateExportPlanner.BackgroundLayerName));
 
         // (2 + 1 + 1) 格 × 2 = 8 张。
         AssertEqual(8, result.FrameCount);
@@ -5014,6 +5132,119 @@ static void BasePlateExportWritesFramesAndManifest()
         }
 
         AssertEqual(true, refused);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>
+/// 「导出底板（带特效）」：PNG、目录、图层组形状和普通底板导出**一模一样**，
+/// 唯一的差别是「特效」层里填的是**已经画好的特效帧**（没画过的那格仍是空层）。
+///
+/// 这条链路的意义全在最后那段：直接从导出的 PSD 读回来，拿到的还是原来那几张特效帧 ——
+/// 也就是"在原有特效上接着改"这件事真的成立（读回时「原本帧」那层照旧被跳过，
+/// 没画的格子照旧算空帧）。顺带钉住不带特效那条路的老行为：所有「特效」层都是空的。
+/// </summary>
+static void BasePlateExportCarriesDrawnEffectFramesIntoGroups()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var framesFolder = Path.Combine(root, "src");
+        Directory.CreateDirectory(framesFolder);
+        var firstPath = Path.Combine(framesFolder, "1 a.png");
+        var secondPath = Path.Combine(framesFolder, "2 b.png");
+        WriteSolidImage(firstPath, Color.Red, 40, 30);
+        WriteSolidImage(secondPath, Color.Blue, 40, 30);
+        var frames = new List<SequenceFrameItem>
+        {
+            CreateBasePlateTestFrame(firstPath, index: 1, duration: 1, width: 40, height: 30),
+            CreateBasePlateTestFrame(secondPath, index: 2, duration: 1, width: 40, height: 30)
+        };
+        var plan = BasePlateExportPlanner.Build(root, "Misaka", "Sk2", frames, actionFps: 10);
+        // 2 格 × 2 倍 = 4 张。
+        AssertEqual(4, plan.Frames.Count);
+
+        // 已经画好的特效帧：第 1 格和第 4 格画了，中间两格没画（"只有几帧有特效"是常态）。
+        var drawnFolder = Path.Combine(root, "drawn");
+        Directory.CreateDirectory(drawnFolder);
+        var drawnFirst = Path.Combine(drawnFolder, "Sk2_Effect_0001.png");
+        var drawnFourth = Path.Combine(drawnFolder, "Sk2_Effect_0004.png");
+        WriteSolidImage(drawnFirst, Color.Lime, 40, 30);
+        WriteSolidImage(drawnFourth, Color.Yellow, 40, 30);
+
+        var result = new BasePlateExportService()
+            .ExportAsync(
+                plan,
+                root,
+                progress: null,
+                cancellationToken: CancellationToken.None,
+                effectFramePaths: new Dictionary<int, string> { [1] = drawnFirst, [4] = drawnFourth })
+            .GetAwaiter()
+            .GetResult();
+
+        AssertEqual(2, result.EffectLayerCount);
+        // 图层组的形状一点没变：还是 4 组、每组两层（没因为带特效多出组或多出层）。
+        // 组头那条的记录种类看「可见性」：第 1 组展开（1）、后面三组关掉 + 折叠（2）。
+        var psdDocument = PsdReader.Read(result.PsdFilePath);
+        AssertEqual(
+            1,
+            psdDocument.Layers.Count(layer =>
+                layer.SectionDividerKind == PsdSectionDividerKinds.GroupStartOpen));
+        AssertEqual(
+            3,
+            psdDocument.Layers.Count(layer =>
+                layer.SectionDividerKind == PsdSectionDividerKinds.GroupStartClosed));
+        AssertEqual(
+            4,
+            psdDocument.Layers.Count(layer =>
+                layer.SectionDividerKind == 0 &&
+                layer.Name == BasePlateExportPlanner.EffectLayerName));
+
+        // 读回（就是界面上「导入特效帧 → 从 PSD 导入…」那条路）：
+        // 4 格都在；画过的那两格拿回来还是原色，没画的那两格是全透明空帧。
+        var staged = new SequenceEffectPsdImportService().StageFrames(
+            result.PsdFilePath,
+            expectedFrameCount: 4,
+            expectedCanvasWidth: plan.CanvasWidth,
+            expectedCanvasHeight: plan.CanvasHeight,
+            outputFolder: BasePlateExportPlanner.ResolveEffectFolderPath(plan.OutputDirectory));
+        AssertSequence([1, 2, 3, 4], staged.Select(frame => frame.Ordinal).ToArray());
+        using (var readBack = new Bitmap(staged[0].FilePath))
+        {
+            AssertEqual(Color.Lime.ToArgb(), readBack.GetPixel(1, 1).ToArgb());
+        }
+
+        // 第 4 组正是"被关掉可视性"的那几组之一，读回照样要拿到这一格的黄 ——
+        // 读的一侧**不看标志位**：关掉眼睛的意思是"先别看见"，不是"这格作废"，
+        // 尤其「导出底板（带特效）」导出的 PSD 里，画好的特效常常就在被关掉的组里。
+        using (var readBack = new Bitmap(staged[3].FilePath))
+        {
+            AssertEqual(Color.Yellow.ToArgb(), readBack.GetPixel(1, 1).ToArgb());
+        }
+
+        AssertEqual(true, SequenceEffectService.IsFullyTransparent(staged[1].FilePath));
+
+        // 不带特效（老行为）：还是同一份形状，但所有「特效」层都是空的（读回全透明）。
+        var plainPlan = plan with
+        {
+            OutputDirectory = Path.Combine(root, "Export", "Misaka", "BasePlate", "Sk2-plain")
+        };
+        var plain = new BasePlateExportService()
+            .ExportAsync(plainPlan, root, progress: null, CancellationToken.None)
+            .GetAwaiter()
+            .GetResult();
+        AssertEqual(0, plain.EffectLayerCount);
+        var plainStaged = new SequenceEffectPsdImportService().StageFrames(
+            plain.PsdFilePath,
+            expectedFrameCount: 4,
+            expectedCanvasWidth: plan.CanvasWidth,
+            expectedCanvasHeight: plan.CanvasHeight,
+            outputFolder: Path.Combine(root, "plain-staging"));
+        AssertEqual(4, plainStaged.Count);
+        AssertEqual(true, plainStaged.All(frame => SequenceEffectService.IsFullyTransparent(frame.FilePath)));
     }
     finally
     {
@@ -5394,7 +5625,7 @@ static void SequenceEffectImportMapsFramesByNumber()
 /// <summary>
 /// 底板 PSD「读回来那一半」：写出去的层要能原样读回 —— 层数、顺序、名字、矩形、像素。
 ///
-/// 这条是给「导入特效帧 → 从底板 PSD 读回」兜底的。顺序错了的表现是**特效整体错位一帧**，
+/// 这条是给「导入特效帧 → 从 PSD 导入…」兜底的。顺序错了的表现是**特效整体错位一帧**，
 /// 画的人不一定看得出来，所以钉死。同类风险还有**通道按位置读**：我们写的是 R,G,B,A，
 /// 而 PS 重新存过之后是 A,R,G,B，按位置读会把 alpha 当成红（一声不响地整层变色）。
 /// </summary>
@@ -5441,7 +5672,7 @@ static void BasePlatePsdLayersReadBackInOrder()
 }
 
 /// <summary>
-/// 「从底板 PSD 读回特效帧」：**图层顺序就是帧顺序**（图层名是画的时候随手起的，
+/// 「从 PSD 导入特效帧」：**图层顺序就是帧顺序**（图层名是画的时候随手起的，
 /// 靠名字认帧认不出来）；整张透明的层算空帧；图层数和动作帧数对不上就**先停下报数**，
 /// 因为多一层少一层都会让整条特效时序错位，而那种错看起来很像"本来就该这样"。
 /// </summary>
@@ -5647,6 +5878,78 @@ static void BasePlatePsdGroupsRoundTrip()
             expectedCanvasHeight: canvas,
             outputFolder: Path.Combine(root, "Effect2"));
         AssertSequence([1, 2, 3], partial.Select(frame => frame.Ordinal).ToArray());
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+static void SequenceEffectPsdImportHonorsLayerOpacity()
+{
+    // 2026-09-27 晓桀报的「我看的时候也觉得透明度没算」：在画世界 / PS 里把某一层的不透明度调小
+    // （写进 PSD 的就是图层记录里那个字节），导入合成时必须按它缩放这一层的 alpha
+    // —— 只看像素 alpha 的话，那层会按 100% 合进去，读回来"变实了"。
+    //
+    // 写那一半（PsdWriter）永远写 255（它自己导出的底板本来就该是实的），所以这里写完
+    // **手工把那个字节改掉**再读 —— 模拟画世界 / PS 存出来的文件。
+    var root = CreateTemporaryTestFolder();
+    const int canvas = 24;
+    try
+    {
+        var red = Path.Combine(root, "red.png");
+        WriteSolidImage(red, Color.Red, canvas, canvas);
+
+        var psd = Path.Combine(root, "opacity.psd");
+        PsdWriter.WriteGrouped(
+            psd,
+            canvas,
+            canvas,
+            [],
+            [
+                new PsdLayerGroup(BasePlateExportPlanner.FormatFrameGroupName(1), [
+                    new PsdLayerSource(BasePlateExportPlanner.BasePlateLayerName, string.Empty),
+                    new PsdLayerSource(BasePlateExportPlanner.EffectLayerName, red)])
+            ]);
+
+        // 图层记录里这一段是固定的：签名 '8BIM' + 混合模式 'norm' + **不透明度** + 剪贴标志 …，
+        // 所以拿 '8BIMnorm' 定位、改它后面那个字节就是改不透明度（读那一半见 PsdReader）。
+        const byte opacity = 100;
+        var bytes = File.ReadAllBytes(psd);
+        var patched = 0;
+        for (var index = 0; index + 9 <= bytes.Length; index++)
+        {
+            if (bytes[index] != (byte)'8' || bytes[index + 1] != (byte)'B'
+                || bytes[index + 2] != (byte)'I' || bytes[index + 3] != (byte)'M'
+                || bytes[index + 4] != (byte)'n' || bytes[index + 5] != (byte)'o'
+                || bytes[index + 6] != (byte)'r' || bytes[index + 7] != (byte)'m')
+            {
+                continue;
+            }
+
+            bytes[index + 8] = opacity;
+            patched++;
+        }
+
+        AssertEqual(true, patched >= 2);
+        File.WriteAllBytes(psd, bytes);
+
+        // 读回来：不透明度进了模型（以前这个字节是被 `Skip(2)` 一起跳过的）
+        var document = PsdReader.Read(psd);
+        AssertEqual(
+            (int)opacity,
+            (int)document.Layers.First(layer => layer.Name == BasePlateExportPlanner.EffectLayerName).Opacity);
+
+        var staged = new SequenceEffectPsdImportService().StageFrames(
+            psd,
+            expectedFrameCount: 1,
+            expectedCanvasWidth: canvas,
+            expectedCanvasHeight: canvas,
+            outputFolder: Path.Combine(root, "Effect"));
+
+        using var frame = new Bitmap(staged[0].FilePath);
+        // 颜色照旧是红（不透明度只缩 alpha），alpha 跟着缩到 100 —— 改之前这里会是 255
+        AssertEqual(Color.FromArgb(opacity, Color.Red).ToArgb(), frame.GetPixel(4, 4).ToArgb());
     }
     finally
     {
@@ -6009,7 +6312,7 @@ static void WriteBigEndian(byte[] bytes, int offset, int value)
 }
 
 /// <summary>
-/// 「从底板 PSD 读回特效帧」：**图层顺序就是帧顺序**（图层名是画的时候随手起的，
+/// 「从 PSD 导入特效帧」：**图层顺序就是帧顺序**（图层名是画的时候随手起的，
 /// 靠名字认帧认不出来）；整张透明的层算空帧；图层数和动作帧数对不上就**先停下报数**，
 /// 因为多一层少一层都会让整条特效时序错位，而那种错看起来很像"本来就该这样"。
 /// </summary>
@@ -6119,6 +6422,80 @@ static void SequenceEffectLayerLoadsAndClears()
         // 素材帧原地不动：清特效不该动角色序列。
         AssertEqual(true, File.Exists(framePath));
         AssertEqual(false, service.Load(character, action).HasFrames);
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
+}
+
+/// <summary>
+/// 一个动作可以有好几层特效（晓桀 2026-09-27：从底板 PSD 读回要能选「导入到第几层」，为了分层特效）。
+/// 第 1 层是老落点 <c>Effects\</c>（文件名带 <c>_Effect_</c>），第 2 层是 <c>Effects2\</c>（文件名带 <c>_Effect2_</c>）：
+/// 层号进目录名、层名进文件名，两层各写各的，清空只清自己那一层。
+/// </summary>
+static void SequenceEffectLayersAreIndependent()
+{
+    var root = CreateTemporaryTestFolder();
+    try
+    {
+        var character = CreateCharacter(root, "Misaka", "御坂美琴");
+        Directory.CreateDirectory(character.ToolFolderPath);
+        var action = SequenceFrameService.BuildActions(new CharacterSkillsData()).First();
+        var firstDrawn = Path.Combine(root, "画好的甲.png");
+        var secondDrawn = Path.Combine(root, "画好的乙.png");
+        WriteSolidImage(firstDrawn, Color.Red, 40, 30);
+        WriteSolidImage(secondDrawn, Color.Blue, 40, 30);
+
+        var service = new SequenceEffectService();
+
+        // 层号 ↔ 层名 / 目录名；认不出来的层名不算一层。
+        AssertEqual("Effect2", SequenceEffectService.BuildLayerName(2));
+        AssertEqual("Effects2", SequenceEffectService.BuildLayerFolderName(2));
+        AssertEqual(2, SequenceEffectService.ResolveLayerIndex("Effect2"));
+        AssertEqual(1, SequenceEffectService.ResolveLayerIndex("Effect"));
+        AssertEqual(0, SequenceEffectService.ResolveLayerIndex("EffectB"));
+
+        // 第 1 层的路径一个字没变（历史落点），第 2 层是 Effects2。
+        var firstFolder = SequenceEffectService.GetLayerFramesFolderPath(character, action);
+        AssertEqual(
+            Path.Combine(character.FolderPath, "ZDMaterial", action.Code, "Effects"),
+            firstFolder);
+        AssertEqual(firstFolder, SequenceEffectService.GetEffectsRootPath(character, action));
+        var secondFolder = SequenceEffectService.GetLayerFramesFolderPath(character, action, layerIndex: 2);
+        AssertEqual(
+            Path.Combine(character.FolderPath, "ZDMaterial", action.Code, "Effects2"),
+            secondFolder);
+
+        // 现有层的清单：**空的层目录也算**（人常是先建目录再慢慢画），怪目录不算。
+        Directory.CreateDirectory(secondFolder);
+        Directory.CreateDirectory(Path.Combine(character.FolderPath, "ZDMaterial", action.Code, "EffectsBak"));
+        Directory.CreateDirectory(Path.Combine(character.FolderPath, "ZDMaterial", action.Code, "Effects99"));
+        AssertSequence(new[] { 1, 2 }, SequenceEffectService.FindLayerIndexes(character, action).ToArray());
+
+        // 两层各导各的：落进各自目录，文件名里的层名跟着层号走。
+        _ = service.Import(character, action, [firstDrawn], expectedFrameCount: 1);
+        _ = service.Import(character, action, [secondDrawn], expectedFrameCount: 1, layerIndex: 2);
+        AssertSequence(
+            new[] { $"{action.Code}_Effect_0001.png" },
+            Directory.GetFiles(firstFolder, "*.png").Select(path => Path.GetFileName(path)!).ToArray());
+        AssertSequence(
+            new[] { $"{action.Code}_Effect2_0001.png" },
+            Directory.GetFiles(secondFolder, "*.png").Select(path => Path.GetFileName(path)!).ToArray());
+
+        var firstLayer = service.Load(character, action);
+        var secondLayer = service.Load(character, action, layerIndex: 2);
+        AssertEqual(1, firstLayer.FrameCount);
+        AssertEqual("Effect", firstLayer.LayerName);
+        AssertEqual(1, secondLayer.FrameCount);
+        AssertEqual("Effect2", secondLayer.LayerName);
+
+        // 清第 2 层不能碰到第 1 层。
+        AssertEqual(1, service.ClearLayer(character, action, layerIndex: 2));
+        AssertEqual(0, Directory.GetFiles(secondFolder, "*.png").Length);
+        AssertEqual(1, Directory.GetFiles(firstFolder, "*.png").Length);
+        AssertEqual(true, service.Load(character, action).HasFrames);
+        AssertEqual(false, service.Load(character, action, layerIndex: 2).HasFrames);
     }
     finally
     {
@@ -16054,12 +16431,28 @@ sealed class FakeFilePickerService : IFilePickerService
 {
     public int PickCalls { get; private set; }
 
+    /// <summary>「从 PSD 导入…」走的那个重载：假的实现只记下默认位置，回一个可预设的结果。</summary>
+    public string? NextPickedPath { get; set; }
+
+    /// <summary>那一次弹框时给的默认目录（真实现里就是选择框打开的位置）。</summary>
+    public string? LastStartFolderPath { get; private set; }
+
     public Task<string?> PickSingleFileAsync(
         Windows.Storage.Pickers.PickerLocationId startLocation,
         params string[] fileTypeFilters)
     {
         PickCalls++;
         return Task.FromResult<string?>(null);
+    }
+
+    public Task<string?> PickSingleFileAsync(
+        string startFolderPath,
+        string title,
+        params string[] fileTypeFilters)
+    {
+        PickCalls++;
+        LastStartFolderPath = startFolderPath;
+        return Task.FromResult(NextPickedPath);
     }
 
     public Task<IReadOnlyList<string>> PickMultipleFilesAsync(

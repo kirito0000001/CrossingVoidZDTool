@@ -102,8 +102,17 @@ internal interface ISequenceFramesCommandHost
     /// <summary>「导出底板」：按动作帧率的倍数逐帧导出 PNG（给特效绘制对照用）。</summary>
     Task ExportBasePlatesAsync();
 
+    /// <summary>
+    /// 「导出底板（带特效）」：同上，但图层组的「特效」层里填**已经画好的特效帧**
+    /// （没画过的帧留空层），直接在原稿上接着改。
+    /// </summary>
+    Task ExportBasePlatesWithEffectsAsync();
+
     // 特效层（和动作走同一条链路：导入 → 两层预览 → 并进第四步同步）。
-    /// <summary>「导入特效帧 → 从底板 PSD 读回」：读导出底板那份多图层 PSD，按图层顺序当帧。</summary>
+    /// <summary>
+    /// 「导入特效帧 → 从 PSD 导入…」：挑一份多图层 PSD（默认开在当前动作的底板目录），
+    /// 按图层组逐帧读回特效。
+    /// </summary>
     Task ImportEffectFramesFromPsdAsync();
 
     /// <summary>「导入特效帧 → 选择文件夹」：挑一个装满 PNG 的目录，帧号取文件名末尾数字。</summary>
@@ -311,6 +320,9 @@ internal sealed class SequenceFramesCommands(ISequenceFramesCommandHost host)
 
     public AsyncRelayCommand ExportBasePlatesCommand { get; } = new((object? _) => host.ExportBasePlatesAsync());
 
+    public AsyncRelayCommand ExportBasePlatesWithEffectsCommand { get; } =
+        new((object? _) => host.ExportBasePlatesWithEffectsAsync());
+
     public AsyncRelayCommand ImportEffectFramesFromPsdCommand { get; } =
         new((object? _) => host.ImportEffectFramesFromPsdAsync());
 
@@ -335,6 +347,7 @@ internal sealed class SequenceFramesCommands(ISequenceFramesCommandHost host)
                 {
                     SequenceExportAction.Atlas => (System.Windows.Input.ICommand)ExportAtlasCommand,
                     SequenceExportAction.BasePlate => ExportBasePlatesCommand,
+                    SequenceExportAction.BasePlateWithEffect => ExportBasePlatesWithEffectsCommand,
                     _ => throw new ArgumentOutOfRangeException(
                         nameof(item),
                         item.Action,
@@ -355,7 +368,7 @@ internal sealed class SequenceFramesCommands(ISequenceFramesCommandHost host)
                 item,
                 item.Source switch
                 {
-                    SequenceEffectImportSource.BasePlatePsd =>
+                    SequenceEffectImportSource.PsdFile =>
                         (System.Windows.Input.ICommand)ImportEffectFramesFromPsdCommand,
                     SequenceEffectImportSource.Folder => ImportEffectFramesFromFolderCommand,
                     _ => throw new ArgumentOutOfRangeException(

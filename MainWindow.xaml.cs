@@ -130,9 +130,12 @@ namespace CrossingVoidZDTool
             // 工具条那排放不下更多按钮了：导出收成一个「导出 ▾」，菜单内容由
             // `SequenceExportMenu` 这份清单决定（加新导出不用动 XAML）。
             BuildSequenceExportMenu();
-            // 「导入特效帧」同理收成一个带 ▾ 的按钮：第一条是「从底板 PSD 读回」，
+            // 「导入特效帧」同理收成一个带 ▾ 的按钮：第一条是「从 PSD 导入…」，
             // 第二条是老的"选文件夹"。菜单在壳里按 `SequenceEffectImportMenu` 这份清单建。
             BuildSequenceEffectImportMenu();
+            // 特效层现在可以有好几层（第 1 层 Effects\、第 2 层 Effects2\…），
+            // 换层入口挂在「特效层」摘要那一行上；菜单本体同样在壳里建。
+            BuildSequenceEffectLayerMenu();
             // 工具集：选目录/选文件/起进程由壳提供，流程在 AtlasToolViewModel 里。
             _applicationViewModel.AtlasTools.AttachHost(this);
             // C6b：角色详情那五个按钮的命令。流程在 CharacterDetailActionController 里，

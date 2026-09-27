@@ -122,6 +122,9 @@ namespace CrossingVoidZDTool
 
         Task ISequenceFramesCommandHost.ExportBasePlatesAsync() => ExportSelectedSequenceBasePlatesAsync();
 
+        Task ISequenceFramesCommandHost.ExportBasePlatesWithEffectsAsync() =>
+            ExportSelectedSequenceBasePlatesWithEffectsAsync();
+
         Task ISequenceFramesCommandHost.ConfirmDuplicateResolutionAsync() => ResolveSelectedDuplicateFramesAsync();
 
         void ISequenceFramesCommandHost.ToggleCopyTargetSelection()

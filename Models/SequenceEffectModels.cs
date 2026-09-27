@@ -60,3 +60,11 @@ internal sealed record SequenceEffectImportResult(
     int IgnoredFrames,
     int ClearedFrames,
     string LayerFolderPath);
+
+/// <summary>
+/// 导入特效帧走到哪一步了（给全局进度条用；<see cref="Percent"/> 是 0~100）。
+///
+/// 这条链上最费时间的是"解 PSD + 逐组合并"（画布大、组又多的时候要好几秒），
+/// 所以进度分两段报：解 PSD / 合并图层组（10→70），清层 + 逐张落盘（72→99）。
+/// </summary>
+internal sealed record SequenceEffectImportProgress(string Message, double Percent);

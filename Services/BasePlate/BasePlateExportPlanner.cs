@@ -91,9 +91,46 @@ internal static class BasePlateExportPlanner
     /// <summary>PSD 里给画特效留的那张空层。<b>组内</b>，读回时和用户自己加的层一起合并。</summary>
     public const string EffectLayerName = "特效";
 
+    /// <summary>
+    /// 垫在最底下、**不进任何图层组**的那层「背景」（纯色 <c>#6B6B6B</c>）。
+    ///
+    /// 晓桀 2026-09-27：「然后默认的背景是这个颜色」—— 画世界给「没有背景层的文档」
+    /// 铺的默认底色量出来就是 <c>#6B6B6B</c>，那就干脆在文件里写一层真背景：
+    /// 在画世界里看到的画面一样（它不再自己铺那块灰），而 PS / 别的软件打开也不再是格子底。
+    ///
+    /// ⚠️ 读回特效时**组外面的图层一律不看**（见 <c>SequenceEffectPsdImportService.CollectGroups</c>），
+    /// 所以这一层不会被当成"某一帧画的内容"。
+    /// </summary>
+    public const string BackgroundLayerName = "背景";
+
+    /// <summary>「背景」层的颜色，就是画世界那块默认底色。</summary>
+    public const byte BackgroundRed = 0x6B;
+
+    /// <summary>「背景」层的颜色，就是画世界那块默认底色。</summary>
+    public const byte BackgroundGreen = 0x6B;
+
+    /// <summary>「背景」层的颜色，就是画世界那块默认底色。</summary>
+    public const byte BackgroundBlue = 0x6B;
+
     /// <summary>组的落点：<c>&lt;底板目录&gt;/Effect/</c>。</summary>
     public static string ResolveEffectFolderPath(string outputDirectory) =>
         Path.Combine(outputDirectory, EffectFolderName);
+
+    /// <summary>
+    /// 挑 PSD 时默认打开的目录 —— 就是这个动作的**底板目录**（<c>&lt;动作&gt;-2x/</c>）。
+    ///
+    /// 晓桀 2026-09-27：「浏览器默认打开底板的位置，然后我可以自行选择 PSD 导入」——
+    /// 导出、画、存回原处的人，点两下就能读回来。
+    /// 这个动作还没导出过底板时退到上一级 <c>BasePlate/</c>：那儿至少能看到几个
+    /// <c>&lt;动作&gt;-2x</c> 目录，比"上次挑过的目录"更接近他要找的地方。
+    /// </summary>
+    public static string ResolvePsdPickerStartFolder(BasePlateExportPlan plan)
+    {
+        ArgumentNullException.ThrowIfNull(plan);
+        return Directory.Exists(plan.OutputDirectory)
+            ? plan.OutputDirectory
+            : Path.GetDirectoryName(plan.OutputDirectory) ?? plan.OutputDirectory;
+    }
 
     /// <summary>
     /// 落点：<c>&lt;工作区&gt;/Export/&lt;角色&gt;/BasePlate/&lt;动作&gt;-&lt;倍数&gt;x/</c>。

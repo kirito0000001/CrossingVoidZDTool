@@ -205,6 +205,86 @@ internal sealed class SequencePreviewBitmapCache
         return failures;
     }
 
+    /// <summary>
+    /// 按**叠层缓存键**预加载一张"已经叠好的"图：把这一格参与的各层解出来，
+    /// 用 <see cref="SequenceEffectFrameComposer"/> 叠成一张，再装成 bitmap 存进缓存。
+    ///
+    /// 为什么要合成、而不是"一格多显示几张"：见 <see cref="SequenceEffectFrameComposer"/> ——
+    /// 预览那边一格只有一张图，图层一多互相盖就是那档闪烁问题的温床
+    /// （<c>Docs/特效层预览闪烁-问题档-2026-09-25.md</c>）。
+    ///
+    /// 解不出来 / 尺寸和第一层对不上的层会被跳过并进失败清单；
+    /// **一层都没解出来**就不建缓存（下次播放还会再试一次，和单文件那条一个规矩）。
+    /// </summary>
+    public async Task<IReadOnlyList<SequencePreviewBitmapLoadFailure>> PreloadStackAsync(
+        string stackKey,
+        IEnumerable<(string FilePath, string DisplayName)> files,
+        string displayName)
+    {
+        var failures = new List<SequencePreviewBitmapLoadFailure>();
+        if (string.IsNullOrWhiteSpace(stackKey) || _bitmaps.ContainsKey(stackKey))
+        {
+            return failures;
+        }
+
+        var decoded = new List<DecodedBitmap>();
+        foreach (var (filePath, fileDisplayName) in files)
+        {
+            if (string.IsNullOrWhiteSpace(filePath))
+            {
+                continue;
+            }
+
+            if (!File.Exists(filePath))
+            {
+                _failedPaths.Add(filePath);
+                failures.Add(new SequencePreviewBitmapLoadFailure(
+                    fileDisplayName, filePath, "文件不存在", null));
+                continue;
+            }
+
+            try
+            {
+                decoded.Add(DecodeToPixels(filePath));
+            }
+            catch (Exception ex)
+            {
+                _failedPaths.Add(filePath);
+                failures.Add(new SequencePreviewBitmapLoadFailure(
+                    fileDisplayName, filePath, ex.Message, ex.GetType().Name));
+            }
+        }
+
+        if (decoded.Count == 0)
+        {
+            return failures;
+        }
+
+        // 尺寸取第一层（正常都是同一块画布）；对不上的层直接丢掉，免得合成越界。
+        var width = decoded[0].Width;
+        var height = decoded[0].Height;
+        var pixels = decoded
+            .Where(bitmap => bitmap.Width == width && bitmap.Height == height)
+            .Select(bitmap => bitmap.Pixels)
+            .ToArray();
+        try
+        {
+            _bitmaps[stackKey] = CreateFromPixels(new DecodedBitmap(
+                width,
+                height,
+                SequenceEffectFrameComposer.Compose(width, height, pixels)));
+            // 和单文件那条一样：让出一次，别把 UI 线程占满。
+            await Task.Yield();
+        }
+        catch (Exception ex)
+        {
+            failures.Add(new SequencePreviewBitmapLoadFailure(
+                displayName, stackKey, ex.Message, ex.GetType().Name));
+        }
+
+        return failures;
+    }
+
     private static ImageSource LoadImageSource(SequenceFrameItem frame)
     {
         try
@@ -221,7 +301,6 @@ internal sealed class SequencePreviewBitmapCache
             return new BitmapImage(new Uri(frame.FileUri, UriKind.Absolute));
         }
     }
-
 
     public void Clear()
     {

@@ -9,7 +9,10 @@ internal enum SequenceExportAction
     Atlas,
 
     /// <summary>按动作帧率的倍数逐帧导出底板 PNG（给特效绘制对照用）。</summary>
-    BasePlate
+    BasePlate,
+
+    /// <summary>同上，但图层组的「特效」层里放**已经画好的特效帧**，方便在原有特效上接着改。</summary>
+    BasePlateWithEffect
 }
 
 /// <summary>一条导出项：文案 + 悬浮说明 + 干什么。</summary>
@@ -39,6 +42,10 @@ internal static class SequenceExportMenu
         new(
             "导出底板（2 倍帧）",
             "按动作帧率的 2 倍逐帧导出 PNG，给特效绘制对照用；落 Export/<角色>/BasePlate/<动作>-2x/",
-            SequenceExportAction.BasePlate)
+            SequenceExportAction.BasePlate),
+        new(
+            "导出底板（带特效）",
+            "落点和「导出底板（2 倍帧）」相同，但图层组的「特效」层里放着已经画好的特效帧（没画过的帧留空层），方便在原稿上接着改",
+            SequenceExportAction.BasePlateWithEffect)
     ];
 }

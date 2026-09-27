@@ -5,11 +5,13 @@ using System.Drawing.Imaging;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Threading;
 
 namespace CrossingVoidZDTool.Services;
 
 /// <summary>
-/// 把「导出底板」那份多图层 PSD **读回来当特效帧**。
+/// 把**多图层 PSD** 读回来当特效帧（默认那份就是「导出底板」出的，路径由调用方挑，
+/// 所以同一份底板可以有好几版 PSD 并存 —— 晓桀 2026-09-27）。
 ///
 /// **一帧 = 一个图层组**（2026-09-25 改，晓桀：单图层逼着人把特效合并成一层，没法返工）：
 ///
@@ -35,38 +37,45 @@ internal sealed class SequenceEffectPsdImportService
     /// <summary>读回来的一帧：落盘的 PNG + 它是第几帧（1 起）。</summary>
     internal sealed record StagedEffectFrame(string FilePath, int Ordinal);
 
-    /// <summary>底板导出的那份 PSD 落在哪（和底板 PNG 同一个目录，同一个文件名规则）。</summary>
-    public static string ResolveBasePlatePsdPath(BasePlateExportPlan plan) =>
-        Path.Combine(plan.OutputDirectory, BasePlateExportPlanner.FormatPsdFileName(plan));
-
     /// <summary>
     /// 读 PSD 里的每个图层组、合并成整画布 PNG，落到 <paramref name="outputFolder"/>
     /// （= 底板目录下的 <c>Effect/</c>，晓桀要"一眼能看到"）。
     ///
     /// 返回按帧号排好的结果。画布对不上 / 一个图层组都没有，抛
     /// <see cref="InvalidOperationException"/>，消息是直接给用户看的。
+    ///
+    /// <paramref name="progress"/> 走到"解 PSD → 逐个图层组合并"（约 5% → 70%）；
+    /// <paramref name="cancellationToken"/> 每个组之间查一次 —— 大 PSD 解到一半也能停下。
     /// </summary>
     public IReadOnlyList<StagedEffectFrame> StageFrames(
         string psdPath,
         int expectedFrameCount,
         int expectedCanvasWidth,
         int expectedCanvasHeight,
-        string outputFolder)
+        string outputFolder,
+        IProgress<SequenceEffectImportProgress>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(psdPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputFolder);
         if (!File.Exists(psdPath))
         {
             throw new InvalidOperationException(
-                $"找不到底板 PSD：{psdPath}{Environment.NewLine}先「导出 ▾ → 导出底板」出一份，画完再来。");
+                $"找不到这份 PSD：{psdPath}{Environment.NewLine}"
+                + "刚挑完就被移走 / 改名了？重新挑一份。");
         }
+
+        // 解 PSD 是这条链上最慢的一步（逐通道 PackBits 解完整张画布），进度条从这一步就开始动。
+        Report(progress, "正在解这份 PSD…", 5);
+        cancellationToken.ThrowIfCancellationRequested();
 
         var document = PsdReader.Read(psdPath);
         if (document.Width != expectedCanvasWidth || document.Height != expectedCanvasHeight)
         {
             throw new InvalidOperationException(
                 $"这份 PSD 的画布是 {document.Width}×{document.Height}，"
-                + $"底板应该是 {expectedCanvasWidth}×{expectedCanvasHeight}——画布尺寸被改过就对不上了。");
+                + $"这个动作的底板是 {expectedCanvasWidth}×{expectedCanvasHeight}——"
+                + "多半是挑到别的动作那份了（也可能这份是画布改过之后存的）。");
         }
 
         var groups = CollectGroups(document.Layers);
@@ -83,7 +92,7 @@ internal sealed class SequenceEffectPsdImportService
         if (groups.Count != expectedFrameCount)
         {
             ToolboxLog.Info(
-                $"从底板 PSD 读回特效帧：读到 {groups.Count} 个图层组，这个动作有 {expectedFrameCount} 帧 —— "
+                $"从 PSD 导入特效帧：读到 {groups.Count} 个图层组，这个动作有 {expectedFrameCount} 帧 —— "
                 + "缺的那些算空帧，多出来的会被忽略。");
         }
 
@@ -98,6 +107,7 @@ internal sealed class SequenceEffectPsdImportService
         var skippedBasePlateLayers = 0;
         for (var index = 0; index < groups.Count; index++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var canvas = ComposeGroup(
                 groups[index].Layers, document.Width, document.Height, ref skippedBasePlateLayers);
             var ordinal = ordinals[index];
@@ -105,17 +115,31 @@ internal sealed class SequenceEffectPsdImportService
                 outputFolder, $"{ordinal.ToString("0000", CultureInfo.InvariantCulture)}.png");
             WritePng(path, canvas, document.Width, document.Height);
             staged.Add(new StagedEffectFrame(path, ordinal));
+            Report(
+                progress,
+                $"正在合并图层组 {index + 1}/{groups.Count}…",
+                10 + (60.0 * (index + 1) / groups.Count));
         }
 
         if (skippedBasePlateLayers > 0)
         {
             ToolboxLog.Info(
-                $"从底板 PSD 读回特效帧：跳过了 {skippedBasePlateLayers} 层「{BasePlateExportPlanner.BasePlateLayerName}」"
+                $"从 PSD 导入特效帧：跳过了 {skippedBasePlateLayers} 层「{BasePlateExportPlanner.BasePlateLayerName}」"
                 + "（那是给人对着画的对照底图，不算特效内容）。");
         }
 
         return staged.OrderBy(frame => frame.Ordinal).ToArray();
     }
+
+    /// <summary>
+    /// 报一条进度（没接进度条时是空操作）。百分比自己夹到 0~100 ——
+    /// 组数算出来的小数别让进度条跑过头。
+    /// </summary>
+    private static void Report(
+        IProgress<SequenceEffectImportProgress>? progress,
+        string message,
+        double percent) =>
+        progress?.Report(new SequenceEffectImportProgress(message, Math.Clamp(percent, 0, 100)));
 
     /// <summary>
     /// 把图层记录归到各自的组里。
@@ -183,7 +207,7 @@ internal sealed class SequenceEffectPsdImportService
         }
 
         ToolboxLog.Info(
-            "从底板 PSD 读回特效帧：组名认不出帧号（被人改过名？），这一轮按**组的先后**排帧。");
+            "从 PSD 导入特效帧：组名认不出帧号（被人改过名？），这一轮按**组的先后**排帧。");
         var positional = new int[groups.Count];
         for (var index = 0; index < groups.Count; index++)
         {
@@ -226,6 +250,10 @@ internal sealed class SequenceEffectPsdImportService
     ///
     /// 以前是"整层覆盖"（一帧就一层，覆盖没差别）；现在一个组里可能好几层，
     /// 直接覆盖会把下面那层的像素连同透明区一起抹掉。
+    ///
+    /// 合成时**也算上这一层自己的不透明度**（<see cref="PsdLayerBitmap.Opacity"/>）：
+    /// 在画世界 / PS 里调小的那层，读回来该是同样的淡 —— 只看像素 alpha 的话，
+    /// 35% 那层会按 100% 合进去，看上去"变实了"（晓桀 2026-09-27 报的）。
     /// </summary>
     private static void BlendOnto(
         byte[] canvas,
@@ -238,6 +266,7 @@ internal sealed class SequenceEffectPsdImportService
             return;
         }
 
+        var opacity = layer.Opacity;
         var startX = Math.Max(0, layer.Left);
         var startY = Math.Max(0, layer.Top);
         var endX = Math.Min(canvasWidth, layer.Left + layer.Width);
@@ -251,6 +280,16 @@ internal sealed class SequenceEffectPsdImportService
                 if (sourceAlpha == 0)
                 {
                     continue;
+                }
+
+                if (opacity != 255)
+                {
+                    // 图层不透明度按比例缩 alpha（+127 是四舍五入，免得 35% 被截成 34%）。
+                    sourceAlpha = (byte)((sourceAlpha * opacity + 127) / 255);
+                    if (sourceAlpha == 0)
+                    {
+                        continue;
+                    }
                 }
 
                 var target = (y * canvasWidth + x) * 4;

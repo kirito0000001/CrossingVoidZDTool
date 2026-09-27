@@ -5,6 +5,7 @@ using System.Drawing.Imaging;
 using System.IO;
 using System.Linq;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace CrossingVoidZDTool.Services;
 
@@ -13,8 +14,13 @@ namespace CrossingVoidZDTool.Services;
 ///
 /// 磁盘形状（跟着动作目录走，和序列帧、图集缓存同一个父目录）：
 /// <code>
-/// &lt;角色&gt;/ZDMaterial/&lt;动作&gt;/Effects/&lt;层名&gt;/Frames/&lt;角色&gt;_&lt;动作&gt;_0001.png …
+/// &lt;角色&gt;/ZDMaterial/&lt;动作&gt;/Effects/&lt;动作&gt;_&lt;层名&gt;_0001.png …（例：DefAtk_Effect_0001.png）
+/// &lt;角色&gt;/ZDMaterial/&lt;动作&gt;/Effects2/&lt;动作&gt;_&lt;层名&gt;_0001.png …（例：DefAtk_Effect2_0001.png）
 /// </code>
+///
+/// **一个动作可以有好几层特效**（晓桀 2026-09-27：「从 PSD 导入新增一个层 … 为了制作分层特效用」）：
+/// 层号从 1 起，第 1 层是 <c>Effects\</c> + 文件名里的 <c>Effect</c>，第 2 层是 <c>Effects2\</c> + <c>Effect2</c>，
+/// 一层一个目录、一层一套文件名，互不干扰。层号是**目录名**算出来的，不另存清单。
 ///
 /// 不写额外的清单文件：**文件名里的编号就是序号**，空帧 = 那个编号没有文件。
 /// 少一个清单就少一处会和实际文件对不上的地方。
@@ -28,44 +34,146 @@ namespace CrossingVoidZDTool.Services;
 /// </summary>
 internal sealed class SequenceEffectService
 {
-    /// <summary>默认层名。以后一个动作要多条特效，就再加 <c>EffectB</c> 这种层名。</summary>
+    /// <summary>默认层名（第 1 层）。第 N 层是 <c>Effect2</c>、<c>Effect3</c>…（见 <see cref="BuildLayerName"/>）。</summary>
     public const string DefaultLayerName = "Effect";
+
+    /// <summary>默认层号。层号从 1 起；0 和负数一律当第 1 层。</summary>
+    public const int DefaultLayerIndex = 1;
+
+    /// <summary>
+    /// 层号上限。防手滑建出 <c>Effects99</c> 这种，也防「导入到第几层」的菜单被盘上的怪目录撑爆。
+    /// </summary>
+    public const int MaxLayerIndex = 9;
+
+    /// <summary>第 1 层那个目录的名字（<c>Effects</c>）；第 N 层是 <c>Effects2</c>…</summary>
+    private const string EffectsFolderName = "Effects";
 
     private static readonly Regex TrailingNumberPattern = new(@"(\d+)(?!.*\d)", RegexOptions.Compiled);
 
-    public static string GetEffectsRootPath(CharacterCard character, SequenceFrameAction action) =>
-        Path.Combine(SequenceActionFolderLayout.GetActionFolderPath(character, action), "Effects");
+    /// <summary>层号 → 层名：1 → <c>Effect</c>，2 → <c>Effect2</c>（层名写在每个文件名里）。</summary>
+    public static string BuildLayerName(int layerIndex) =>
+        layerIndex <= DefaultLayerIndex ? DefaultLayerName : $"{DefaultLayerName}{layerIndex}";
+
+    /// <summary>层号 → 目录名：1 → <c>Effects</c>，2 → <c>Effects2</c>。</summary>
+    public static string BuildLayerFolderName(int layerIndex) =>
+        layerIndex <= DefaultLayerIndex ? EffectsFolderName : $"{EffectsFolderName}{layerIndex}";
 
     /// <summary>
-    /// 这一层的帧**直接放在 <c>Effects\</c> 里**（不再套 <c>&lt;层名&gt;\Frames\</c>）。
+    /// 层名 → 层号：<c>Effect</c> → 1、<c>Effect2</c> → 2（大小写不敏感）。
+    /// 认不出来（空、<c>EffectB</c> 这种、后缀不是数字）返回 0，调用方自己决定当几层。
+    /// </summary>
+    public static int ResolveLayerIndex(string? layerName)
+    {
+        var name = (layerName ?? string.Empty).Trim();
+        if (name.Length == 0)
+        {
+            return 0;
+        }
+
+        if (string.Equals(name, DefaultLayerName, StringComparison.OrdinalIgnoreCase))
+        {
+            return DefaultLayerIndex;
+        }
+
+        if (!name.StartsWith(DefaultLayerName, StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        var suffix = name[DefaultLayerName.Length..];
+        return int.TryParse(suffix, out var index) ? Math.Max(DefaultLayerIndex, index) : 0;
+    }
+
+    /// <summary>第 1 层的目录（=<c>&lt;动作&gt;\Effects</c>）。历史上只有这一层，名字留着给老调用点用。</summary>
+    public static string GetEffectsRootPath(CharacterCard character, SequenceFrameAction action) =>
+        GetLayerFolderPath(character, action);
+
+    /// <summary>
+    /// 这一层的帧**直接放在层目录里**（不再套 <c>&lt;层名&gt;\Frames\</c>）。
     ///
     /// 晓桀 2026-09-27：「特效多套了两层路径」—— 原来落点是
     /// <c>&lt;动作&gt;\Effects\Effect\Frames\</c>，<c>Effect</c> 和 <c>Frames</c> 两层都是多余的：
     /// 层名本来就写在每个文件名里（<c>Misaka_Sk2_Effect_0001.png</c>），
     /// 而 <c>Effects\</c> 本身已经说明这是特效。现在就是 <c>&lt;动作&gt;\Effects\&lt;帧&gt;.png</c>。
     ///
+    /// 第 2 层起同理，只是目录换成了 <c>Effects2\</c>（层号进目录名，层名进文件名）。
+    ///
     /// 旧落点由 <see cref="MigrateLegacyLayout"/> 一次性搬上来（人已经画好的东西不能丢）。
     /// </summary>
     public static string GetLayerFolderPath(
         CharacterCard character,
         SequenceFrameAction action,
-        string layerName = DefaultLayerName) =>
-        GetEffectsRootPath(character, action);
+        int layerIndex = DefaultLayerIndex) =>
+        Path.Combine(SequenceActionFolderLayout.GetActionFolderPath(character, action), BuildLayerFolderName(layerIndex));
 
     public static string GetLayerFramesFolderPath(
         CharacterCard character,
         SequenceFrameAction action,
-        string layerName = DefaultLayerName) =>
-        GetLayerFolderPath(character, action, layerName);
+        int layerIndex = DefaultLayerIndex) =>
+        GetLayerFolderPath(character, action, layerIndex);
+
+    /// <summary>
+    /// 这个动作盘上现有的层号（升序）。**目录在就算**，空的也算 —— 人可能先把 <c>Effects2\</c> 建好
+    /// 再慢慢画，「导入到第几层」的清单得能把空目录列出来。
+    /// 认不出的目录（<c>EffectsBak</c>、超过 <see cref="MaxLayerIndex"/> 的）不进清单。
+    /// </summary>
+    public static IReadOnlyList<int> FindLayerIndexes(CharacterCard character, SequenceFrameAction action)
+    {
+        ArgumentNullException.ThrowIfNull(character);
+        ArgumentNullException.ThrowIfNull(action);
+        var actionFolder = SequenceActionFolderLayout.GetActionFolderPath(character, action);
+        if (!Directory.Exists(actionFolder))
+        {
+            return Array.Empty<int>();
+        }
+
+        var indexes = new List<int>();
+        foreach (var folder in Directory.EnumerateDirectories(actionFolder))
+        {
+            var name = Path.GetFileName(folder);
+            if (!name.StartsWith(EffectsFolderName, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            var suffix = name[EffectsFolderName.Length..];
+            var index = suffix.Length == 0
+                ? DefaultLayerIndex
+                : int.TryParse(suffix, out var parsed) ? parsed : 0;
+            if (index >= DefaultLayerIndex && index <= MaxLayerIndex)
+            {
+                indexes.Add(index);
+            }
+        }
+
+        return indexes.Distinct().OrderBy(index => index).ToArray();
+    }
+
+    /// <summary>
+    /// 把这一层的目录建出来（切到某一层 / 挑「新建第 N 层」时先建好，
+    /// 「打开特效目录」和导出落点才有个实在的地方）。已经存在就什么都不做。
+    /// </summary>
+    public static string EnsureLayerFolder(
+        CharacterCard character,
+        SequenceFrameAction action,
+        int layerIndex = DefaultLayerIndex)
+    {
+        var folder = GetLayerFolderPath(character, action, layerIndex);
+        Directory.CreateDirectory(folder);
+        return folder;
+    }
+
+    /// <summary>第 N 层的目录名（给日志和提示文案用）：<c>Effects\</c> / <c>Effects2\</c>。</summary>
+    public static string FormatLayerFolderName(int layerIndex) => $"{BuildLayerFolderName(layerIndex)}\\";
 
     /// <summary>旧落点：<c>&lt;动作&gt;\Effects\&lt;层名&gt;\Frames\</c>（2026-09-27 之前）。</summary>
     private static string GetLegacyLayerFramesFolderPath(
         CharacterCard character,
         SequenceFrameAction action,
-        string layerName) =>
+        int layerIndex) =>
         Path.Combine(
             GetEffectsRootPath(character, action),
-            layerName,
+            BuildLayerName(layerIndex),
             SequenceActionFolderLayout.FramesFolderName);
 
     /// <summary>
@@ -77,9 +185,10 @@ internal sealed class SequenceEffectService
     internal static void MigrateLegacyLayout(
         CharacterCard character,
         SequenceFrameAction action,
-        string layerName = DefaultLayerName)
+        int layerIndex = DefaultLayerIndex)
     {
-        var legacy = GetLegacyLayerFramesFolderPath(character, action, layerName);
+        var layerName = BuildLayerName(layerIndex);
+        var legacy = GetLegacyLayerFramesFolderPath(character, action, layerIndex);
         if (!Directory.Exists(legacy))
         {
             return;
@@ -92,7 +201,7 @@ internal sealed class SequenceEffectService
             return;
         }
 
-        var current = GetLayerFramesFolderPath(character, action, layerName);
+        var current = GetLayerFramesFolderPath(character, action, layerIndex);
         var alreadyThere = Directory.Exists(current) &&
             Directory.EnumerateFiles(current, "*.png")
                 .Any(path => IsFrameOfLayer(Path.GetFileName(path), action.Code, layerName));
@@ -122,7 +231,8 @@ internal sealed class SequenceEffectService
         {
             ToolboxLog.Info(
                 $"特效帧落点上移：{action.Code} 的 {moved} 张从 "
-                + $"{Path.Combine("Effects", layerName, SequenceActionFolderLayout.FramesFolderName)} 搬到了 Effects\\（去掉了多余的两层）。");
+                + $"{Path.Combine(EffectsFolderName, layerName, SequenceActionFolderLayout.FramesFolderName)} 搬到了 "
+                + $"{FormatLayerFolderName(layerIndex)}（去掉了多余的两层）。");
         }
     }
 
@@ -161,21 +271,22 @@ internal sealed class SequenceEffectService
 
     /// <summary>
     /// 读这一层现在有什么。目录不存在 / 一张图都没有，都返回一个空层（不抛异常）：
-    /// "还没画特效"是常态，不是错误。
+    /// "还没画特效"是常态，不是错误。层号默认第 1 层，和以前的行为一模一样。
     /// </summary>
     public SequenceEffectLayer Load(
         CharacterCard character,
         SequenceFrameAction action,
         int multiplier = BasePlateExportPlanner.Multiplier,
-        string layerName = DefaultLayerName,
+        int layerIndex = DefaultLayerIndex,
         int expectedFrameCount = 0)
     {
         ArgumentNullException.ThrowIfNull(character);
         ArgumentNullException.ThrowIfNull(action);
         // 旧落点（多套了两层）一次性搬到新落点，别让人已经画好的东西找不着。
-        MigrateLegacyLayout(character, action, layerName);
+        MigrateLegacyLayout(character, action, layerIndex);
+        var layerName = BuildLayerName(layerIndex);
         var assetPrefix = BuildAssetPrefix(action.Code, layerName);
-        var framesFolder = GetLayerFramesFolderPath(character, action, layerName);
+        var framesFolder = GetLayerFramesFolderPath(character, action, layerIndex);
         if (!Directory.Exists(framesFolder))
         {
             return SequenceEffectLayer.Empty(layerName, assetPrefix, multiplier);
@@ -202,9 +313,41 @@ internal sealed class SequenceEffectService
     }
 
     /// <summary>
+    /// 层里的帧 → 「格号 → PNG 路径」，给「导出底板（带特效）」查用。
+    ///
+    /// 键就是 <see cref="SequenceEffectFrame.Ordinal"/>（= 文件名里最后一段数字，和底板导出的
+    /// <c>帧NNNN</c> 同号），所以图层组 <c>帧0003</c> 直接拿 3 去查自己那一格的特效。
+    /// 没导入过 / 空层都返回空表（调用方照旧写空层，不是错误）。
+    /// </summary>
+    public static IReadOnlyDictionary<int, string> BuildFramePathsByOrdinal(SequenceEffectLayer? layer)
+    {
+        if (layer is null || !layer.HasFrames)
+        {
+            return new Dictionary<int, string>();
+        }
+
+        var paths = new Dictionary<int, string>();
+        foreach (var frame in layer.Frames)
+        {
+            if (frame.IsEmpty || string.IsNullOrWhiteSpace(frame.FilePath))
+            {
+                continue;
+            }
+
+            // 同一格有两张（人工往目录里塞的）时只认先来的那张，别让后面那张偷偷顶掉。
+            paths.TryAdd(frame.Ordinal, frame.FilePath);
+        }
+
+        return paths;
+    }
+
+    /// <summary>
     /// 把画好的特效帧导进来。
     /// <paramref name="expectedFrameCount"/> 由调用方按动作算（总格数 × 倍数）。
     /// 帧号取**文件名里最后一段数字** —— 导出底板那批 PNG 和这套编号同名，画完不用改名。
+    /// <paramref name="layerIndex"/> 是导进第几层（1 起；第 2 层落 <c>Effects2\</c>）。
+    /// <paramref name="progress"/>：清层 72% → 逐张落盘 75~99%；<paramref name="cancellationToken"/>
+    /// 每张之间查一次（清完层才发现不想导，也还来得及按下取消）。
     /// </summary>
     public SequenceEffectImportResult Import(
         CharacterCard character,
@@ -212,7 +355,9 @@ internal sealed class SequenceEffectService
         IReadOnlyList<string> sourceFiles,
         int expectedFrameCount,
         int multiplier = BasePlateExportPlanner.Multiplier,
-        string layerName = DefaultLayerName)
+        int layerIndex = DefaultLayerIndex,
+        IProgress<SequenceEffectImportProgress>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(sourceFiles);
         return ImportResolved(
@@ -221,15 +366,19 @@ internal sealed class SequenceEffectService
             ResolveSourceOrdinals(sourceFiles),
             expectedFrameCount,
             multiplier,
-            layerName);
+            layerIndex,
+            progress,
+            cancellationToken);
     }
 
     /// <summary>
     /// 按**给定的帧号**逐张收进特效层（第 N 帧落到第 N 格）。
     ///
-    /// 这条给"从底板 PSD 读回"用。帧号由那一侧**按图层组名**算出来（`帧0003` → 第 3 帧），
+    /// 这条给"从 PSD 导入"用。帧号由那一侧**按图层组名**算出来（`帧0003` → 第 3 帧），
     /// **不再假设"第几个文件就是第几帧"** —— 组少几个、缺的是哪几帧，落点都还对得上
     /// （晓桀 2026-09-25：「数量都可以不用完全对的上了」）。
+    ///
+    /// 进度 / 取消和 <see cref="Import"/> 是同一条。
     /// </summary>
     public SequenceEffectImportResult ImportStaged(
         CharacterCard character,
@@ -237,7 +386,9 @@ internal sealed class SequenceEffectService
         IReadOnlyList<SequenceEffectPsdImportService.StagedEffectFrame> stagedFrames,
         int expectedFrameCount,
         int multiplier = BasePlateExportPlanner.Multiplier,
-        string layerName = DefaultLayerName)
+        int layerIndex = DefaultLayerIndex,
+        IProgress<SequenceEffectImportProgress>? progress = null,
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(stagedFrames);
         return ImportResolved(
@@ -246,7 +397,9 @@ internal sealed class SequenceEffectService
             stagedFrames.Select(frame => (File: frame.FilePath, Ordinal: frame.Ordinal)),
             expectedFrameCount,
             multiplier,
-            layerName);
+            layerIndex,
+            progress,
+            cancellationToken);
     }
 
     private SequenceEffectImportResult ImportResolved(
@@ -255,7 +408,9 @@ internal sealed class SequenceEffectService
         IEnumerable<(string File, int Ordinal)> resolvedSources,
         int expectedFrameCount,
         int multiplier,
-        string layerName)
+        int layerIndex,
+        IProgress<SequenceEffectImportProgress>? progress,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(character);
         ArgumentNullException.ThrowIfNull(action);
@@ -264,15 +419,25 @@ internal sealed class SequenceEffectService
             throw new InvalidOperationException("这个动作没有帧，算不出特效该有多少张。");
         }
 
-        var framesFolder = GetLayerFramesFolderPath(character, action, layerName);
-        var cleared = ClearLayer(character, action, layerName);
+        var layerName = BuildLayerName(layerIndex);
+        var framesFolder = GetLayerFramesFolderPath(character, action, layerIndex);
+        Report(progress, $"正在清空第 {layerIndex} 层…", 72);
+        cancellationToken.ThrowIfCancellationRequested();
+        var cleared = ClearLayer(character, action, layerIndex);
         // 清空只删文件，目录本身第一次可能还不存在。
         Directory.CreateDirectory(framesFolder);
 
+        // 落成列表：下面要按序号报进度（`IEnumerable` 数不出总数）。
+        var sources = resolvedSources as IReadOnlyList<(string File, int Ordinal)>
+            ?? resolvedSources.ToList();
+        // 保底 1，免得空批次除零。
+        var total = Math.Max(1, sources.Count);
         var imported = 0;
         var ignored = 0;
-        foreach (var (file, ordinal) in resolvedSources)
+        for (var index = 0; index < sources.Count; index++)
         {
+            cancellationToken.ThrowIfCancellationRequested();
+            var (file, ordinal) = sources[index];
             if (ordinal > expectedFrameCount)
             {
                 ignored++;
@@ -288,27 +453,39 @@ internal sealed class SequenceEffectService
             var targetPath = Path.Combine(framesFolder, BuildFrameFileName(action.Code, layerName, ordinal));
             File.Copy(file, targetPath, overwrite: true);
             imported++;
+            Report(
+                progress,
+                $"正在收进第 {layerIndex} 层 {index + 1}/{sources.Count}…",
+                75 + (24.0 * (index + 1) / total));
         }
 
         var emptyFrames = expectedFrameCount - imported;
         return new SequenceEffectImportResult(imported, emptyFrames, ignored, cleared, framesFolder);
     }
 
-    /// <summary>清空这一层（只删层目录里的帧文件；层目录本身留着）。返回删掉几张。</summary>
+    /// <summary>报一条进度（没接进度条时是空操作）；百分比夹到 0~100。</summary>
+    private static void Report(
+        IProgress<SequenceEffectImportProgress>? progress,
+        string message,
+        double percent) =>
+        progress?.Report(new SequenceEffectImportProgress(message, Math.Clamp(percent, 0, 100)));
+
+    /// <summary>清空这一层（只删这一层目录里的帧文件；层目录本身留着）。返回删掉几张。</summary>
     public int ClearLayer(
         CharacterCard character,
         SequenceFrameAction action,
-        string layerName = DefaultLayerName)
+        int layerIndex = DefaultLayerIndex)
     {
-        var framesFolder = GetLayerFramesFolderPath(character, action, layerName);
+        var layerName = BuildLayerName(layerIndex);
+        var framesFolder = GetLayerFramesFolderPath(character, action, layerIndex);
         if (!Directory.Exists(framesFolder))
         {
             return 0;
         }
 
         var removed = 0;
-        // 落点现在是共用的 `Effects\`（不再有层名子目录），所以**只删这一层自己的帧** ——
-        // 以后一个动作有多条特效时，删 A 不能把 B 的一起删了。
+        // 一层一个目录（<c>Effects\</c> / <c>Effects2\</c>），但**只删这一层自己的帧**：
+        // 目录里可能被人塞了别的层的文件，删 A 不能把 B 的一起删了。
         foreach (var file in Directory.EnumerateFiles(framesFolder, "*.png"))
         {
             if (!IsFrameOfLayer(Path.GetFileName(file), action.Code, layerName))

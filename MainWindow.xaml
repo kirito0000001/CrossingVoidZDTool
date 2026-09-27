@@ -4920,13 +4920,13 @@
                                     <StackPanel x:Name="SequenceEffectPanel" Spacing="10">
                                         <StackPanel Spacing="3">
                                             <TextBlock Style="{StaticResource SectionTitleStyle}" Text="特效层" />
-                                            <TextBlock
+                                            <TextBlock x:Name="SequenceEffectLayerSummaryText"
                                                 Style="{StaticResource SubtleTextStyle}"
                                                 Text="{Binding SequenceFrames.EffectLayerSummary, Mode=OneWay}"
                                                 TextWrapping="Wrap" />
                                             <TextBlock
                                                 Style="{StaticResource SubtleTextStyle}"
-                                                Text="帧率是动作的 2 倍，和「导出底板」一一对应；没画的帧留空即可，同步到虚幻时是空关键帧。"
+                                                Text="点上面那行可以换层（第 1 层在 Effects\，第 2 层起在 Effects2\）；帧率是动作的 2 倍，和「导出底板」一一对应，没画的帧留空即可。"
                                                 TextWrapping="Wrap" />
                                         </StackPanel>
                                         <ToggleSwitch

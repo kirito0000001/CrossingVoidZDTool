@@ -175,6 +175,9 @@ internal sealed class SequenceFramesViewModel : ObservableObject
     /// <summary>「导出底板」：按动作帧率的 2 倍逐帧导出 PNG（给特效绘制对照用）。</summary>
     public AsyncRelayCommand? ExportBasePlatesCommand => _commands?.ExportBasePlatesCommand;
 
+    /// <summary>「导出底板（带特效）」：同上，但「特效」层里填已经画好的特效帧。</summary>
+    public AsyncRelayCommand? ExportBasePlatesWithEffectsCommand => _commands?.ExportBasePlatesWithEffectsCommand;
+
     /// <summary>
     /// 「导出」按钮的菜单内容（清单 + 命令）。壳启动时把它变成 <c>MenuFlyoutItem</c>。
     ///
@@ -185,7 +188,7 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         _commands?.ExportMenuActions ?? [];
 
     /// <summary>
-    /// 「导入特效帧」按钮的菜单内容（第一条 = 从底板 PSD 读回，第二条 = 选文件夹）。
+    /// 「导入特效帧」按钮的菜单内容（第一条 = 从 PSD 导入，第二条 = 选文件夹）。
     /// 和导出菜单同一套：清单是纯函数，命令在这里配一次，壳把这份数据变成菜单项 ——
     /// **菜单本体也在壳里建**，因为 `MainWindow.xaml` 的行数顶在棘轮上限上了。
     /// </summary>
@@ -204,6 +207,25 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     private SequenceEffectLayer? _effectLayer;
 
+    private int _effectLayerIndex = SequenceEffectService.DefaultLayerIndex;
+
+    /// <summary>
+    /// 现在在弄第几层（1 起）。一个动作可以有好几层特效，摘要文案要写清「第 N 层」，
+    /// 不然导进第 2 层之后面板上还是那句「N 帧」，人会以为是第 1 层。
+    /// 壳在切层 / 导入 / 打开编辑器时写进来。
+    /// </summary>
+    public int EffectLayerIndex
+    {
+        get => _effectLayerIndex;
+        private set
+        {
+            if (SetProperty(ref _effectLayerIndex, value))
+            {
+                OnPropertyChanged(nameof(EffectLayerSummary));
+            }
+        }
+    }
+
     /// <summary>当前动作的特效层；没导入过就是 null（界面显示"未导入"，不是错误）。</summary>
     public SequenceEffectLayer? EffectLayer
     {
@@ -220,7 +242,9 @@ internal sealed class SequenceFramesViewModel : ObservableObject
 
     public bool HasEffectLayer => EffectLayer?.HasFrames == true;
 
-    public string EffectLayerSummary => EffectLayer is null ? "未导入" : EffectLayer.SummaryText;
+    public string EffectLayerSummary => EffectLayer is null
+        ? $"第 {EffectLayerIndex} 层 · 未导入"
+        : $"第 {EffectLayerIndex} 层 · {EffectLayer.SummaryText}";
 
     private bool _showEffectLayer = true;
 
@@ -242,11 +266,17 @@ internal sealed class SequenceFramesViewModel : ObservableObject
         }
     }
 
-    /// <summary>壳在打开编辑器 / 导入 / 清空之后调用；传 null 表示这一层现在是空的。</summary>
-    public void SetEffectLayer(SequenceEffectLayer? layer)
+    /// <summary>
+    /// 壳在打开编辑器 / 导入 / 清空 / 切层之后调用；传 null 表示这一层现在是空的。
+    /// <paramref name="layerIndex"/> 是层号（1 起），摘要文案里要写「第 N 层」。
+    /// </summary>
+    public void SetEffectLayer(
+        SequenceEffectLayer? layer,
+        int layerIndex = SequenceEffectService.DefaultLayerIndex)
     {
+        EffectLayerIndex = layerIndex;
         EffectLayer = layer;
-        // 特效层换了（导入 / 清空 / 换动作），展开出来的那批小格也要跟着换图。
+        // 特效层换了（导入 / 清空 / 换动作 / 切层），展开出来的那批小格也要跟着换图。
         RebuildTimelineFrames();
     }
 
