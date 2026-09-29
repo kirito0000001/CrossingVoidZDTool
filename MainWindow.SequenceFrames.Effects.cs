@@ -400,7 +400,9 @@ namespace CrossingVoidZDTool
                 + $"{result.ImportedFrames}/{expectedFrameCount} 张"
                 + $"，空帧 {result.EmptyFrames}"
                 + (result.IgnoredFrames > 0 ? $"，忽略越界 {result.IgnoredFrames} 张" : string.Empty)
-                + (result.ClearedFrames > 0 ? $"，先清掉旧帧 {result.ClearedFrames} 张" : string.Empty));
+                + (result.ClearedFrames > 0
+                    ? $"，换掉旧帧 {result.ClearedFrames} 张（这一层别的帧原样留着）"
+                    : string.Empty));
             ShowFloatingTip(
                 InfoBarSeverity.Success,
                 $"特效已导入 {result.ImportedFrames} 张",

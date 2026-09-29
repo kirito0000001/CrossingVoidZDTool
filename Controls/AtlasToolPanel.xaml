@@ -195,6 +195,54 @@
                     OnContent="贴回原始画布尺寸" />
             </StackPanel>
 
+            <!-- 特效PSD -->
+            <StackPanel
+                x:Name="AtlasPsdEffectPanel"
+                Spacing="10"
+                Visibility="{Binding AtlasTools.IsPsdEffectToolSelected, Converter={StaticResource BooleanToVisibilityConverter}, Mode=OneWay}">
+                <TextBlock FontWeight="SemiBold" Text="输入" />
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox
+                        Header="多图层 PSD（一帧一个图层组）"
+                        IsReadOnly="True"
+                        PlaceholderText="点右边「浏览…」选一份 PSD"
+                        Text="{Binding AtlasTools.PsdEffectPsdPath, Mode=OneWay}" />
+                    <Button
+                        Grid.Column="1"
+                        VerticalAlignment="Bottom"
+                        Command="{Binding AtlasTools.PickPsdEffectPsdCommand}"
+                        Content="浏览…" />
+                </Grid>
+                <TextBox
+                    Header="名字（一个文件夹 + 文件名前缀）"
+                    PlaceholderText="例如 Ko_Effect → Ko_Effect\Ko_Effect_0001.png"
+                    Text="{Binding AtlasTools.PsdEffectName, Mode=TwoWay}" />
+                <Grid ColumnSpacing="8">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBox
+                        Header="输出目录（默认是工作区的 Tools\PSDEffect；它会在这下面按名字建一个子目录）"
+                        IsReadOnly="True"
+                        PlaceholderText="点右边「浏览…」换一个落点"
+                        Text="{Binding AtlasTools.PsdEffectOutputFolder, Mode=OneWay}" />
+                    <Button
+                        Grid.Column="1"
+                        VerticalAlignment="Bottom"
+                        Command="{Binding AtlasTools.PickPsdEffectOutputCommand}"
+                        Content="浏览…" />
+                </Grid>
+                <TextBlock
+                    Style="{StaticResource SubtleTextStyle}"
+                    Text="一个图层组合并成一张（组里名字以「原本帧」开头的那层跳过，那是对照底图）；帧号按图层顺序数 —— 图层列表里最下面那个组是第 1 帧，不看组名。落到 &lt;输出目录&gt;\&lt;名字&gt;\ 里，只清这个名字的旧帧，别的东西都留着。"
+                    TextWrapping="Wrap" />
+            </StackPanel>
+
             <Border
                 Height="1"
                 Background="{ThemeResource CardStrokeColorDefaultBrush}" />

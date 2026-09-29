@@ -22,6 +22,11 @@ internal interface IAtlasToolHost
 
     Task<AtlasExtractResult?> RunExtractAsync(AtlasExtractRequest request);
 
+    /// <summary>《特效PSD》的默认落点（<c>&lt;工作区&gt;\Tools\PSDEffect</c>）—— 只有壳知道工作区在哪。</summary>
+    string ResolvePsdEffectDefaultFolder();
+
+    Task<PsdEffectToolResult?> RunPsdEffectAsync(PsdEffectToolRequest request);
+
     void OpenFolder(string folderPath);
 }
 
@@ -43,6 +48,8 @@ internal sealed class AtlasToolViewModel : ObservableObject
         PickExtractImageCommand = new AsyncRelayCommand(() => PickExtractImageAsync());
         PickExtractDataCommand = new AsyncRelayCommand(() => PickExtractDataAsync());
         PickExtractOutputCommand = new AsyncRelayCommand(() => PickExtractOutputAsync());
+        PickPsdEffectPsdCommand = new AsyncRelayCommand(() => PickPsdEffectPsdAsync());
+        PickPsdEffectOutputCommand = new AsyncRelayCommand(() => PickPsdEffectOutputAsync());
         RunCommand = new AsyncRelayCommand(() => RunAsync(), () => !IsBusy && CanRun);
         OpenOutputFolderCommand = new RelayCommand(
             () => _host?.OpenFolder(LastOutputFolder),
@@ -53,6 +60,7 @@ internal sealed class AtlasToolViewModel : ObservableObject
     public void AttachHost(IAtlasToolHost host)
     {
         _host = host ?? throw new ArgumentNullException(nameof(host));
+        EnsurePsdEffectOutputFolder();
         OpenOutputFolderCommand.NotifyCanExecuteChanged();
         RunCommand.NotifyCanExecuteChanged();
     }
@@ -71,7 +79,9 @@ internal sealed class AtlasToolViewModel : ObservableObject
             {
                 OnPropertyChanged(nameof(IsCreateToolSelected));
                 OnPropertyChanged(nameof(IsExtractToolSelected));
+                OnPropertyChanged(nameof(IsPsdEffectToolSelected));
                 OnPropertyChanged(nameof(RunButtonText));
+                EnsurePsdEffectOutputFolder();
                 RunCommand.NotifyCanExecuteChanged();
             }
         }
@@ -81,7 +91,13 @@ internal sealed class AtlasToolViewModel : ObservableObject
 
     public bool IsExtractToolSelected => SelectedTool.Kind == AtlasToolKind.Extract;
 
-    public string RunButtonText => IsCreateToolSelected ? "开始打包" : "开始拆分";
+    public bool IsPsdEffectToolSelected => SelectedTool.Kind == AtlasToolKind.PsdEffect;
+
+    public string RunButtonText => IsCreateToolSelected
+        ? "开始打包"
+        : IsExtractToolSelected
+            ? "开始拆分"
+            : "开始导出";
 
     // ── 创建图集的参数 ─────────────────────────────────────────────────
     private string _createSourceFolder = string.Empty;
@@ -181,6 +197,40 @@ internal sealed class AtlasToolViewModel : ObservableObject
         set => SetProperty(ref _extractPasteBack, value);
     }
 
+    // ── 《特效PSD》的参数 ──────────────────────────────────────────────
+    private string _psdEffectPsdPath = string.Empty;
+    private string _psdEffectName = string.Empty;
+    private string _psdEffectOutputFolder = string.Empty;
+
+    /// <summary>要读的那份多图层 PSD（组名 <c>帧0001</c>… 那种，自己画的也行）。</summary>
+    public string PsdEffectPsdPath
+    {
+        get => _psdEffectPsdPath;
+        set { if (SetProperty(ref _psdEffectPsdPath, value)) { RunCommand.NotifyCanExecuteChanged(); } }
+    }
+
+    /// <summary>输出文件名的前缀：填 <c>Ko_Effect</c> 出 <c>Ko_Effect_0001.png</c>。</summary>
+    public string PsdEffectName
+    {
+        get => _psdEffectName;
+        set { if (SetProperty(ref _psdEffectName, value)) { RunCommand.NotifyCanExecuteChanged(); } }
+    }
+
+    public string PsdEffectOutputFolder
+    {
+        get => _psdEffectOutputFolder;
+        set { if (SetProperty(ref _psdEffectOutputFolder, value)) { RunCommand.NotifyCanExecuteChanged(); } }
+    }
+
+    /// <summary>切到这个工具时把默认落点填上（<c>&lt;工作区&gt;\Tools\PSDEffect</c>）—— 只有壳知道工作区在哪。</summary>
+    private void EnsurePsdEffectOutputFolder()
+    {
+        if (IsPsdEffectToolSelected && string.IsNullOrWhiteSpace(PsdEffectOutputFolder))
+        {
+            PsdEffectOutputFolder = _host?.ResolvePsdEffectDefaultFolder() ?? string.Empty;
+        }
+    }
+
     // ── 共用的运行 / 状态 / 输出 ────────────────────────────────────────
     private string _statusText = "选一个工具，填好输入，然后点右边的按钮。";
     private bool _isBusy;
@@ -224,9 +274,13 @@ internal sealed class AtlasToolViewModel : ObservableObject
 
     public bool CanRun => IsCreateToolSelected
         ? !string.IsNullOrWhiteSpace(CreateSourceFolder) && !string.IsNullOrWhiteSpace(CreateOutputFolder)
-        : !string.IsNullOrWhiteSpace(ExtractImagePath) &&
-          !string.IsNullOrWhiteSpace(ExtractDataPath) &&
-          !string.IsNullOrWhiteSpace(ExtractOutputFolder);
+        : IsExtractToolSelected
+            ? !string.IsNullOrWhiteSpace(ExtractImagePath) &&
+              !string.IsNullOrWhiteSpace(ExtractDataPath) &&
+              !string.IsNullOrWhiteSpace(ExtractOutputFolder)
+            : !string.IsNullOrWhiteSpace(PsdEffectPsdPath) &&
+              !string.IsNullOrWhiteSpace(PsdEffectName) &&
+              !string.IsNullOrWhiteSpace(PsdEffectOutputFolder);
 
     public AsyncRelayCommand PickCreateSourceCommand { get; }
 
@@ -237,6 +291,10 @@ internal sealed class AtlasToolViewModel : ObservableObject
     public AsyncRelayCommand PickExtractDataCommand { get; }
 
     public AsyncRelayCommand PickExtractOutputCommand { get; }
+
+    public AsyncRelayCommand PickPsdEffectPsdCommand { get; }
+
+    public AsyncRelayCommand PickPsdEffectOutputCommand { get; }
 
     public AsyncRelayCommand RunCommand { get; }
 
@@ -317,6 +375,34 @@ internal sealed class AtlasToolViewModel : ObservableObject
         }
     }
 
+    private async Task PickPsdEffectPsdAsync()
+    {
+        if (await PickFileAsync("选择要读的多图层 PSD", ".psd") is not { } file)
+        {
+            return;
+        }
+
+        PsdEffectPsdPath = file;
+        // 名字就是输出文件名前缀：选完 PSD 先用它的文件名顶上，不合适再改。
+        if (string.IsNullOrWhiteSpace(PsdEffectName))
+        {
+            PsdEffectName = Path.GetFileNameWithoutExtension(file);
+        }
+
+        EnsurePsdEffectOutputFolder();
+        StatusText = string.IsNullOrWhiteSpace(PsdEffectOutputFolder)
+            ? $"已选 {Path.GetFileName(file)}，再选一个输出目录。"
+            : $"已选 {Path.GetFileName(file)}，输出到：{PsdEffectOutputFolder}";
+    }
+
+    private async Task PickPsdEffectOutputAsync()
+    {
+        if (await PickFolderAsync("选择特效帧的输出目录") is { } folder)
+        {
+            PsdEffectOutputFolder = folder;
+        }
+    }
+
     // ── 跑 ─────────────────────────────────────────────────────────────
     private async Task RunAsync()
     {
@@ -347,7 +433,7 @@ internal sealed class AtlasToolViewModel : ObservableObject
                 LastOutputFolder = result.OutputDirectory;
                 StatusText = $"图集已生成：{Path.GetFileName(result.AtlasImagePath)}（{result.FrameCount} 张，{result.SizeText}）→ {result.OutputDirectory}";
             }
-            else
+            else if (IsExtractToolSelected)
             {
                 var request = new AtlasExtractRequest(
                     ExtractImagePath,
@@ -363,6 +449,22 @@ internal sealed class AtlasToolViewModel : ObservableObject
                 StatusText = result.PaddedToCanvasCount > 0
                     ? $"已拆出 {result.Frames.Count} 张（其中 {result.PaddedToCanvasCount} 张贴回原画布）→ {result.OutputDirectory}"
                     : $"已拆出 {result.Frames.Count} 张 → {result.OutputDirectory}";
+            }
+            else
+            {
+                var request = new PsdEffectToolRequest(
+                    PsdEffectPsdPath,
+                    PsdEffectName,
+                    PsdEffectOutputFolder);
+                if (await _host.RunPsdEffectAsync(request) is not { } result)
+                {
+                    return;
+                }
+
+                LastOutputFolder = result.OutputDirectory;
+                StatusText = result.FileCount == 0
+                    ? $"这份 PSD 里没有图层组，一张也没导出 → {result.OutputDirectory}"
+                    : $"已导出 {result.FileCount} 张：{result.FirstFileName} … 到第 {result.LastOrdinal} 帧 → {result.OutputDirectory}";
             }
         }
         finally

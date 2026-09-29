@@ -29,7 +29,8 @@ namespace CrossingVoidZDTool.Services;
 /// <list type="bullet">
 /// <item>目标帧数按动作算（总格数 × 倍数），超出的编号忽略并回报；缺的编号就是空帧；</item>
 /// <item>整张全透明的图也算空帧（用底板画的时候没动那几页，最容易是这种）；</item>
-/// <item>层目录**只留这一次导入的结果**，所以导入前先清空它。</item>
+/// <item>层目录里**只清这一遍要重写的那几个帧号**（晓桀 2026-09-28 选的「清多少写多少」）：
+/// 这份素材没画到的帧号原样留着 —— 只画了 31~47 也不会把这一层里 1~30 的老画带走。</item>
 /// </list>
 /// </summary>
 internal sealed class SequenceEffectService
@@ -346,8 +347,10 @@ internal sealed class SequenceEffectService
     /// <paramref name="expectedFrameCount"/> 由调用方按动作算（总格数 × 倍数）。
     /// 帧号取**文件名里最后一段数字** —— 导出底板那批 PNG 和这套编号同名，画完不用改名。
     /// <paramref name="layerIndex"/> 是导进第几层（1 起；第 2 层落 <c>Effects2\</c>）。
-    /// <paramref name="progress"/>：清层 72% → 逐张落盘 75~99%；<paramref name="cancellationToken"/>
-    /// 每张之间查一次（清完层才发现不想导，也还来得及按下取消）。
+    /// 清旧帧的口径是**清多少写多少**：只清这一遍要重写的帧号（= 这批素材里真有内容的帧），
+    /// 这一层里其它帧号一个不动（见 <see cref="ClearLayer(CharacterCard, SequenceFrameAction, int, IReadOnlyCollection{int})"/>）。
+    /// <paramref name="progress"/>：看要写哪几帧 70% → 清那几帧 72% → 逐张落盘 75~99%；
+    /// <paramref name="cancellationToken"/> 每张之间查一次（清完才发现不想导，也还来得及按下取消）。
     /// </summary>
     public SequenceEffectImportResult Import(
         CharacterCard character,
@@ -421,23 +424,22 @@ internal sealed class SequenceEffectService
 
         var layerName = BuildLayerName(layerIndex);
         var framesFolder = GetLayerFramesFolderPath(character, action, layerIndex);
-        Report(progress, $"正在清空第 {layerIndex} 层…", 72);
-        cancellationToken.ThrowIfCancellationRequested();
-        var cleared = ClearLayer(character, action, layerIndex);
-        // 清空只删文件，目录本身第一次可能还不存在。
-        Directory.CreateDirectory(framesFolder);
 
         // 落成列表：下面要按序号报进度（`IEnumerable` 数不出总数）。
         var sources = resolvedSources as IReadOnlyList<(string File, int Ordinal)>
             ?? resolvedSources.ToList();
         // 保底 1，免得空批次除零。
         var total = Math.Max(1, sources.Count);
-        var imported = 0;
+
+        // 先看清这一遍**真要写哪几帧**：越界的忽略、整张透明的算空帧（不落文件）。
+        // 要清的就是这一批帧号 —— 这份素材没画到的帧号一个都不碰（见 ClearLayer 的这个重载）。
+        Report(progress, $"正在看第 {layerIndex} 层要写哪几帧…", 70);
+        cancellationToken.ThrowIfCancellationRequested();
+        var toWrite = new List<(string File, int Ordinal)>();
         var ignored = 0;
-        for (var index = 0; index < sources.Count; index++)
+        foreach (var (file, ordinal) in sources)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var (file, ordinal) = sources[index];
             if (ordinal > expectedFrameCount)
             {
                 ignored++;
@@ -450,12 +452,31 @@ internal sealed class SequenceEffectService
                 continue;
             }
 
+            toWrite.Add((file, ordinal));
+        }
+
+        // 只清这一遍要重写的帧（同号只清一次）；这一层别的帧、别的目录一概不动。
+        Report(progress, $"正在清掉第 {layerIndex} 层要重写的 {toWrite.Count} 帧…", 72);
+        cancellationToken.ThrowIfCancellationRequested();
+        var cleared = ClearLayer(
+            character,
+            action,
+            layerIndex,
+            toWrite.Select(item => item.Ordinal).Distinct().ToArray());
+        // 清文件不建目录，目录本身第一次可能还不存在。
+        Directory.CreateDirectory(framesFolder);
+
+        var imported = 0;
+        for (var index = 0; index < toWrite.Count; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var (file, ordinal) = toWrite[index];
             var targetPath = Path.Combine(framesFolder, BuildFrameFileName(action.Code, layerName, ordinal));
             File.Copy(file, targetPath, overwrite: true);
             imported++;
             Report(
                 progress,
-                $"正在收进第 {layerIndex} 层 {index + 1}/{sources.Count}…",
+                $"正在收进第 {layerIndex} 层 {index + 1}/{toWrite.Count}…",
                 75 + (24.0 * (index + 1) / total));
         }
 
@@ -470,7 +491,13 @@ internal sealed class SequenceEffectService
         double percent) =>
         progress?.Report(new SequenceEffectImportProgress(message, Math.Clamp(percent, 0, 100)));
 
-    /// <summary>清空这一层（只删这一层目录里的帧文件；层目录本身留着）。返回删掉几张。</summary>
+    /// <summary>
+    /// 清空这一层（**整层**：只删这一层目录里的帧文件；层目录本身留着）。返回删掉几张。
+    ///
+    /// 这是「清空特效层」按钮那条路 —— 人明确要求整层重来。
+    /// **导入不走这条**：导入只清它这一遍要重写的帧号（下面那个重载），
+    /// 否则"只画了一部分"就会把这一层别的帧一起带走（晓桀 2026-09-27 报的"第一层被清空"）。
+    /// </summary>
     public int ClearLayer(
         CharacterCard character,
         SequenceFrameAction action,
@@ -494,6 +521,49 @@ internal sealed class SequenceEffectService
             }
 
             if (AtomicFileWriter.TryDelete(file))
+            {
+                removed++;
+            }
+        }
+
+        return removed;
+    }
+
+    /// <summary>
+    /// 只清这一层里**指定帧号**的帧，别的帧号一个不动。返回删掉几张。
+    ///
+    /// 导入走这条（晓桀 2026-09-28 选的「清多少写多少」）：一份只画了 31~47 的 PSD
+    /// 导进第 1 层，这一层里 1~30 那些老画原样留着。
+    ///
+    /// 帧号按**规范名**（<c>&lt;动作&gt;_&lt;层名&gt;_NNNN.png</c>）逐个对，
+    /// 所以目录里塞的别人的文件、别的层的文件都不会被误删。
+    /// </summary>
+    public int ClearLayer(
+        CharacterCard character,
+        SequenceFrameAction action,
+        int layerIndex,
+        IReadOnlyCollection<int> ordinals)
+    {
+        ArgumentNullException.ThrowIfNull(character);
+        ArgumentNullException.ThrowIfNull(action);
+        ArgumentNullException.ThrowIfNull(ordinals);
+        if (ordinals.Count == 0)
+        {
+            return 0;
+        }
+
+        var layerName = BuildLayerName(layerIndex);
+        var framesFolder = GetLayerFramesFolderPath(character, action, layerIndex);
+        if (!Directory.Exists(framesFolder))
+        {
+            return 0;
+        }
+
+        var removed = 0;
+        foreach (var ordinal in ordinals)
+        {
+            var path = Path.Combine(framesFolder, BuildFrameFileName(action.Code, layerName, ordinal));
+            if (File.Exists(path) && AtomicFileWriter.TryDelete(path))
             {
                 removed++;
             }

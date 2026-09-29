@@ -105,7 +105,7 @@ var tests = new (string Name, Action Run)[]
     ("底板按动作帧率的2倍逐帧切片", BasePlatePlannerSlicesEachCellByMultiplier),
     ("底板导出只留本次结果并写对照表", BasePlateExportWritesFramesAndManifest),
     ("带特效的底板导出把已画好的特效填进图层组", BasePlateExportCarriesDrawnEffectFramesIntoGroups),
-    ("特效按文件名编号对号入座并保留空帧", SequenceEffectImportMapsFramesByNumber),
+    ("特效按文件名编号对号入座、只清自己要重写的那几帧", SequenceEffectImportMapsFramesByNumber),
     ("特效层可读可清且不碰动作帧", SequenceEffectLayerLoadsAndClears),
     ("特效帧落点去掉了多余的两层，旧目录会自动搬上来", SequenceEffectFramesLiveDirectlyUnderEffects),
     ("一个动作的几层特效各写各的目录和文件名", SequenceEffectLayersAreIndependent),
@@ -125,7 +125,8 @@ var tests = new (string Name, Action Run)[]
     ("冷启动恢复现场不依赖方向与来源的先后", SessionRestoreDoesNotDependOnDirectionOrder),
     ("特效层预览也要提前缓存好", EffectPreviewIsPreloadedBeforePlayback),
     ("特效那一步隐藏了但没被拆掉", EffectStepIsHiddenButStillWired),
-    ("工具集清单里有创建与拆分图集", AtlasToolCatalogListsBuiltInTools),
+    ("工具集清单里有创建、拆分与特效PSD", AtlasToolCatalogListsBuiltInTools),
+    ("特效PSD按图层顺序出帧、按名字分文件夹且只清自己那套", PsdEffectToolOrdersFramesByLayerIntoNameFolder),
     ("拆分图集能把裁剪过的格子贴回原画布", AtlasExtractRestoresTrimmedSprites),
     ("创建图集会生成清单与命令行参数", AtlasFolderPackBuildsManifestAndArguments),
     ("虚幻发布快照拒绝草稿角色", UnrealBridgeToolboxSnapshotRejectsDraftCharacter),
@@ -5253,7 +5254,7 @@ static void BasePlateExportCarriesDrawnEffectFramesIntoGroups()
 }
 
 /// <summary>
-/// 工具集清单：现在有哪两个工具、两段文案齐不齐。
+/// 工具集清单：现在有哪几个工具、两段文案齐不齐。
 ///
 /// 文案分两段是排版要求：左栏卡片只放标题 + 一行短句（<c>Summary</c>），
 /// 完整说明（<c>Description</c>）挂在右栏标题下面。绑错成同一段，
@@ -5262,17 +5263,129 @@ static void BasePlateExportCarriesDrawnEffectFramesIntoGroups()
 static void AtlasToolCatalogListsBuiltInTools()
 {
     var tools = AtlasToolCatalog.Build();
-    AssertEqual(2, tools.Count);
+    AssertEqual(3, tools.Count);
     AssertEqual(AtlasToolKind.Create, tools[0].Kind);
     AssertEqual("创建图集", tools[0].Title);
     AssertEqual(AtlasToolKind.Extract, tools[1].Kind);
     AssertEqual("拆分图集", tools[1].Title);
+    AssertEqual(AtlasToolKind.PsdEffect, tools[2].Kind);
+    AssertEqual("特效PSD", tools[2].Title);
     AssertEqual(true, tools.All(tool => !string.IsNullOrWhiteSpace(tool.Summary)));
     AssertEqual(true, tools.All(tool => !string.IsNullOrWhiteSpace(tool.Description)));
     AssertEqual(true, tools.All(tool => !string.IsNullOrWhiteSpace(tool.Glyph)));
     // 简短就是简短：左栏那一行不该长到要折行（实测一行装得下 ~20 个汉字）。
     AssertEqual(true, tools.All(tool => tool.Summary.Length <= 24));
     AssertEqual(true, tools.All(tool => tool.Description.Length > tool.Summary.Length));
+}
+
+/// <summary>
+/// 《特效PSD》工具（晓桀 2026-09-28）：一份多图层 PSD → 一张张按名字规范好的特效帧。
+///
+/// 这条用例盯四件在盘上看得见的事：
+/// <list type="number">
+/// <item>默认落点 = 工作区里的 <c>Tools\PSDEffect</c>（壳只负责把工作区路径给它）；</item>
+/// <item>帧号按**图层顺序**数（最下面那个组是第 1 帧），**不看组名里的号** ——
+/// 所以下面故意把第 1 个组叫 <c>帧0003</c>、第 2 个叫 <c>帧0001</c>，出帧仍该是 0001 / 0002，
+/// 而且内容跟着组的先后走（晓桀：「因为新建的时机不一样，和底板导出的标准不一样」）；</item>
+/// <item>落到 <c>&lt;输出目录&gt;\&lt;名字&gt;\</c> 里，文件名 = 名字 + 序号（4 位补零）；</item>
+/// <item><b>只清这个名字目录里的旧帧</b> —— 换一个名字再跑一次，前一套帧和别的东西都得还在。</item>
+/// </list>
+/// </summary>
+static void PsdEffectToolOrdersFramesByLayerIntoNameFolder()
+{
+    var root = CreateTemporaryTestFolder();
+    const int canvas = 8;
+    try
+    {
+        var red = Path.Combine(root, "red.png");
+        var blue = Path.Combine(root, "blue.png");
+        WriteSolidImage(red, Color.Red, canvas, canvas);
+        WriteSolidImage(blue, Color.Blue, canvas, canvas);
+
+        // 两个组，**组名故意和先后反着来**（第 1 个叫 帧0003、第 2 个叫 帧0001）：
+        // 工具这条按图层顺序出帧，号该是 0001 / 0002，内容该跟着组的先后走。
+        var psd = Path.Combine(root, "effects.psd");
+        PsdWriter.WriteGrouped(
+            psd,
+            canvas,
+            canvas,
+            [],
+            [
+                new PsdLayerGroup(BasePlateExportPlanner.FormatFrameGroupName(3), [
+                    new PsdLayerSource(BasePlateExportPlanner.BasePlateLayerName, blue),
+                    new PsdLayerSource(BasePlateExportPlanner.EffectLayerName, red)]),
+                new PsdLayerGroup(BasePlateExportPlanner.FormatFrameGroupName(1), [
+                    new PsdLayerSource(BasePlateExportPlanner.BasePlateLayerName, red),
+                    new PsdLayerSource(BasePlateExportPlanner.EffectLayerName, blue)])
+            ]);
+
+        var output = PsdEffectToolService.ResolveDefaultOutputFolder(root);
+        AssertEqual(Path.Combine(root, "Tools", "PSDEffect"), output);
+        Directory.CreateDirectory(output);
+
+        // 别人留在输出目录里的东西、以及名字目录里已经有的东西：这一轮都不该动。
+        var keep = Path.Combine(output, "keep-me.txt");
+        File.WriteAllText(keep, "keep");
+        var nameFolder = Path.Combine(output, "Ko_Effect");
+        Directory.CreateDirectory(nameFolder);
+        var keepInNameFolder = Path.Combine(nameFolder, "keep-me-too.txt");
+        File.WriteAllText(keepInNameFolder, "keep");
+
+        var service = new PsdEffectToolService();
+        var first = service.Export(new PsdEffectToolRequest(psd, "Ko_Effect", output));
+        AssertEqual(2, first.FileCount);
+        AssertEqual(nameFolder, first.OutputDirectory);
+        AssertEqual("Ko_Effect_0001.png", first.FirstFileName);
+        AssertEqual(2, first.LastOrdinal);
+
+        var firstFrame = Path.Combine(nameFolder, "Ko_Effect_0001.png");
+        var secondFrame = Path.Combine(nameFolder, "Ko_Effect_0002.png");
+        AssertEqual(true, File.Exists(firstFrame));
+        AssertEqual(true, File.Exists(secondFrame));
+        // 号跟**组的先后**走：第 1 个组（组名 帧0003）里的红是第一帧，第 2 个组（帧0001）里的蓝是第二帧。
+        using (var readFirst = new Bitmap(firstFrame))
+        {
+            AssertEqual(Color.Red.ToArgb(), readFirst.GetPixel(0, 0).ToArgb());
+        }
+
+        using (var readSecond = new Bitmap(secondFrame))
+        {
+            AssertEqual(Color.Blue.ToArgb(), readSecond.GetPixel(0, 0).ToArgb());
+        }
+
+        AssertEqual(true, File.Exists(keep));
+        AssertEqual(true, File.Exists(keepInNameFolder));
+
+        // 换个名字再跑：各在自己的名字目录里，两套帧并存。
+        var second = service.Export(new PsdEffectToolRequest(psd, "Ko_EffectB", output));
+        AssertEqual(2, second.FileCount);
+        AssertEqual(Path.Combine(output, "Ko_EffectB"), second.OutputDirectory);
+        AssertEqual(true, File.Exists(firstFrame));
+        AssertEqual(true, File.Exists(Path.Combine(output, "Ko_EffectB", "Ko_EffectB_0001.png")));
+
+        // 同一个名字重跑：这个名字目录里的旧帧先清掉（多出来的那张不该留着），别的名字不受影响。
+        var stale = Path.Combine(nameFolder, "Ko_Effect_9999.png");
+        File.WriteAllBytes(stale, [1, 2, 3]);
+        var again = service.Export(new PsdEffectToolRequest(psd, "Ko_Effect", output));
+        AssertEqual(2, again.FileCount);
+        AssertEqual(false, File.Exists(stale));
+        AssertEqual(true, File.Exists(firstFrame));
+        AssertEqual(true, File.Exists(Path.Combine(output, "Ko_EffectB", "Ko_EffectB_0001.png")));
+        AssertEqual(true, File.Exists(keep));
+        AssertEqual(true, File.Exists(keepInNameFolder));
+
+        // 名字就是文件名前缀：空名字和带非法字符的名字当场拦下来（别等落盘才炸）。
+        AssertThrows(() => service.Export(new PsdEffectToolRequest(psd, "   ", output)));
+        AssertThrows(() => service.Export(new PsdEffectToolRequest(psd, "Ko/Effect", output)));
+
+        // 导入那条路的名字规则没跟着变（暂存夹里还是 0007.png，路径由调用方按层名拼）。
+        AssertEqual("0007.png", SequenceEffectPsdImportService.BuildFrameFileName(null, 7));
+        AssertEqual("Ko_Effect_0007.png", SequenceEffectPsdImportService.BuildFrameFileName("Ko_Effect", 7));
+    }
+    finally
+    {
+        Directory.Delete(root, recursive: true);
+    }
 }
 
 /// <summary>
@@ -5561,7 +5674,10 @@ static SequenceFrameItem CreateBasePlateTestFrame(
 
 /// <summary>
 /// 特效导入：文件名里最后那段数字就是帧号（和"导出底板"同名，画完直接导回来），
-/// 缺的编号是空帧、整张全透明的也算空帧、超出动作长度的忽略；导入前先清掉旧帧。
+/// 缺的编号是空帧、整张全透明的也算空帧、超出动作长度的忽略。
+///
+/// 清旧帧的口径是**清多少写多少**（晓桀 2026-09-28 选的）：只清这一遍要重写的帧号 ——
+/// "只导第 1 帧"不会把这一层里第 3、5 帧的老画带走，"整张透明的第 3 帧"连它自己的老画都不清。
 /// </summary>
 static void SequenceEffectImportMapsFramesByNumber()
 {
@@ -5604,17 +5720,38 @@ static void SequenceEffectImportMapsFramesByNumber()
         AssertEqual("Click_Effect", layer.AssetPrefix);
         AssertEqual(5, layer.SummaryText.Contains("空 2", StringComparison.Ordinal) ? 5 : 0);
 
-        // 再导一次：旧帧（含上一次多出来的）要被清掉，不会残留。
+        // 再导一次，这次只给第 1 帧：只清第 1 帧那张旧的，第 3、5 帧原样留着。
         var second = service.Import(
             character,
             action,
             [Path.Combine(drawnFolder, "Misaka_Click_0001.png")],
             expectedFrameCount: 5);
         AssertEqual(1, second.ImportedFrames);
-        AssertEqual(3, second.ClearedFrames);
+        AssertEqual(1, second.ClearedFrames);
         var reloaded = service.Load(character, action, expectedFrameCount: 5);
-        AssertEqual(1, reloaded.Frames.Count);
-        AssertEqual(4, reloaded.EmptyFrameCount);
+        AssertEqual(3, reloaded.Frames.Count);
+        AssertEqual(2, reloaded.EmptyFrameCount);
+        AssertEqual(1, reloaded.Frames[0].Ordinal);
+        AssertEqual(3, reloaded.Frames[1].Ordinal);
+        AssertEqual(5, reloaded.Frames[2].Ordinal);
+        // 留下来的那张还是原来的画（第 3 帧是蓝的），没被这场导入动过。
+        var layerFolder = SequenceEffectService.GetLayerFramesFolderPath(character, action);
+        using (var kept = new Bitmap(Path.Combine(layerFolder, "Click_Effect_0003.png")))
+        {
+            AssertEqual(Color.Blue.ToArgb(), kept.GetPixel(0, 0).ToArgb());
+        }
+
+        // 再导一次，这次只给"整张透明"的第 3 帧：透明帧不落文件、也不算要重写，
+        // 所以第 3 帧那张老画必须原样还在（"清多少写多少"的另一半：没画的不清）。
+        WriteSolidImage(Path.Combine(drawnFolder, "Misaka_Click_0003.png"), Color.Transparent, 40, 30);
+        var third = service.Import(
+            character,
+            action,
+            [Path.Combine(drawnFolder, "Misaka_Click_0003.png")],
+            expectedFrameCount: 5);
+        AssertEqual(0, third.ImportedFrames);
+        AssertEqual(0, third.ClearedFrames);
+        AssertEqual(3, service.Load(character, action, expectedFrameCount: 5).Frames.Count);
     }
     finally
     {

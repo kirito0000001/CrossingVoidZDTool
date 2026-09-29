@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Threading.Tasks;
+using CrossingVoidZDTool.Services;
 using CrossingVoidZDTool.Services.Atlas;
 using CrossingVoidZDTool.ViewModels;
 using Microsoft.UI.Xaml;
@@ -100,6 +101,60 @@ namespace CrossingVoidZDTool
                 return null;
             }
         }
+
+        /// <summary>
+        /// 跑《特效PSD》：一份多图层 PSD → 一张张按名字规范好的特效帧，落到用户选的目录。
+        /// 读法和「导入特效帧 → 从 PSD 导入…」共用（<see cref="SequenceEffectPsdImportService"/>），
+        /// 只是不碰工作区里的角色素材。
+        /// </summary>
+        async Task<PsdEffectToolResult?> IAtlasToolHost.RunPsdEffectAsync(PsdEffectToolRequest request)
+        {
+            var psdName = Path.GetFileName(request.PsdPath);
+            ShowGlobalProgress("特效PSD", psdName);
+            try
+            {
+                var progress = new Progress<SequenceEffectImportProgress>(update =>
+                    UpdateGlobalProgress(update.Message, update.Percent, psdName));
+                var cancellationToken = GetGlobalProgressCancellationToken();
+                var result = await Task.Run(
+                    () => new PsdEffectToolService().Export(request, progress, cancellationToken),
+                    cancellationToken);
+
+                CompleteGlobalProgress($"特效帧已导出：{result.FileCount} 张", result.OutputDirectory);
+                await HideGlobalProgressAfterDelayAsync(900);
+                AppendLog(LogKind.User,
+                    $"特效PSD：{psdName} → {result.FileCount} 张（{result.FirstFileName} … 第 {result.LastOrdinal} 帧，"
+                    + $"名字 {request.Name}）→ {result.OutputDirectory}");
+                try
+                {
+                    OpenFolderInExplorer(result.OutputDirectory);
+                }
+                catch (Exception openError)
+                {
+                    AppendLog(LogKind.Warning, "特效帧已导出，但没能自动打开输出目录。", openError);
+                }
+
+                return result;
+            }
+            catch (OperationCanceledException)
+            {
+                CompleteGlobalProgress("特效PSD 已取消", psdName);
+                await HideGlobalProgressAfterDelayAsync();
+                return null;
+            }
+            catch (Exception ex)
+            {
+                CompleteGlobalProgress("特效PSD 失败", ex.Message);
+                await HideGlobalProgressAfterDelayAsync();
+                ShowFloatingTip(InfoBarSeverity.Error, "特效PSD 失败", ex.Message);
+                AppendLog(LogKind.Error, "特效PSD 失败。", ex);
+                return null;
+            }
+        }
+
+        /// <summary>《特效PSD》的默认落点：工作区里的 <c>Tools\PSDEffect</c>（晓桀 2026-09-28 指定）。</summary>
+        string IAtlasToolHost.ResolvePsdEffectDefaultFolder() =>
+            PsdEffectToolService.ResolveDefaultOutputFolder(Settings.ProjectRootPath);
 
         Task<string?> IAtlasToolHost.PickFolderAsync(string title) =>
             _filePickerService.PickFolderAsync(PickerLocationId.ComputerFolder);

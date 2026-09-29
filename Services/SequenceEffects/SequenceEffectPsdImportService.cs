@@ -56,6 +56,76 @@ internal sealed class SequenceEffectPsdImportService
         IProgress<SequenceEffectImportProgress>? progress = null,
         CancellationToken cancellationToken = default)
     {
+        var document = ReadDocument(psdPath, outputFolder, progress, cancellationToken);
+        if (document.Width != expectedCanvasWidth || document.Height != expectedCanvasHeight)
+        {
+            throw new InvalidOperationException(
+                $"这份 PSD 的画布是 {document.Width}×{document.Height}，"
+                + $"这个动作的底板是 {expectedCanvasWidth}×{expectedCanvasHeight}——"
+                + "多半是挑到别的动作那份了（也可能这份是画布改过之后存的）。");
+        }
+
+        return StageDocument(
+            document,
+            expectedFrameCount,
+            outputFolder,
+            fileNamePrefix: null,
+            ordinalsByLayerOrder: false,
+            progress,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// 工具集《特效PSD》用：整份 PSD 一组合并成一帧，文件名按前缀规范成
+    /// <c>&lt;前缀&gt;_0001.png</c>（晓桀 2026-09-28）。
+    ///
+    /// 和 <see cref="StageFrames"/> 有三处不一样：
+    /// <list type="bullet">
+    /// <item>**不核对画布 / 帧数** —— 这里没有"某个动作的底板"可比，画布就是 PSD 自己的尺寸；</item>
+    /// <item>**帧号按图层顺序数**（1..N，第 1 个组 = 第 1 帧），不看组名里的号 ——
+    /// 工具这边攒的 PSD 没有底板导出那套组名规矩
+    /// （晓桀 2026-09-28：「因为新建的时机不一样，和底板导出的标准不一样」）；</item>
+    /// <item>**只清这个前缀的旧帧** —— 输出目录是用户自己挑的，里面可能还有别的东西，不能整目录清空。</item>
+    /// </list>
+    /// </summary>
+    public IReadOnlyList<StagedEffectFrame> StageGroups(
+        string psdPath,
+        string outputFolder,
+        string fileNamePrefix,
+        IProgress<SequenceEffectImportProgress>? progress = null,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(fileNamePrefix);
+        var document = ReadDocument(psdPath, outputFolder, progress, cancellationToken);
+        return StageDocument(
+            document,
+            expectedFrameCount: 0,
+            outputFolder,
+            fileNamePrefix.Trim(),
+            ordinalsByLayerOrder: true,
+            progress,
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// 输出文件名：导入那条是 <c>0001.png</c>（路径由调用方按层名拼），工具那条是
+    /// <c>&lt;前缀&gt;_0001.png</c>。号一律 4 位补零。**号本身两种来源**：
+    /// 导入那条是组名里的帧号（<c>帧0003</c> → 3），工具那条是图层顺序（第几个组）。
+    /// </summary>
+    public static string BuildFrameFileName(string? fileNamePrefix, int ordinal)
+    {
+        var number = ordinal.ToString("0000", CultureInfo.InvariantCulture);
+        var prefix = fileNamePrefix?.Trim();
+        return string.IsNullOrEmpty(prefix) ? $"{number}.png" : $"{prefix}_{number}.png";
+    }
+
+    /// <summary>解 PSD：把「文件在不在」和「开动了」两件事收在一处，两条入口共用。</summary>
+    private static PsdDocument ReadDocument(
+        string psdPath,
+        string outputFolder,
+        IProgress<SequenceEffectImportProgress>? progress,
+        CancellationToken cancellationToken)
+    {
         ArgumentException.ThrowIfNullOrWhiteSpace(psdPath);
         ArgumentException.ThrowIfNullOrWhiteSpace(outputFolder);
         if (!File.Exists(psdPath))
@@ -68,16 +138,23 @@ internal sealed class SequenceEffectPsdImportService
         // 解 PSD 是这条链上最慢的一步（逐通道 PackBits 解完整张画布），进度条从这一步就开始动。
         Report(progress, "正在解这份 PSD…", 5);
         cancellationToken.ThrowIfCancellationRequested();
+        return PsdReader.Read(psdPath);
+    }
 
-        var document = PsdReader.Read(psdPath);
-        if (document.Width != expectedCanvasWidth || document.Height != expectedCanvasHeight)
-        {
-            throw new InvalidOperationException(
-                $"这份 PSD 的画布是 {document.Width}×{document.Height}，"
-                + $"这个动作的底板是 {expectedCanvasWidth}×{expectedCanvasHeight}——"
-                + "多半是挑到别的动作那份了（也可能这份是画布改过之后存的）。");
-        }
-
+    /// <summary>
+    /// 组 → 逐帧合并 → 落盘：两条入口的公共后半段（见 <see cref="StageFrames"/>）。
+    /// <paramref name="ordinalsByLayerOrder"/> 为真时帧号按**图层顺序** 1..N（工具那条），
+    /// 否则按组名末尾的数字认（导入那条，见 <see cref="ResolveGroupOrdinals"/>）。
+    /// </summary>
+    private static IReadOnlyList<StagedEffectFrame> StageDocument(
+        PsdDocument document,
+        int expectedFrameCount,
+        string outputFolder,
+        string? fileNamePrefix,
+        bool ordinalsByLayerOrder,
+        IProgress<SequenceEffectImportProgress>? progress,
+        CancellationToken cancellationToken)
+    {
         var groups = CollectGroups(document.Layers);
         if (groups.Count == 0)
         {
@@ -88,8 +165,10 @@ internal sealed class SequenceEffectPsdImportService
                 + "用「导出 ▾ → 导出底板」重出一份，别在旧版（一帧一层）的文件上画。");
         }
 
-        var ordinals = ResolveGroupOrdinals(groups);
-        if (groups.Count != expectedFrameCount)
+        var ordinals = ordinalsByLayerOrder
+            ? BuildPositionalOrdinals(groups.Count)
+            : ResolveGroupOrdinals(groups);
+        if (expectedFrameCount > 0 && groups.Count != expectedFrameCount)
         {
             ToolboxLog.Info(
                 $"从 PSD 导入特效帧：读到 {groups.Count} 个图层组，这个动作有 {expectedFrameCount} 帧 —— "
@@ -98,7 +177,7 @@ internal sealed class SequenceEffectPsdImportService
 
         if (Directory.Exists(outputFolder))
         {
-            ClearFolder(outputFolder);
+            ClearFolder(outputFolder, fileNamePrefix);
         }
 
         Directory.CreateDirectory(outputFolder);
@@ -111,8 +190,7 @@ internal sealed class SequenceEffectPsdImportService
             var canvas = ComposeGroup(
                 groups[index].Layers, document.Width, document.Height, ref skippedBasePlateLayers);
             var ordinal = ordinals[index];
-            var path = Path.Combine(
-                outputFolder, $"{ordinal.ToString("0000", CultureInfo.InvariantCulture)}.png");
+            var path = Path.Combine(outputFolder, BuildFrameFileName(fileNamePrefix, ordinal));
             WritePng(path, canvas, document.Width, document.Height);
             staged.Add(new StagedEffectFrame(path, ordinal));
             Report(
@@ -208,13 +286,22 @@ internal sealed class SequenceEffectPsdImportService
 
         ToolboxLog.Info(
             "从 PSD 导入特效帧：组名认不出帧号（被人改过名？），这一轮按**组的先后**排帧。");
-        var positional = new int[groups.Count];
-        for (var index = 0; index < groups.Count; index++)
+        return BuildPositionalOrdinals(groups.Count);
+    }
+
+    /// <summary>
+    /// 按组的先后排帧号 1..N。方向是**图层记录的顺序**（从下往上，见 <see cref="CollectGroups"/>），
+    /// 也就是图层列表里**最下面**那个组是第 1 帧。
+    /// </summary>
+    private static int[] BuildPositionalOrdinals(int count)
+    {
+        var ordinals = new int[count];
+        for (var index = 0; index < count; index++)
         {
-            positional[index] = index + 1;
+            ordinals[index] = index + 1;
         }
 
-        return positional;
+        return ordinals;
     }
 
     /// <summary>
@@ -363,10 +450,21 @@ internal sealed class SequenceEffectPsdImportService
         bitmap.Save(path, ImageFormat.Png);
     }
 
-    private static void ClearFolder(string folder)
+    /// <summary>
+    /// 清掉这一轮要重写的帧。<paramref name="fileNamePrefix"/> 为空（导入那条：目录是工具箱自己的暂存夹）
+    /// 就是整目录；有前缀（工具那条：目录是用户自己挑的）只删 <c>&lt;前缀&gt;_*.png</c>，
+    /// 别的东西和别的前缀一律不碰。
+    /// </summary>
+    private static void ClearFolder(string folder, string? fileNamePrefix = null)
     {
         foreach (var file in Directory.EnumerateFiles(folder))
         {
+            if (!string.IsNullOrEmpty(fileNamePrefix)
+                && !Path.GetFileName(file).StartsWith($"{fileNamePrefix}_", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
             AtomicFileWriter.TryDelete(file);
         }
     }
